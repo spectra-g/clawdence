@@ -1,0 +1,82 @@
+[project]
+name = "clawdence"
+version = "0.1.0.dev0"
+description = "Workflow-driven orchestration for AI coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "The Clawdence authors" }]
+keywords = ["agents", "orchestration", "workflow", "llm"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
+
+# Runtime dependencies are deliberately empty for now. Every dependency added
+# from here on is pinned to an exact version and resolved through uv.lock —
+# pinning from the first commit rather than retrofitting it later.
+dependencies = []
+
+[project.scripts]
+clawdence = "clawdence.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/spectra-g/clawdence"
+
+[dependency-groups]
+dev = [
+    "mypy==2.3.0",
+    "pre-commit==4.6.1",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.0",
+]
+
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clawdence"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit
+    "A",    # flake8-builtins
+    "C4",   # comprehensions
+    "PTH",  # use pathlib
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"] # asserts are the point of a test
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["src/clawdence"]
+branch = true

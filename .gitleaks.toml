@@ -1,0 +1,15 @@
+# Gitleaks configuration.
+#
+# Deliberately thin: the upstream default ruleset is the thing being maintained,
+# and every local override is a hole someone has to remember. Add rules here
+# only for credential shapes upstream does not cover (a Clawdence-issued token
+# format, say), and add allowlist entries only with a comment saying why the
+# match is provably not a secret.
+
+title = "clawdence"
+
+[extend]
+useDefault = true
+
+# No allowlist. There is nothing in this repository today that needs one, and an
+# empty default-deny is the honest starting position.

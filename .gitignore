@@ -1,0 +1,101 @@
+# --- Secrets and configuration -------------------------------------------
+# Config files are the likelier leak, not .env: they hold tokens, webhook URLs
+# and repo credentials, and they look innocuous while doing it. Ignore them by
+# default; allow-list the templates.
+.env
+.env.*
+!.env.template
+!.env.example
+*.env
+
+config.toml
+config.yaml
+config.yml
+config.json
+config.local.*
+*.local.toml
+*.local.yaml
+*.local.yml
+*.local.json
+settings.toml
+settings.yaml
+settings.yml
+secrets.*
+credentials.*
+.clawd/
+.clawdence/
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*.gpg
+*.asc
+
+# Cloud / tool credential caches
+.aws/
+.gcloud/
+.netrc
+.npmrc
+.pypirc
+gha-creds-*.json
+
+# --- Runtime state --------------------------------------------------------
+data/
+workspaces/
+worktrees/
+repos/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Node (HQ) ------------------------------------------------------------
+node_modules/
+npm-debug.log*
+.pnpm-store/
+
+# --- Editors and OS -------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# --- Private planning corpus ----------------------------------------------
+# The rebuild plan, the architecture notes, the ADRs and the S0 spike report.
+# This repository is public; that material is not, pending the M3 reassessment
+# in ADR-0001. It lives here on purpose so the working directory is complete —
+# it is simply never committed. Nothing under version control may link to it.
+/planning/
+
+# --- Scratch --------------------------------------------------------------
+tmp/
+scratch/
