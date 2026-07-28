@@ -326,6 +326,18 @@
       "title": "Require Full Test Suite",
       "type": "boolean"
     },
+    "runner_image": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Runner Image"
+    },
     "test_command": {
       "default": [],
       "items": {

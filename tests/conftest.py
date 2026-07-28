@@ -55,6 +55,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "contract: part of the port contract suite — every adapter must pass it (`make contract`).",
     )
+    config.addinivalue_line(
+        "markers",
+        "docker: needs a real container daemon (`make docker-tests`). Skipped by default — "
+        "these pull an image, which costs the network the rest of the suite is denied.",
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,14 @@ def main(argv: list[str]) -> int:
             print(f"plan bytes: {len(data.encode('utf-8'))}", flush=True)
             if value:
                 Path(value).write_text(data, encoding="utf-8")
+        elif action == "spawn":
+            # A background process that outlives this one and inherits its
+            # stdout — a dev server, a build daemon, a language server. The
+            # inherited pipe is the point: it stays open after this process is
+            # killed, and so the run's transport does too.
+            subprocess.Popen(  # noqa: S603 - argv, no shell
+                [sys.executable, "-c", f"import time; time.sleep({float(value)})"]
+            )
         elif action == "sleep":
             time.sleep(float(value))
         elif action == "sigkill":

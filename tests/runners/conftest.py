@@ -25,6 +25,7 @@ from clawdence.domain import (
     VerificationContract,
 )
 from tests.conftest import RepoFactory
+from tests.harness.engine import FakeEngine
 from tests.harness.repos import FixtureRepo
 
 START = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
@@ -53,6 +54,35 @@ def host_profile(**overrides: object) -> RepoProfile:
     }
     fields.update(overrides)
     return RepoProfile.model_validate(fields)
+
+
+#: An image reference that is digest-pinned and does not exist. Pinned because
+#: the runner refuses a tag (§3.8) and every hermetic test would otherwise be
+#: testing that refusal; non-existent because nothing here reaches a registry.
+PINNED_IMAGE = "registry.invalid/clawdence/runner@sha256:" + "0" * 64
+
+
+def container_profile(**overrides: object) -> RepoProfile:
+    """A profile the container runner will accept.
+
+    ``CONTAINER`` is the ``RepoProfile`` default, so unlike ``host_profile``
+    this is not correcting anything — it exists so a test reads as being about
+    the container tier rather than about a default it happens to inherit.
+    """
+    fields: dict[str, object] = {
+        "id": "repo.fixture",
+        "name": "fixture",
+        "remote_url": "https://forge.invalid/fixture",
+        "isolation_tier": IsolationTier.CONTAINER,
+    }
+    fields.update(overrides)
+    return RepoProfile.model_validate(fields)
+
+
+@pytest.fixture
+def fake_engine(tmp_path: Path) -> FakeEngine:
+    """A container engine that records what it was asked for, and obeys."""
+    return FakeEngine(root=tmp_path / "engine")
 
 
 @pytest.fixture

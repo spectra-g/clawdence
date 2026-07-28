@@ -33,8 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
-from clawdence.runners import AgentCommand, PlanDelivery
-from clawdence.runners.host import TokenPrice
+from clawdence.runners import AgentCommand, PlanDelivery, TokenPrice
 from clawdence.runners.stream import Accumulation
 
 #: The script this drives. Beside this module, so moving one moves the other.
@@ -109,6 +108,14 @@ class FakeAgent:
     def sleep(self, seconds: float) -> Self:
         """Do nothing for a while — a runner that has stopped making progress."""
         return self._add("sleep", seconds)
+
+    def spawn(self, seconds: float) -> Self:
+        """Leave a background process behind, holding this one's stdout.
+
+        Ordinary agent behaviour — a dev server, a watcher, a build daemon — and
+        the reason killing the agent is not the same as being finished with it.
+        """
+        return self._add("spawn", seconds)
 
     def sigkill(self) -> Self:
         """Die the way the OOM killer kills things."""

@@ -146,6 +146,13 @@ class RepoProfile(DomainModel):
     needs_docker: bool = False
     isolation_tier: IsolationTier = IsolationTier.CONTAINER
 
+    #: Base image for the container tiers, overriding the runner's own default
+    #: (§3.8). Digest-pinned: a tag is a mutable pointer, and resolving one at
+    #: dispatch means executing whatever was pushed over it since the last run.
+    #: Absent for most repositories — it exists because corporate adopters have a
+    #: mandated base image and no way to publish it anywhere this project reaches.
+    runner_image: str | None = None
+
     test_reporter: TestReporter = TestReporter.NONE
     e2e_runner: E2EPolicy = E2EPolicy.SKIP
     require_full_test_suite: bool = False

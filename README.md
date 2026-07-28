@@ -5,11 +5,11 @@ Workflow-driven orchestration for AI coding agents.
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
 setup, the domain model, a workflow engine that executes `script` steps, a state store that records
 runs so they survive the process, the ports every integration will sit behind — with an in-memory
-implementation of each — and a runner that executes a coding agent against a git worktree, on this
-machine, with no isolation. There is no container tier, no network policy and no agent step, and
-nothing yet decides which repository a piece of work belongs to. It can run a coding agent; it
-cannot run a sprint. It is public early so the build is inspectable from the start, not because any
-of it is ready to use.
+implementation of each — and a runner that executes a coding agent against a git worktree, either
+on this machine or inside an ephemeral container. There is no network policy and no agent step,
+nothing caches dependencies between runs, and nothing yet decides which repository a piece of work
+belongs to. It can run a coding agent; it cannot run a sprint. It is public early so the build is
+inspectable from the start, not because any of it is ready to use.
 
 ## Decisions taken so far
 
@@ -134,10 +134,19 @@ uv run pytest -m contract   # or: make contract-tests
 ## The runner
 
 [`src/clawdence/runners/`](src/clawdence/runners/) hands a plan and a worktree to a coding agent
-CLI and turns what comes back into a result. One tier exists so far — `host`, a subprocess on this
-machine — and it is for local development only. It refuses a repository profile that asks for
-anything stronger rather than quietly downgrading it, because a repo configured for `container`
-running unisolated is not a smaller version of the intended behaviour.
+CLI and turns what comes back into a result. Two tiers exist:
+
+- **`container`** — the default. An ephemeral container per run with the worktree bind-mounted at
+  the same absolute path it has on the host, every capability dropped, a read-only root filesystem,
+  a pid and memory ceiling, and no docker socket. One mount goes in, so the other repositories in
+  the registry are not permission-checked — they are absent from the filesystem.
+- **`host`** — a subprocess on this machine, for local development only. It has no isolation at
+  all, and it is never a default.
+
+Each refuses a repository profile that asks for the other rather than quietly substituting, because
+a repo configured for `container` running unisolated is not a smaller version of the intended
+behaviour. Both are the same runner with four things swapped — what gets spawned, what the agent's
+environment starts from, what the tier can report afterwards, and what has to be given back.
 
 The interesting half is the contract around the process, most of which exists because v1 learned
 it the hard way:
@@ -158,7 +167,17 @@ it the hard way:
   of it can reach a pull request.
 - **No control-plane credential is in the environment to steal.** The child's environment is built
   from an allowlist, and the runner refuses to start if a chat, tracker or VCS credential is in it.
-  A test asserts that from inside a running agent.
+  A test asserts that from inside a running agent — and on the container tier, from inside a real
+  container. A credential the runner *is* meant to have reaches it by name rather than by value,
+  so it never appears in a command line.
+- **Runner images are pinned by digest.** A tag is a mutable pointer, and resolving one at dispatch
+  means executing whatever was pushed over it since the last run. Refused unless explicitly opted
+  out of.
+
+The claims that are only meaningful from inside a container — capabilities, the read-only root, the
+memory cap, the absent sibling repository — are checked against a real daemon by `make docker-tests`
+rather than asserted about a command line. They are opt-in because they need Docker and a network,
+and the rest of the suite has neither.
 
 ## Development
 
@@ -169,6 +188,7 @@ needs installing.
 make setup           # sync the toolchain, install the git hooks
 make check           # lint + typecheck + test + schema, exactly what CI runs
 make contract-tests  # the port contract suite, against every adapter
+make docker-tests    # the container tier against a real daemon (needs docker or podman)
 make schema          # regenerate schemas/ after changing the domain model
 make schema-test     # assert schemas/ is current and the contracts round-trip
 make scan            # gitleaks over the working tree and the history

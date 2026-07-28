@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,7 +33,9 @@ from clawdence.runners import (
     PlanDelivery,
     TokenPrice,
 )
-from clawdence.runners.host import WORK_DIR, _kill, _kill_and_reap
+from clawdence.runners import process as process_module
+from clawdence.runners.agent import WORK_DIR
+from clawdence.runners.process import kill, kill_and_reap
 from tests.harness.agent import FakeAgent, missing_command
 from tests.harness.repos import FixtureRepo
 from tests.ports.contract import RunnerContract
@@ -672,6 +675,28 @@ def test_a_cancelled_run_leaves_no_child_behind(request_for: RequestFactory) -> 
     assert marker not in _process_table()
 
 
+def test_a_process_the_agent_left_behind_does_not_hang_the_run(
+    request_for: RequestFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent that starts a dev server and is then killed for a timeout.
+
+    The grandchild holds the same stdout, so the pipe does not close and waiting
+    for the transport waits for *it* — the run produces no result, no failure and
+    no timeout, and there is nothing for the watchdog to recover because the
+    dispatch is still politely waiting. Bounding the reap is what turns that into
+    a ``TIMED_OUT`` result at the moment the timeout was supposed to fire.
+    """
+    monkeypatch.setattr(process_module, "REAP_TIMEOUT_SECONDS", 0.5)
+    agent = FakeAgent().spawn(6).sleep(30)
+
+    started = time.monotonic()
+    result = run(HostRunner(agent.command()).dispatch(request_for(wall_clock_seconds=0.5)))
+    elapsed = time.monotonic() - started
+
+    assert result.outcome is RunnerOutcome.TIMED_OUT
+    assert elapsed < 5, "the run waited for a process it had already given up on"
+
+
 def test_reaping_a_process_that_already_exited_does_nothing() -> None:
     """The race the watchdog creates: a step is declared overdue at the moment
     it finishes. Killing what is already gone must not raise."""
@@ -679,8 +704,8 @@ def test_reaping_a_process_that_already_exited_does_nothing() -> None:
     async def already_done() -> int | None:
         process = await asyncio.create_subprocess_exec(sys.executable, "-c", "pass")
         await process.wait()
-        _kill(process)
-        await _kill_and_reap(process)
+        kill(process)
+        await kill_and_reap(process)
         return process.returncode
 
     assert run(already_done()) == 0

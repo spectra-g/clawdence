@@ -10,17 +10,24 @@ the fact describes a design; this one is meant to constrain it.
 
 > **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
 > executes `script` steps, a state store, the ports every integration will sit behind — with
-> in-memory implementations, not real adapters — and **one runner, the `host` tier, which has no
-> isolation at all**. There is no container tier, no egress policy, no agent step and no ingestion.
-> Most controls below are **Designed**, not **Built**. Do not point this at anything you care
-> about, and do not expose it to input from people you do not trust, until the ingress and egress
-> controls are built and this notice is gone.
+> in-memory implementations, not real adapters — and **two runner tiers**: `host`, which has no
+> isolation at all, and `container`, which has the plane split. There is **no egress policy**, no
+> agent step and no ingestion. Many controls below are **Designed**, not **Built**. Do not point
+> this at anything you care about, and do not expose it to input from people you do not trust,
+> until the ingress and egress controls are built and this notice is gone.
+>
+> The `container` tier makes the plane split real — one bind mount, every capability dropped, a
+> read-only root, no Docker socket, resource caps the kernel enforces — and the claims that are
+> only meaningful from inside a container are asserted from inside a real one (`make docker-tests`).
+> **What it does not do is bound the network.** It runs on an ordinary bridge and does not consult
+> `RepoProfile.egress` at all, so an agent that has been persuaded to exfiltrate can still reach
+> the internet. That is the single largest gap in this document today.
 >
 > The `host` runner exists for local development and says so in three places: the plan calls it
 > "never a default", `Ports` does not wire it, and it refuses any repository profile that asks for
 > a stronger tier rather than quietly downgrading. Its mitigations are the ones that do not need an
 > isolation boundary — an environment allowlist, a re-derived diff, a size-capped verdict, resource
-> and budget caps that kill the process. Everything that needs a boundary is still missing.
+> and budget caps that kill the process.
 
 ---
 
@@ -79,17 +86,17 @@ worst realistic outcome, not the average one.
 |---|---|---|---|---|
 | **T1** | Prompt injection via repository content | **High** | A2, A4 | Designed |
 | **T2** | Prompt injection via request text | **High** | A2, A4, A5 | Designed |
-| **T3** | Secret exfiltration by the runner | Medium | **A1, A2** | Designed |
-| **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | Designed |
+| **T3** | Secret exfiltration by the runner | Medium | **A1, A2** | Partly built — plane split built, egress designed |
+| **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | **Built** (container tier) |
 | **T5** | Model-generated destructive command | **High** | A2, A3 | Partly accepted |
 | **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Designed + policy |
-| **T7** | Resource exhaustion of the host | **High** | A3 | Designed |
+| **T7** | Resource exhaustion of the host | **High** | A3 | Partly built — caps built, reaper designed |
 | **T8** | Financial exhaustion | **High** | A5 | Built (schema) + designed |
 | **T9** | Unauthorised submission | **High** | A5, A4 | Designed |
 | **T10** | Webhook forgery | Medium | A5, A4 | Designed |
 | **T11** | Secrets written into the audit trail | **High** | A1, A6 | Partly built + designed |
-| **T12** | Poisoned runner base image | Low | **A1, A2, A3** | Designed |
-| **T13** | Worktree path treated as trusted input | Low | A3 | Designed |
+| **T12** | Poisoned runner base image | Low | **A1, A2, A3** | Partly built — digest pinning enforced |
+| **T13** | Worktree path treated as trusted input | Low | A3 | Partly built |
 | **T14** | Memory poisoning via discovery notes | Medium | A2, A4 | Designed |
 | **T15** | Approval bypass or self-approval | Medium | A4 | Built (schema) + designed |
 | **T16** | Command injection via workflow arguments | Medium | A2, A3 | **Built** |
@@ -147,12 +154,24 @@ package registries, and configured MCP servers, and denies everything else inclu
 remote. There is a documented `unrestricted` escape hatch which is off by default; enabling it
 removes this control entirely and the documentation says so.
 
-There is an automated assertion for the first half of this claim, and it now exists for the `host`
-tier: the runner builds its child's environment from an allowlist rather than filtering one down,
-refuses outright to start with a control-plane variable in it, and a test dumps the environment
-from *inside* a running agent and asserts that the chat, tracker, VCS and cloud credentials are
-absent. The second half — the other configured repositories being provably unreachable — needs an
-isolation boundary to test against and arrives with the container tier.
+Both halves of the first claim are now asserted automatically, and on the `container` tier they are
+asserted from inside a real container. The runner builds the agent's environment from an allowlist
+rather than filtering one down and refuses outright to start with a control-plane variable in it; a
+live test runs `env` inside the container and checks that the chat, tracker, VCS and cloud
+credentials are absent. The second half — the other configured repositories being unreachable — is
+now checked the same way: a sibling repository is created on the host, and reading it from inside
+the container fails, because there is no mount that would make it reachable rather than a permission
+check that could be wrong.
+
+The credentials the runner *is* meant to have are passed to the container **by name, not by value**:
+`-e NAME=value` puts a secret in the engine client's command line, which anything on the host can
+read, while `-e NAME` has the engine take it from the client's environment, which it cannot. A live
+test asserts both — that the value never appears in the client's argv, and that it still arrives.
+
+What is **not** mitigated yet is the egress half, and the container tier does not pretend otherwise:
+it runs on a normal bridge network and `RepoProfile.egress` is not consulted at all. A repository
+configured with `allow_git_remote: false` today has a container that can still reach a git remote.
+S7b is where that field starts meaning something.
 
 Two exceptions are honest rather than hidden. A repository that configures an MCP server hands the
 runner a bearer token, resolved by name and injected per run; and the runner is given a *scoped*
@@ -167,6 +186,12 @@ inside the runner, so this adversary starts with the runner's full privileges.
 This is why the runner's privileges are the security boundary rather than the runner's behaviour:
 we assume arbitrary code executes there and design for it. T3's egress allowlist, T7's resource
 caps, and the plane split are all sized for an adversary that is already inside.
+
+**Built on the container tier**, and the flags are the mitigation rather than a description of one:
+every capability dropped, `no-new-privileges` so a setuid binary in the image cannot escalate past
+it, a read-only root filesystem, a `/tmp` that is a `nosuid,nodev,noexec` tmpfs, and the container
+running as the invoking user rather than root. Live tests read `/proc/self/status` and attempt a
+write outside the worktree, so these are checked as kernel behaviour rather than as argv.
 
 **Residual:** a dependency that exfiltrates through an allowed destination — a package registry
 that accepts publishes, for instance — is not stopped by an allowlist that permits that registry.
@@ -223,6 +248,15 @@ for dead containers, stale worktrees, and orphaned image layers. Failures are di
 cause — timeout, OOM kill, disk full, non-zero exit, empty diff, tests failed, budget exceeded,
 network denied — because a retry policy that cannot tell an OOM kill from a flaky test will treat
 them identically, which is how a resource problem becomes an infinite loop.
+
+**Built** for CPU, memory, process count and wall clock on the container tier, with live tests that
+exhaust memory and fork past the ceiling and check that the run is killed rather than the host. Two
+gaps are named rather than implied. **Disk is largely uncapped**: `ResourceCaps.disk_mb` reaches the
+engine only where the storage driver supports a quota, which is not the common case, and the
+worktree is a host bind mount that no container flag bounds — `/tmp` is a sized tmpfs and that is
+all. **There is no reaper**; containers are removed by the run that created them, including when it
+is cancelled, but nothing collects what a crashed control plane left behind. Both are the rest
+of S7.
 
 ### T8 · Financial exhaustion
 
@@ -321,6 +355,14 @@ A compromised one is a compromise of every run.
 **Mitigations:** images pinned by digest rather than tag, scanned in CI, containing the toolchain
 and the runner CLI and nothing else. Users can supply their own, which many will need to — and
 that shifts this risk to them, which is the honest description of what it does.
+
+The pinning half is **built and enforced**: the container runner refuses a reference without a
+digest at dispatch rather than resolving a tag, because a tag is a mutable pointer and running one
+means executing whatever was pushed over it since the last run. `allow_unpinned_image=True` is the
+documented way out, for local development against an image that has no digest yet. Overriding the
+image is a three-level choice — the repository's `runner_image`, then a per-build-system default,
+then the runner's own — which is what a corporate adopter with a mandated base image needs. What is
+**not** built: this project publishes no images, so there is nothing to scan in CI yet.
 
 ### T13 · Worktree path treated as trusted input
 
@@ -438,8 +480,8 @@ should not exist.
 
 | Tier | Addresses | Does **not** address | Use when |
 |---|---|---|---|
-| `host` — subprocess, no isolation | nothing | T3, T4, T5, T7 | Local development only. Never a default, never for work from anyone else. |
-| `container` — ephemeral, worktree bind-mount, **no Docker socket** | T4, T5, T7, and T3 once the egress allowlist is enforced | T13 by construction (the mount is the point) | **The default.** Covers most repositories. |
+| `host` — subprocess, no isolation — **built** | nothing | T3, T4, T5, T7 | Local development only. Never a default, never for work from anyone else. |
+| `container` — ephemeral, worktree bind-mount, **no Docker socket** — **built** | T4, T5, T7, and the *host* half of T3 | T13 by construction (the mount is the point); the *network* half of T3, until S7b — it runs on a normal bridge and does not consult `RepoProfile.egress` | **The default.** Covers most repositories. |
 | `container+docker:socket` | T4 and T7 only | **T3, T5, T6 — and it voids the egress allowlist and the plane split** | Trusted submitter, operator's own repository, opt-in, loudly warned. **Forbidden for publicly ingested work.** |
 | `container+docker:dind-rootless` | T4, T5, T6, T7, T3 | sibling containers remain outside the runner's network policy | Repositories needing testcontainers where the work is not fully trusted. |
 | `microvm` | T3, T4, T5, T6, T7, with a kernel boundary rather than a namespace one | — | **Deferred.** The interface is open so this can land later without reshaping anything above it; there is no implementation today. |
@@ -490,16 +532,21 @@ The honest summary. Most of this is not built.
 | Commit-time and full-history secret scanning | T11 | **Built** |
 | Metadata-only audit payloads; honestly-false `redacted` flag | T11 | **Built** |
 | Bounded capture; deletable state tables (not append-only) | T20 | **Built** |
-| Plane split — scoped credentials, one worktree | T3, T4, T5 | Designed |
-| Container isolation, resource caps, disk reaper | T4, T5, T7 | Designed |
-| Egress allowlist | **T1, T2, T3** | Designed |
+| Plane split — scoped credentials, one worktree | T3, T4, T5 | **Built**, and asserted from inside a real container |
+| Container isolation — one mount, all capabilities dropped, no new privileges, read-only root, no Docker socket | T4, T5 | **Built** |
+| Resource caps — CPU, memory, pids, wall clock | T7 | **Built**; disk only where the storage driver supports a quota |
+| Credentials passed to the container by name, never through a command line | T3, T18 | **Built** |
+| Digest-pinned runner image, refused unless pinned | T12 | **Built** |
+| Disk reaper for crashed runs, stale worktrees, orphaned layers | T7 | Designed (rest of S7) |
+| Dependency caching between runs | — | Designed (rest of S7) |
+| Egress allowlist | **T1, T2, T3** | Designed (S7b) — **not enforced by the container tier today** |
 | Socket-mode provenance gating; rootless DinD | T6 | Designed |
 | Submitter authorization, rate limits, size caps | T9, T8 | Designed |
 | Webhook signature verification | T10 | Designed |
 | Redaction at write time | T11 | Designed (seam built, S4b fills it) |
 | Backup and restore of the state store | T20 | Designed |
-| Digest-pinned, CI-scanned base images | T12 | Designed |
-| Untrusted-output handling for runner paths | T13 | Designed |
+| CI-scanned base images | T12 | Designed — nothing is published yet, so there is nothing to scan |
+| Untrusted-output handling for runner paths | T13 | **Partially built** — the worktree path is refused as a mount if it is a filesystem root or a top-level directory, and refused outright if it contains a character the engine's mount parser reads as structure |
 | Injection discipline for retrieved context | T14 | Designed |
 | Authentication on the control surface | T19 | Designed |
 | A named, non-skippable security regression suite | all | Designed |
