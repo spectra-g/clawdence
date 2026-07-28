@@ -9,11 +9,18 @@ It is written *before* the execution machinery exists, deliberately. A threat mo
 the fact describes a design; this one is meant to constrain it.
 
 > **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
-> executes `script` steps, a state store, and the ports every integration will sit behind — with
-> in-memory implementations, not real adapters. There is no runner, no agent step, no ingestion,
-> and no isolation. Most controls below are **Designed**, not **Built**. Do not point this at
-> anything you care about, and do not expose it to input from people you do not trust, until the
-> ingress and egress controls are built and this notice is gone.
+> executes `script` steps, a state store, the ports every integration will sit behind — with
+> in-memory implementations, not real adapters — and **one runner, the `host` tier, which has no
+> isolation at all**. There is no container tier, no egress policy, no agent step and no ingestion.
+> Most controls below are **Designed**, not **Built**. Do not point this at anything you care
+> about, and do not expose it to input from people you do not trust, until the ingress and egress
+> controls are built and this notice is gone.
+>
+> The `host` runner exists for local development and says so in three places: the plan calls it
+> "never a default", `Ports` does not wire it, and it refuses any repository profile that asks for
+> a stronger tier rather than quietly downgrading. Its mitigations are the ones that do not need an
+> isolation boundary — an environment allowlist, a re-derived diff, a size-capped verdict, resource
+> and budget caps that kill the process. Everything that needs a boundary is still missing.
 
 ---
 
@@ -140,9 +147,17 @@ package registries, and configured MCP servers, and denies everything else inclu
 remote. There is a documented `unrestricted` escape hatch which is off by default; enabling it
 removes this control entirely and the documentation says so.
 
-There is an automated assertion planned for this specific claim: from inside a runner, the
-control-plane credentials must be provably absent and the other configured repositories provably
-unreachable. It is a test, not a review checklist.
+There is an automated assertion for the first half of this claim, and it now exists for the `host`
+tier: the runner builds its child's environment from an allowlist rather than filtering one down,
+refuses outright to start with a control-plane variable in it, and a test dumps the environment
+from *inside* a running agent and asserts that the chat, tracker, VCS and cloud credentials are
+absent. The second half — the other configured repositories being provably unreachable — needs an
+isolation boundary to test against and arrives with the container tier.
+
+Two exceptions are honest rather than hidden. A repository that configures an MCP server hands the
+runner a bearer token, resolved by name and injected per run; and the runner is given a *scoped*
+model API key of its own, which is a credential even though it is not the control plane's. The
+boundary is "no control-plane secrets", not "no secrets".
 
 ### T4 · Malicious dependency executed during install or test
 

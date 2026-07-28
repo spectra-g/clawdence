@@ -134,8 +134,8 @@ class RefusingRunner:
     """The default. Refuses, naming the step that will make it work.
 
     Registered wherever a ``RunnerPort`` is required and none is configured, so
-    that "we forgot to wire the runner" surfaces as an error naming S6 rather
-    than as a workflow that reports success for work nobody did.
+    that "we forgot to wire the runner" surfaces as an error naming what to wire
+    rather than as a workflow that reports success for work nobody did.
     """
 
     __slots__ = ()
@@ -143,7 +143,8 @@ class RefusingRunner:
     async def dispatch(self, request: RunnerRequest) -> RunnerResult:
         raise PermanentError(
             "no-runner",
-            f"no runner is configured, so {request.stage_id!r} cannot execute — S6 adds one",
+            f"no runner is configured, so {request.stage_id!r} cannot execute — "
+            f"wire clawdence.runners.HostRunner, or the container runner S7 adds",
         )
 
     async def cancel(self, request: RunnerRequest) -> bool:

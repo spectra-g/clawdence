@@ -225,7 +225,7 @@ class TestTimeoutKillsTheChild:
 class TestRegistry:
     @pytest.mark.parametrize(
         ("step_type", "owner"),
-        [(StepType.AGENT, "S12"), (StepType.RUNNER, "S6"), (StepType.APPROVAL, "S17")],
+        [(StepType.AGENT, "S12"), (StepType.RUNNER, "S11"), (StepType.APPROVAL, "S17")],
     )
     def test_unimplemented_types_refuse_and_name_their_step(
         self, step_type: StepType, owner: str

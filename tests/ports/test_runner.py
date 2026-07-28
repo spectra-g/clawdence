@@ -23,7 +23,7 @@ def test_the_default_runner_refuses_and_names_the_step() -> None:
     with pytest.raises(PermanentError) as caught:
         run(RefusingRunner().dispatch(make.runner_request("code")))
     assert caught.value.kind == "no-runner"
-    assert "S6" in caught.value.message
+    assert "HostRunner" in caught.value.message
     assert caught.value.retryable is False
 
 

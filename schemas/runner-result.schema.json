@@ -154,10 +154,11 @@
       "type": "object"
     },
     "RunnerOutcome": {
-      "description": "The failure taxonomy from the plan's §3.7.\n\nv1 collapsed nearly all of these into \"runner failed\", which meant the\nretry policy could not tell a flaky test from a budget cap from an OOM\nkill — and so treated them identically. Each value here needs different\nhandling, which is the entire reason they are distinct.",
+      "description": "The failure taxonomy from the plan's §3.7.\n\nv1 collapsed nearly all of these into \"runner failed\", which meant the\nretry policy could not tell a flaky test from a budget cap from an OOM\nkill — and so treated them identically. Each value here needs different\nhandling, which is the entire reason they are distinct.\n\n``BLOCKED`` is the one value not in the plan's §3.7 list, added in S6 when\nthe runner needed somewhere to put \"the agent stopped because something\noutside its control was missing\". Reporting that as ``TESTS_FAILED`` gets it\nretried until the attempts run out, which is v1's behaviour and how a budget\nis spent re-discovering that a fixture still does not exist. It is a failure\nthat a second identical attempt cannot change, so it halts to a human.",
       "enum": [
         "succeeded",
         "tests-failed",
+        "blocked",
         "empty-diff",
         "non-zero-exit",
         "timed-out",

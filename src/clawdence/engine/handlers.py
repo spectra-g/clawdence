@@ -3,10 +3,13 @@
 The executor owns control flow and knows nothing about step types; handlers own
 step types and know nothing about control flow. That split is what lets S12
 (agent), S6 (runner) and S17 (approval) each arrive as one registration without
-reopening the executor.
+reopening the executor — and S6 did arrive exactly that way, as
+``clawdence.runners.RunnerHandler``.
 
-M1 ships one real handler. The other three fail loudly with an error naming the
-step that will implement them, rather than succeeding vacuously — a stub that
+The default registry still ships one handler, because a ``runner`` step needs a
+repository, a worktree and a branch, and choosing those is triage's job (S11).
+The other three fail loudly with an error naming the step that will supply what
+they are missing, rather than succeeding vacuously — a stub that
 returns success makes a workflow look like it ran, which is the most expensive
 possible way to be wrong about an orchestrator. ``StubHandler`` exists for tests
 and for S3c's dry-run, and has to be registered deliberately.
@@ -84,18 +87,28 @@ class StepHandler(Protocol):
 
 
 class UnimplementedHandler:
-    """Refuses, naming the step that will make it work."""
+    """Refuses, naming the step that will make it work.
 
-    __slots__ = ("_owner", "_step_type")
+    ``why`` exists because "not implemented" stopped being the whole truth for
+    ``runner`` steps at S6: the runner is built and tested, and what is missing
+    is the part that decides which repository, worktree and branch to point it
+    at. Saying "not implemented" there would send somebody looking for code that
+    is already written.
+    """
 
-    def __init__(self, step_type: StepType, owner: str) -> None:
+    __slots__ = ("_owner", "_step_type", "_why")
+
+    def __init__(
+        self, step_type: StepType, owner: str, *, why: str = "are not implemented yet"
+    ) -> None:
         self._step_type = step_type
         self._owner = owner
+        self._why = why
 
     async def __call__(self, ctx: StepContext) -> HandlerOutcome:
         raise StepFailure(
             "step-type-not-implemented",
-            f"{self._step_type.value!r} steps are not implemented yet — {self._owner} adds them",
+            f"{self._step_type.value!r} steps {self._why} — {self._owner} adds them",
             retryable=False,
         )
 
@@ -295,7 +308,14 @@ def default_registry(environ: Mapping[str, str] | None = None) -> HandlerRegistr
         {
             StepType.SCRIPT: ScriptHandler(environ),
             StepType.AGENT: UnimplementedHandler(StepType.AGENT, "S12"),
-            StepType.RUNNER: UnimplementedHandler(StepType.RUNNER, "S6"),
+            StepType.RUNNER: UnimplementedHandler(
+                StepType.RUNNER,
+                "S11",
+                why=(
+                    "have a runner (clawdence.runners, S6) but nothing that chooses a "
+                    "repository, worktree and branch to point it at"
+                ),
+            ),
             StepType.APPROVAL: UnimplementedHandler(StepType.APPROVAL, "S17"),
         }
     )

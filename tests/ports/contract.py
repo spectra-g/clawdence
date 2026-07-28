@@ -521,7 +521,15 @@ class VcsContract:
 
 
 class RunnerContract:
-    """Dispatch is idempotent, and results are validated before they are used."""
+    """Dispatch is idempotent, and results are validated before they are used.
+
+    Two fixtures rather than one, because a real runner needs a request pointed
+    at something real. ``make_request`` defaults to the same in-memory request
+    the fakes use; an adapter that executes anything overrides it with one
+    naming a worktree it can actually run in. The *obligations* do not change —
+    an adapter that needed the contract weakened would be an adapter the fakes
+    are the only things meeting.
+    """
 
     pytestmark = pytest.mark.contract
 
@@ -529,24 +537,34 @@ class RunnerContract:
     def runner(self) -> RunnerPort:
         raise NotImplementedError
 
-    def test_dispatch_answers_the_request(self, runner: RunnerPort) -> None:
-        request = make.runner_request("code")
+    @pytest.fixture
+    def make_request(self) -> Callable[..., RunnerRequest]:
+        return make.runner_request
+
+    def test_dispatch_answers_the_request(
+        self, runner: RunnerPort, make_request: Callable[..., RunnerRequest]
+    ) -> None:
+        request = make_request("code")
         result = run(runner.dispatch(request))
         assert (result.run_id, result.stage_id) == (request.run_id, request.stage_id)
 
-    def test_dispatch_is_idempotent_on_the_key(self, runner: RunnerPort) -> None:
+    def test_dispatch_is_idempotent_on_the_key(
+        self, runner: RunnerPort, make_request: Callable[..., RunnerRequest]
+    ) -> None:
         """Two dispatches of one attempt means two agents editing one worktree,
         and two charges for one story. The watchdog recovering a step whose
         container is still alive is how that happens in practice."""
-        request = make.runner_request("code")
+        request = make_request("code")
         first = run(runner.dispatch(request))
         second = run(runner.dispatch(request))
         assert second == first
 
-    def test_a_second_attempt_is_a_different_dispatch(self, runner: RunnerPort) -> None:
+    def test_a_second_attempt_is_a_different_dispatch(
+        self, runner: RunnerPort, make_request: Callable[..., RunnerRequest]
+    ) -> None:
         """``attempt`` is in the key, so a retry is genuinely new work."""
-        first = make.runner_request("code", attempt=1)
-        second = make.runner_request("code", attempt=2)
+        first = make_request("code", attempt=1)
+        second = make_request("code", attempt=2)
         assert first.idempotency_key != second.idempotency_key
         run(runner.dispatch(first))
         run(runner.dispatch(second))
@@ -557,10 +575,12 @@ class RunnerContract:
         fields = set(RunnerRequest.model_fields)
         assert not {name for name in fields if "secret" in name or "token" in name}
 
-    def test_cancelling_something_settled_is_false_not_an_error(self, runner: RunnerPort) -> None:
+    def test_cancelling_something_settled_is_false_not_an_error(
+        self, runner: RunnerPort, make_request: Callable[..., RunnerRequest]
+    ) -> None:
         """The watchdog deciding a step is overdue races the step reporting.
         That race is normal and must not itself produce a failure."""
-        request = make.runner_request("code")
+        request = make_request("code")
         run(runner.dispatch(request))
         assert run(runner.cancel(request)) is False
 

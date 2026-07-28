@@ -4,10 +4,12 @@ Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
 setup, the domain model, a workflow engine that executes `script` steps, a state store that records
-runs so they survive the process, and the ports every integration will sit behind — with an
-in-memory implementation of each. There is no real runner and no agent step, so it can run a build,
-not a sprint. It is public early so the build is inspectable from the start, not because any of it
-is ready to use.
+runs so they survive the process, the ports every integration will sit behind — with an in-memory
+implementation of each — and a runner that executes a coding agent against a git worktree, on this
+machine, with no isolation. There is no container tier, no network policy and no agent step, and
+nothing yet decides which repository a piece of work belongs to. It can run a coding agent; it
+cannot run a sprint. It is public early so the build is inspectable from the start, not because any
+of it is ready to use.
 
 ## Decisions taken so far
 
@@ -64,7 +66,9 @@ Two things it does deliberately differently from the engines it borrows its shap
   control plane's own — which is where the API keys live.
 
 `agent`, `runner` and `approval` steps parse and validate, and refuse to run with an error naming
-the work that will implement them.
+what they are still missing. The runner step is the interesting one of the three: the runner itself
+is built, and what has not been built is the part that decides which repository, worktree and
+branch to point it at.
 
 ## The state store
 
@@ -126,6 +130,35 @@ instead of per integration:
 ```sh
 uv run pytest -m contract   # or: make contract-tests
 ```
+
+## The runner
+
+[`src/clawdence/runners/`](src/clawdence/runners/) hands a plan and a worktree to a coding agent
+CLI and turns what comes back into a result. One tier exists so far — `host`, a subprocess on this
+machine — and it is for local development only. It refuses a repository profile that asks for
+anything stronger rather than quietly downgrading it, because a repo configured for `container`
+running unisolated is not a smaller version of the intended behaviour.
+
+The interesting half is the contract around the process, most of which exists because v1 learned
+it the hard way:
+
+- **Output streams while it runs.** v1 captured it all and delivered it at the end, so forty
+  minutes of an agent going nowhere looked exactly like forty minutes of progress.
+- **Eleven outcomes, not "failed".** Timeout, OOM kill, disk full, non-zero exit, empty diff,
+  failing tests, budget exceeded, network denied, blocked, cancelled, startup failure. They are
+  handled differently — failing tests are worth another attempt, an agent blocked on a missing
+  dependency is worth a human — and a taxonomy with one value cannot express that.
+- **Budgets abort mid-run.** Tokens are counted off the stream as they are reported and the
+  process is killed when the cap is passed. A dollar cap with no configured prices is refused at
+  dispatch rather than accepted and ignored.
+- **The worktree is treated as output, not as a workspace.** The diff is re-derived with `git`
+  rather than taken from the agent's word, the verdict file is size-capped and never followed
+  through a symlink, git is invoked with the config knobs that execute programs pinned off, and
+  everything the runner installs — plan, verdict, conventions file — is excluded from git so none
+  of it can reach a pull request.
+- **No control-plane credential is in the environment to steal.** The child's environment is built
+  from an allowlist, and the runner refuses to start if a chat, tracker or VCS credential is in it.
+  A test asserts that from inside a running agent.
 
 ## Development
 

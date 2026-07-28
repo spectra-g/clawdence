@@ -36,10 +36,18 @@ class RunnerOutcome(StrEnum):
     retry policy could not tell a flaky test from a budget cap from an OOM
     kill — and so treated them identically. Each value here needs different
     handling, which is the entire reason they are distinct.
+
+    ``BLOCKED`` is the one value not in the plan's §3.7 list, added in S6 when
+    the runner needed somewhere to put "the agent stopped because something
+    outside its control was missing". Reporting that as ``TESTS_FAILED`` gets it
+    retried until the attempts run out, which is v1's behaviour and how a budget
+    is spent re-discovering that a fixture still does not exist. It is a failure
+    that a second identical attempt cannot change, so it halts to a human.
     """
 
     SUCCEEDED = "succeeded"
     TESTS_FAILED = "tests-failed"
+    BLOCKED = "blocked"
     EMPTY_DIFF = "empty-diff"
     NON_ZERO_EXIT = "non-zero-exit"
     TIMED_OUT = "timed-out"

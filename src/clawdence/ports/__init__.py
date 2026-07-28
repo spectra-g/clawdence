@@ -108,7 +108,7 @@ class Ports:
 
     The defaults are the ones that do nothing and say so: no secrets, no
     notifications, no tracker, no memory, and a runner that refuses while naming
-    S6. A control plane assembled with no configuration therefore runs script
+    what to wire. A control plane assembled with no configuration runs script
     workflows and fails clearly on everything else, which is exactly what it can
     honestly do today.
 

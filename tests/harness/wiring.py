@@ -13,30 +13,30 @@ types executes end to end, on fakes, with no network and no spend. That is a
 statement about whether the ports *compose*, which is not answerable from unit
 tests of each one.
 
-S6, S12 and S17 replace each of these with a real handler. When they do, the
-fake *ports* stay — they become those handlers' test doubles, which is why the
-port fakes are in ``clawdence.ports`` and only the wiring is here. The runner
-handler below is deliberately the thinnest possible request/dispatch/unwrap: the
-real I/O contract (plan augmentation, verdict files, token parsing, stub
-carry-over) is §3.9 and belongs to S6, and sketching it here would mean S6
-inherits guesses made by a test fixture.
+S12 and S17 replace the remaining two with real handlers. When they do, the fake
+*ports* stay — they become those handlers' test doubles, which is why the port
+fakes are in ``clawdence.ports`` and only the wiring is here.
+
+**S6 already did that to the runner.** What was a sketch here is now
+``clawdence.runners.RunnerHandler``, and this module imports it rather than
+keeping a second version: two handlers that both claim to know what a runner
+step does is how the harness starts testing something the product does not
+contain. What stays here is the part that is genuinely a test's business — which
+repository, worktree and branch — because the real answer comes from triage
+(S11) and inventing one in the product would be S6 deciding a later step's
+question.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 from pydantic import JsonValue
 
 from clawdence.domain import (
-    Budget,
     ContractKind,
     RepoProfile,
-    RunnerOutcome,
-    RunnerRequest,
-    RunnerStage,
     StepType,
     VerificationContract,
 )
@@ -46,9 +46,9 @@ from clawdence.engine import (
     ScriptHandler,
     StepContext,
     StepFailure,
-    idempotency_key,
 )
-from clawdence.ports import PortError, Ports, RunnerPort
+from clawdence.ports import Ports
+from clawdence.runners import Dispatch, RunnerHandler
 from tests.harness.cassette import Cassette
 
 
@@ -79,87 +79,6 @@ class CassetteAgentHandler:
             "max_turns": getattr(stage, "max_turns", None),
         }
         return HandlerOutcome(output=await self.cassette.play(request))
-
-
-@dataclass(slots=True)
-class PortRunnerHandler:
-    """A ``runner`` step dispatched through ``RunnerPort``.
-
-    The failure taxonomy is honoured rather than collapsed: only ``SUCCEEDED``
-    is a success, ``TESTS_FAILED`` and ``TIMED_OUT`` are retryable failures, and
-    an empty diff is not. That distinction is the reason ``RunnerOutcome`` has
-    eleven values, and a handler that mapped all of them to "failed" would make
-    the enum decorative.
-    """
-
-    runner: RunnerPort
-    profile: RepoProfile
-    work_item_id: str
-    branch: str
-    base_commit: str
-    worktree_path: str
-    contract: VerificationContract = field(
-        default_factory=lambda: VerificationContract(kind=ContractKind.TEST_AFTER)
-    )
-    budget: Budget = field(default_factory=Budget)
-
-    #: Outcomes a second attempt could plausibly change. An OOM kill or a
-    #: budget cap will not, so retrying those spends the budget more slowly
-    #: rather than differently.
-    retryable: frozenset[RunnerOutcome] = frozenset(
-        {
-            RunnerOutcome.TESTS_FAILED,
-            RunnerOutcome.TIMED_OUT,
-            RunnerOutcome.STARTUP_FAILED,
-            RunnerOutcome.NETWORK_DENIED,
-        }
-    )
-
-    async def __call__(self, ctx: StepContext) -> HandlerOutcome:
-        stage = ctx.stage
-        if not isinstance(stage, RunnerStage):  # pragma: no cover - the registry routes by type
-            raise StepFailure("wrong-handler", f"{stage.id} is not a runner stage")
-
-        request = RunnerRequest(
-            run_id=ctx.run_id,
-            stage_id=stage.id,
-            work_item_id=self.work_item_id,
-            worktree_path=self.worktree_path,
-            branch=self.branch,
-            base_commit=self.base_commit,
-            profile=self.profile,
-            contract=self.contract,
-            budget=stage.budget or self.budget,
-            plan=f"execute {stage.id}",
-            # The same derivation the ledger uses, so a redelivered dispatch
-            # collides with the row the previous incarnation wrote instead of
-            # running the work twice.
-            idempotency_key=idempotency_key(ctx.run_id, stage.id, ctx.attempt),
-            created_at=datetime.now(UTC),
-        )
-
-        try:
-            result = await self.runner.dispatch(request)
-        except PortError as exc:
-            # A failure to *dispatch* — no image, no daemon — never reached the
-            # data plane, so it is a step failure carrying the adapter's own
-            # verdict on whether repeating it could help.
-            raise StepFailure(exc.kind, exc.message, retryable=exc.retryable) from exc
-
-        output: JsonValue = {
-            "outcome": result.outcome.value,
-            "tree_hash": result.tree_hash,
-            "files_changed": result.diff.files_changed if result.diff else 0,
-            "input_tokens": result.usage.input_tokens,
-            "output_tokens": result.usage.output_tokens,
-        }
-        if result.outcome is not RunnerOutcome.SUCCEEDED:
-            raise StepFailure(
-                f"runner-{result.outcome.value}",
-                result.message or f"the runner reported {result.outcome.value}",
-                retryable=result.outcome in self.retryable,
-            )
-        return HandlerOutcome(output=output)
 
 
 @dataclass(slots=True)
@@ -211,13 +130,20 @@ def fake_registry(
         {
             StepType.SCRIPT: ScriptHandler(environ),
             StepType.AGENT: CassetteAgentHandler(cassette),
-            StepType.RUNNER: PortRunnerHandler(
+            StepType.RUNNER: RunnerHandler(
                 runner=ports.runner,
-                profile=profile,
-                work_item_id=work_item_id,
-                branch=branch,
-                base_commit=base_commit,
-                worktree_path=worktree_path,
+                dispatch=Dispatch(
+                    profile=profile,
+                    work_item_id=work_item_id,
+                    branch=branch,
+                    base_commit=base_commit,
+                    worktree_path=worktree_path,
+                    contract=VerificationContract(kind=ContractKind.TEST_AFTER),
+                ),
+                # A literal rather than a reference, because the workflows this
+                # harness runs have no agent stage producing one. A real
+                # pipeline passes `${plan.json.text}`.
+                plan_template=f"do the work for {work_item_id}",
             ),
             StepType.APPROVAL: CannedApprovalHandler(dict(decisions or {})),
         }

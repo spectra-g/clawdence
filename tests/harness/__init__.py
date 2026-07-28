@@ -23,6 +23,15 @@ to make now than to retrofit:
     what to re-record. Recording is opt-in through an environment variable, so
     a missing cassette in CI cannot silently start spending money.
 
+``agent``
+    **A controllable stand-in for the agent CLI**, added by S6. The runner's
+    taxonomy has eleven values and every one is meant to be reproducible in a
+    test; a real CLI can be asked to time out, be SIGKILLed, overspend a token
+    budget or lie in its verdict on approximately none of those occasions, and
+    needs a network and a key before it does anything at all. So the tests run a
+    small program that does what a JSON script tells it to, and the assertions
+    are about the runner rather than about somebody else's CLI.
+
 ``cleanup``
     **Nothing outlives the test that made it.** Tests write worktrees now and
     will spawn containers from S7. Both leak, and a leaked container poisons
