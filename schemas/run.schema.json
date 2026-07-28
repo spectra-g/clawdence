@@ -58,9 +58,10 @@
       "type": "object"
     },
     "RunStatus": {
-      "description": "Where a run is. Mirrors the state machine in ARCHITECTURE.md §4.",
+      "description": "Where a run is. Mirrors the state machine in ARCHITECTURE.md §4.\n\n``RUNNING`` is the one member with no node in that diagram, and it arrived\nwith S4 for the reason S3 predicted: the state store holds a row while a run\nis *live*, and until something persisted an in-flight run there was nothing\nfor it to say. The pipeline statuses answer \"how far has this got\"; this one\nanswers \"is a process working on it right now\", which is what crash-resume\nand the watchdog read.",
       "enum": [
         "queued",
+        "running",
         "triaged",
         "planning",
         "consensus",

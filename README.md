@@ -3,9 +3,10 @@
 Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
-setup, the domain model, and a workflow engine that executes `script` steps. There is no state
-store, no runner, and no agent step — so it can run a build, not a sprint. It is public early so
-the build is inspectable from the start, not because any of it is ready to use.
+setup, the domain model, a workflow engine that executes `script` steps, and a state store that
+records runs so they survive the process. There is no runner and no agent step — so it can run a
+build, not a sprint. It is public early so the build is inspectable from the start, not because any
+of it is ready to use.
 
 ## Decisions taken so far
 
@@ -13,7 +14,7 @@ the build is inspectable from the start, not because any of it is ready to use.
 |---|---|
 | Language | Python for the control plane |
 | Workflow engine | Written here rather than adopted, borrowing the schema shape of existing engines |
-| State | State table + audit log, not event sourcing |
+| State | SQLite: state table + audit log, not event sourcing |
 | Entry point | `clawdence` — the only supported one; no supported path calls internal modules |
 | Distribution | Docker image plus PyPI, provisionally — re-decided once the first milestone lands |
 | Contracts | Pydantic types are the single source; the JSON Schema in [`schemas/`](schemas/) is generated from them |
@@ -62,6 +63,37 @@ Two things it does deliberately differently from the engines it borrows its shap
 
 `agent`, `runner` and `approval` steps parse and validate, and refuse to run with an error naming
 the work that will implement them.
+
+## The state store
+
+Runs are recorded in SQLite, so killing the process does not lose the work it had already done:
+
+```sh
+uv run clawdence run examples/toy.yaml            # recorded in ~/.clawdence/state.db
+uv run clawdence run examples/toy.yaml --no-state # execute and record nothing
+uv run clawdence runs list                        # what has run
+uv run clawdence runs show RUN_ID                 # one run, step by step
+uv run clawdence run WORKFLOW --resume RUN_ID     # continue where it stopped
+uv run clawdence runs recover                     # time out abandoned steps, halt stalled runs
+```
+
+The `runs` and `steps` tables are the source of truth; a separate append-only `audit` table records
+what happened and is explicitly *not* what state is rebuilt from. That choice is what keeps
+crash-resume a `SELECT`, idempotency a unique constraint, and a schema change an ordinary migration
+rather than a migration of history.
+
+Three properties worth naming:
+
+- **Resume re-runs anything that did not succeed.** A stage that finished is trusted; a stage that
+  failed, was skipped, or was still running when the process died is not — so a resumed run
+  re-evaluates guards against current results rather than inheriting decisions made before the
+  thing that went wrong.
+- **A step row is written before the step runs.** That row, with the timeout it was started under,
+  is what lets a watchdog find work whose process is gone — the case an executor cannot handle,
+  because it is the executor that died.
+- **Audit payloads are metadata, not content.** Identifiers, statuses, and error *kinds* — never
+  step output or a stderr tail. Redaction at write time is not built yet, and an append-only table
+  cannot un-write a pasted key, so what is not yet screened is also not yet carried.
 
 ## Development
 

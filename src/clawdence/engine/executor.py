@@ -14,16 +14,17 @@ the handler kills its child, and the step is recorded ``timed_out`` rather than
 left running while the run moves on — which is the shape of v1's stale-spawn bug
 that S4's watchdog exists to replace.
 
-State lives in memory. S4 replaces ``_Ledger`` with SQLite rows and nothing else
-in this file changes, which is why the executor hands handlers a ``Resolver``
-rather than letting them reach for step results themselves.
+Where the record *goes* is the ``Ledger``'s business, not this file's. S4 put
+SQLite behind that interface and nothing in the control flow below changed —
+which is also why the executor hands handlers a ``Resolver`` rather than letting
+them reach for step results themselves.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import JsonValue
@@ -42,6 +43,7 @@ from clawdence.engine import conditions
 from clawdence.engine.conditions import Node
 from clawdence.engine.errors import ConditionEvalError, StepFailure
 from clawdence.engine.handlers import HandlerRegistry, StepContext, default_registry
+from clawdence.engine.ledger import InMemoryLedger, Ledger
 from clawdence.engine.refs import Resolver
 
 #: Statuses a stage can end in that mean "this did not do its job".
@@ -88,24 +90,13 @@ class RunReport:
         )
 
 
-@dataclass(slots=True)
-class _Ledger:
-    """The in-memory stand-in for S4's ``runs`` / ``steps`` tables."""
-
-    attempts: list[StepResult] = field(default_factory=list)
-    final: dict[str, StepResult] = field(default_factory=dict)
-
-    def record(self, result: StepResult) -> None:
-        self.attempts.append(result)
-        self.final[result.stage_id] = result
-
-
 async def execute(
     workflow: Workflow,
     *,
     run_id: str,
     work_item_id: str,
     registry: HandlerRegistry | None = None,
+    ledger: Ledger | None = None,
     clock: Clock = _utc_now,
     sleep: Sleeper = asyncio.sleep,
 ) -> RunReport:
@@ -115,19 +106,54 @@ async def execute(
     a syntax error costs nothing rather than surfacing after the stages ahead of
     it have already spent the budget. ``sleep`` is injected so a test can assert
     retry backoff was honoured without spending the wall-clock time on it.
+
+    Pass a durable ``ledger`` holding results for ``run_id`` and this resumes:
+    **a stage is re-run unless it previously succeeded.** That rule is narrower
+    than "skip what has a row" on purpose. A stage that failed is the reason
+    someone is resuming; a stage the engine skipped was skipped *because of*
+    that failure, or because a guard read a result that resuming may change, and
+    re-evaluating a guard costs nothing and can only be more correct. The only
+    thing worth trusting from a dead process is work it finished.
     """
     guards = {stage.id: conditions.parse(stage.when) for stage in workflow.stages if stage.when}
 
     handlers = registry if registry is not None else default_registry()
-    ledger = _Ledger()
-    resolver = Resolver(ledger.final)
+    book: Ledger = ledger if ledger is not None else InMemoryLedger()
 
     started_at = clock()
+    # Opened before the resolver is built, because opening is what loads a
+    # resumed run's prior results — and those are exactly what the first stage's
+    # ``when`` may need to read. The return value is the *stored* record, which
+    # on resume is older than the one just built; the executor does not need it,
+    # since ``close_run`` returns the authoritative run at the end.
+    book.open_run(
+        Run(
+            id=run_id,
+            work_item_id=work_item_id,
+            workflow=workflow.name,
+            workflow_version=workflow.version,
+            status=RunStatus.RUNNING,
+            created_at=started_at,
+            updated_at=started_at,
+        )
+    )
+    resolver = Resolver(book.final)
     stopped = False
 
     for stage in workflow.stages:
+        previous = book.final.get(stage.id)
+        if previous is not None and previous.status is StepStatus.SUCCEEDED:
+            continue
+
         if stopped:
-            ledger.record(_skipped(run_id, stage, reason="an earlier stage stopped the run"))
+            book.record(
+                _skipped(
+                    run_id,
+                    stage,
+                    attempt=book.next_attempt(stage.id),
+                    reason="an earlier stage stopped the run",
+                )
+            )
             continue
 
         result = await _run_stage(
@@ -136,29 +162,19 @@ async def execute(
             run_id=run_id,
             handlers=handlers,
             resolver=resolver,
-            ledger=ledger,
+            ledger=book,
             clock=clock,
             sleep=sleep,
         )
         if result.status in _UNSUCCESSFUL and stage.on_error is not OnError.CONTINUE:
             stopped = True
 
-    finished_at = clock()
-    run = Run(
-        id=run_id,
-        work_item_id=work_item_id,
-        workflow=workflow.name,
-        workflow_version=workflow.version,
-        status=RunStatus.HALTED if stopped else RunStatus.DONE,
-        created_at=started_at,
-        updated_at=finished_at,
-        finished_at=finished_at,
-    )
+    run = book.close_run(status=RunStatus.HALTED if stopped else RunStatus.DONE, at=clock())
     return RunReport(
         run=run,
         workflow=workflow,
-        attempts=tuple(ledger.attempts),
-        final=dict(ledger.final),
+        attempts=tuple(book.attempts),
+        final=dict(book.final),
     )
 
 
@@ -169,10 +185,12 @@ async def _run_stage(
     run_id: str,
     handlers: HandlerRegistry,
     resolver: Resolver,
-    ledger: _Ledger,
+    ledger: Ledger,
     clock: Clock,
     sleep: Sleeper,
 ) -> StepResult:
+    attempt = ledger.next_attempt(stage.id)
+
     if guard is not None:
         try:
             should_run = conditions.evaluate(guard, resolver)
@@ -181,7 +199,7 @@ async def _run_stage(
             result = _result(
                 run_id,
                 stage,
-                attempt=1,
+                attempt=attempt,
                 status=StepStatus.FAILED,
                 started_at=at,
                 finished_at=at,
@@ -190,18 +208,42 @@ async def _run_stage(
             ledger.record(result)
             return result
         if not should_run:
-            result = _skipped(run_id, stage, reason="its 'when' condition was false")
+            result = _skipped(
+                run_id, stage, attempt=attempt, reason="its 'when' condition was false"
+            )
             ledger.record(result)
             return result
 
     handler = handlers.for_type(stage.type)
-    attempt = 1
+
+    # Two counters, because they answer different questions. ``attempt`` is
+    # global to (run, stage) and is half the idempotency key, so it continues
+    # across a resume rather than restarting at 1 and colliding with a row the
+    # dead process already wrote. ``tries`` is local to this execution and is
+    # what the declared retry policy caps: resuming a halted run is an operator
+    # decision and deserves a fresh retry budget, not the exhausted one.
+    tries = 0
     while True:
+        tries += 1
         started_at = clock()
         status = StepStatus.SUCCEEDED
         error: StepError | None = None
         output: JsonValue = None
         response: JsonValue = None
+
+        # Written before the handler is awaited, so a process that dies mid-step
+        # leaves a row saying so. That row — its ``started_at`` and the timeout
+        # it was started under — is the watchdog's only input.
+        ledger.begin(
+            _result(
+                run_id,
+                stage,
+                attempt=attempt,
+                status=StepStatus.RUNNING,
+                started_at=started_at,
+                finished_at=None,
+            )
+        )
 
         context = StepContext(run_id=run_id, stage=stage, attempt=attempt, resolver=resolver)
         try:
@@ -239,7 +281,7 @@ async def _run_stage(
         # so retrying that spends the budget without changing the answer.
         if status is StepStatus.SUCCEEDED or error is None or not error.retryable:
             return result
-        if attempt >= stage.retry.max_attempts:
+        if tries >= stage.retry.max_attempts:
             return result
 
         if stage.retry.backoff_seconds:
@@ -247,7 +289,7 @@ async def _run_stage(
         attempt += 1
 
 
-def _skipped(run_id: str, stage: Stage, *, reason: str) -> StepResult:
+def _skipped(run_id: str, stage: Stage, *, attempt: int, reason: str) -> StepResult:
     """A stage that did not run still gets a result.
 
     ``$plan.skipped`` has to mean something, and a run record with holes in it
@@ -257,7 +299,7 @@ def _skipped(run_id: str, stage: Stage, *, reason: str) -> StepResult:
     return _result(
         run_id,
         stage,
-        attempt=1,
+        attempt=attempt,
         status=StepStatus.SKIPPED,
         started_at=None,
         finished_at=None,
@@ -286,6 +328,7 @@ def _result(
         status=status,
         attempt=attempt,
         idempotency_key=key,
+        timeout_seconds=stage.timeout_seconds,
         started_at=started_at,
         finished_at=finished_at,
         output=output,

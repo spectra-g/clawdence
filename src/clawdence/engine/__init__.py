@@ -7,7 +7,8 @@ the engine have to be understood together::
 
     errors ─ refs
       └─ conditions ─┐
-      └─ interpolation ─ handlers ─ executor ─ report
+      └─ interpolation ─ handlers ─┐
+                          ledger ─ executor ─ report
                               loader ─┘
 
 ``refs`` is the seam that matters. ``$plan.json.confidence`` in a condition and
@@ -41,6 +42,7 @@ from clawdence.engine.handlers import (
     UnimplementedHandler,
     default_registry,
 )
+from clawdence.engine.ledger import InMemoryLedger, Ledger
 from clawdence.engine.loader import load_workflow, parse_workflow, validate_references
 from clawdence.engine.refs import MISSING, Facet, Reference, Resolver, parse_reference
 from clawdence.engine.report import render_json, render_text, to_dict
@@ -53,7 +55,9 @@ __all__ = [
     "Facet",
     "HandlerOutcome",
     "HandlerRegistry",
+    "InMemoryLedger",
     "InterpolationError",
+    "Ledger",
     "Reference",
     "Resolver",
     "RunReport",

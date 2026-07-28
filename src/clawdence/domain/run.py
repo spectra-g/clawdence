@@ -38,9 +38,18 @@ from clawdence.domain.workflow import StepType
 
 
 class RunStatus(StrEnum):
-    """Where a run is. Mirrors the state machine in ARCHITECTURE.md §4."""
+    """Where a run is. Mirrors the state machine in ARCHITECTURE.md §4.
+
+    ``RUNNING`` is the one member with no node in that diagram, and it arrived
+    with S4 for the reason S3 predicted: the state store holds a row while a run
+    is *live*, and until something persisted an in-flight run there was nothing
+    for it to say. The pipeline statuses answer "how far has this got"; this one
+    answers "is a process working on it right now", which is what crash-resume
+    and the watchdog read.
+    """
 
     QUEUED = "queued"
+    RUNNING = "running"
     TRIAGED = "triaged"
     PLANNING = "planning"
     CONSENSUS = "consensus"
@@ -98,6 +107,13 @@ class StepResult(DomainModel):
 
     started_at: AwareDatetime | None = None
     finished_at: AwareDatetime | None = None
+
+    #: The timeout this attempt actually ran under, pinned from the stage when
+    #: it started. Recorded rather than looked up because it is the watchdog's
+    #: whole input: a step row that says ``running`` is only *stalled* relative
+    #: to the limit it was started with, and editing the workflow file must not
+    #: retroactively change whether an in-flight step is overdue.
+    timeout_seconds: float | None = Field(default=None, gt=0)
 
     #: What the step produced. Addressed as ``$<stage_id>.json.<path>``.
     output: JsonValue | None = None

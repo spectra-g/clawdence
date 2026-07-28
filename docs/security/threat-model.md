@@ -79,7 +79,7 @@ worst realistic outcome, not the average one.
 | **T8** | Financial exhaustion | **High** | A5 | Built (schema) + designed |
 | **T9** | Unauthorised submission | **High** | A5, A4 | Designed |
 | **T10** | Webhook forgery | Medium | A5, A4 | Designed |
-| **T11** | Secrets written into the audit trail | **High** | A1, A6 | Designed |
+| **T11** | Secrets written into the audit trail | **High** | A1, A6 | Partly built + designed |
 | **T12** | Poisoned runner base image | Low | **A1, A2, A3** | Designed |
 | **T13** | Worktree path treated as trusted input | Low | A3 | Designed |
 | **T14** | Memory poisoning via discovery notes | Medium | A2, A4 | Designed |
@@ -88,6 +88,7 @@ worst realistic outcome, not the average one.
 | **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema) |
 | **T18** | MCP credential over-exposure | Medium | scoped | Partly accepted |
 | **T19** | Unauthenticated control surface | Medium | A4, A5 | Designed |
+| **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -236,18 +237,48 @@ An unsigned webhook endpoint is an open invitation to spend someone else's money
 configuration flag to disable it. Ingestion is idempotent on a source-stable key, so replaying a
 captured delivery produces one work item rather than N.
 
-### T11 · Secrets written into the audit trail
+### T11 · Secrets written into the audit trail — **partially built**
 
 The audit trail carries chat text, issue bodies, plans, and logs. Any of those can contain a key
 somebody pasted. The trail is append-only, so **there is no deleting it afterwards**.
 
-**Mitigations:** redaction happens at write time, not at read time. Records carry a flag recording
-that the redaction pass ran, so a record written by a path that skipped screening is findable
-rather than indistinguishable from a clean one. A rare, audited tombstone-and-rewrite escape hatch
-exists for when redaction misses, because it will.
+**Planned mitigations:** redaction happens at write time, not at read time. Records carry a flag
+recording that the redaction pass ran, so a record written by a path that skipped screening is
+findable rather than indistinguishable from a clean one. A rare, audited tombstone-and-rewrite
+escape hatch exists for when redaction misses, because it will.
+
+**What the state store actually does today (S4), pending redaction (S4b):**
+
+- **Audit payloads are metadata, not content.** What the engine writes is identifiers, statuses,
+  attempt numbers and error *kinds* — never step output, never a stderr tail, never a prompt. This
+  is a real reduction, not a deferral: the payloads worth redacting are not in the append-only
+  table yet, so the window in which redaction is missing is a window in which little of value
+  passes through it. The rule has to hold as later steps add payloads, and the one that is easiest
+  to get wrong is the error message, which is why the engine records `error.kind` and drops
+  `error.message` on the way in.
+- **The `redacted` flag is written `false`, honestly.** Nothing screens payloads yet, so nothing
+  claims to have. The seam that S4b fills is a one-argument substitution, and when it lands the
+  flag starts telling the truth without any other change.
 
 Commit-time and full-history secret scanning is in place in this repository from the first commit,
 for the same reason at a different layer.
+
+### T20 · Sensitive data at rest in the state store — **partially built**
+
+Distinct from T11 and newer than it. The state store records what each step *produced*: captured
+stdout and stderr, parsed output, agent responses. That is the run's evidence and the system cannot
+do its job without keeping it — but a build log can contain a token the build printed, and the
+default location is a file in the operator's home directory that lives as long as they do.
+
+**Mitigations:** the `runs` and `steps` tables are the source of truth and are **not** append-only,
+which is the deliberate consequence of ADR-0005 that matters here — a row holding
+something it should not can be deleted or rewritten, unlike an audit entry. Capture is capped at
+64 KiB per stream, so a step cannot put an entire build log in the record. The database is a file
+under the operator's own account and inherits its permissions.
+
+**Not mitigated:** the file is not encrypted at rest, and there is no retention policy — both
+follow from R7, that the operator's own machine is trusted. Backup and restore, which will move
+this data off that machine and make its handling somebody's explicit decision, is S4b's.
 
 ### T12 · Poisoned runner base image
 
@@ -401,13 +432,16 @@ The honest summary. Most of this is not built.
 | Credential-free runner request; env-var-name-only MCP config | T3, T18 | **Built** (schema) |
 | Untrusted-by-default submitters | T9 | **Built** (schema) |
 | Commit-time and full-history secret scanning | T11 | **Built** |
+| Metadata-only audit payloads; honestly-false `redacted` flag | T11 | **Built** |
+| Bounded capture; deletable state tables (not append-only) | T20 | **Built** |
 | Plane split — scoped credentials, one worktree | T3, T4, T5 | Designed |
 | Container isolation, resource caps, disk reaper | T4, T5, T7 | Designed |
 | Egress allowlist | **T1, T2, T3** | Designed |
 | Socket-mode provenance gating; rootless DinD | T6 | Designed |
 | Submitter authorization, rate limits, size caps | T9, T8 | Designed |
 | Webhook signature verification | T10 | Designed |
-| Redaction at write time | T11 | Designed |
+| Redaction at write time | T11 | Designed (seam built, S4b fills it) |
+| Backup and restore of the state store | T20 | Designed |
 | Digest-pinned, CI-scanned base images | T12 | Designed |
 | Untrusted-output handling for runner paths | T13 | Designed |
 | Injection discipline for retrieved context | T14 | Designed |
