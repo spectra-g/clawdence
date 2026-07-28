@@ -59,6 +59,17 @@ A new field is cheap; a renamed or re-shaped one is not. If a change loosens a c
 docstring says is deliberate — argv instead of shell strings, required tree hashes, budgets that
 can only abort — say why in the PR. Those are decisions, not defaults.
 
+## Security-relevant changes
+
+[`docs/security/threat-model.md`](docs/security/threat-model.md) names what this system is
+defending against and what it has decided not to defend against. If a change touches the runner's
+privileges, what reaches the network, what reaches a prompt, who may approve or submit, or what may
+be merged, say in the PR which threat it affects.
+
+A change that weakens a stated mitigation is not automatically wrong — but it needs to move the
+threat into the accepted-risks table with a reason, in the same PR. Silently eroding a control is
+the failure this document exists to prevent.
+
 ## Code style
 
 Enforced, not debated: `ruff format` for layout, `ruff check` for lint, `mypy --strict` for types.

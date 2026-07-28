@@ -50,6 +50,17 @@ make scan         # gitleaks over the working tree and the history
 `make setup` installs the pre-commit hooks. **Do not skip it** — secret scanning is a commit-time
 gate, and `--no-verify` bypasses it.
 
+## Security
+
+The system runs model-generated code against real repositories, so the threat model is written
+before the machinery it constrains rather than after it. It is in
+[`docs/security/threat-model.md`](docs/security/threat-model.md), and it is blunt about how much of
+the design is still unbuilt — most controls are specified, not implemented.
+
+**Do not expose this to input from people you do not trust yet.** The two controls that gate that
+are the runner's network egress allowlist and the ingress authorization layer, and neither exists.
+Report problems via [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: `make check` must be green, secret
