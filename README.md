@@ -3,10 +3,11 @@
 Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
-setup, the domain model, a workflow engine that executes `script` steps, and a state store that
-records runs so they survive the process. There is no runner and no agent step — so it can run a
-build, not a sprint. It is public early so the build is inspectable from the start, not because any
-of it is ready to use.
+setup, the domain model, a workflow engine that executes `script` steps, a state store that records
+runs so they survive the process, and the ports every integration will sit behind — with an
+in-memory implementation of each. There is no real runner and no agent step, so it can run a build,
+not a sprint. It is public early so the build is inspectable from the start, not because any of it
+is ready to use.
 
 ## Decisions taken so far
 
@@ -18,6 +19,7 @@ of it is ready to use.
 | Entry point | `clawdence` — the only supported one; no supported path calls internal modules |
 | Distribution | Docker image plus PyPI, provisionally — re-decided once the first milestone lands |
 | Contracts | Pydantic types are the single source; the JSON Schema in [`schemas/`](schemas/) is generated from them |
+| Integrations | Everything external sits behind a port, and every adapter passes one shared contract suite |
 
 Each of these is recorded as an ADR with its cost and the evidence that would reverse it. The
 design corpus is not published yet; it is reassessed at the first public milestone. Ask if you
@@ -95,18 +97,53 @@ Three properties worth naming:
   step output or a stderr tail. Redaction at write time is not built yet, and an append-only table
   cannot un-write a pasted key, so what is not yet screened is also not yet carried.
 
+## The ports
+
+Everything the system talks to — chat, issue trackers, GitHub, the runner, memory, the secret
+store — is behind an interface in [`src/clawdence/ports/`](src/clawdence/ports/), and each one
+ships with an in-memory implementation next to it. v1 had GitHub's API shape, Slack's message
+format and Jira's transition ids spread through a 5,107-line orchestrator, which is why it could
+not be tested without credentials or run without all three services.
+
+The interfaces are the smaller half. The useful half is `tests/ports/contract.py`: one suite
+stating what *every* adapter must do, which each adapter is held to by subclassing it. An
+interface says a method exists; it says nothing about whether calling it twice makes two tickets,
+and that is the question these ports each get wrong differently. Four rules are stated once
+instead of per integration:
+
+- **Retryability travels with the failure.** An adapter raises `TransientError` or
+  `PermanentError`; nothing at the call site inspects a message to guess. v1 decided this per
+  caller, and in three places by matching on substrings.
+- **Every write is idempotent on a key the caller derives.** Notifications, tickets, pull requests
+  and runner dispatches key on something stable, so redelivery collides instead of duplicating.
+- **"Non-fatal" is a wrapper, not a convention.** `Outbox` is the one implementation of "the
+  tracker being down does not fail the run" — bounded, retrying transient failures only, with no
+  head-of-line blocking.
+- **Merging states what you verified.** `VcsPort.merge` requires the head and base commits the
+  evidence was produced against and refuses if either moved. A required check is one a caller has
+  to have looked at its evidence to satisfy; an optional one gets omitted.
+
+```sh
+uv run pytest -m contract   # or: make contract-tests
+```
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). It manages the Python version too, so nothing else
 needs installing.
 
 ```sh
-make setup        # sync the toolchain, install the git hooks
-make check        # lint + typecheck + test + schema, exactly what CI runs
-make schema       # regenerate schemas/ after changing the domain model
-make schema-test  # assert schemas/ is current and the contracts round-trip
-make scan         # gitleaks over the working tree and the history
+make setup           # sync the toolchain, install the git hooks
+make check           # lint + typecheck + test + schema, exactly what CI runs
+make contract-tests  # the port contract suite, against every adapter
+make schema          # regenerate schemas/ after changing the domain model
+make schema-test     # assert schemas/ is current and the contracts round-trip
+make scan            # gitleaks over the working tree and the history
 ```
+
+The suite runs with **TCP and DNS blocked** and no LLM calls: fakes and recorded interactions
+throughout, with a cassette miss failing loudly rather than reaching a provider. A test that needs
+a socket marks itself and says why — the exceptions are meant to be countable.
 
 `make setup` installs the pre-commit hooks. **Do not skip it** — secret scanning is a commit-time
 gate, and `--no-verify` bypasses it.

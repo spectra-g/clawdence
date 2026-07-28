@@ -8,11 +8,12 @@ code. This document says what can go wrong, what stops it, and what we have deci
 It is written *before* the execution machinery exists, deliberately. A threat model produced after
 the fact describes a design; this one is meant to constrain it.
 
-> **Read this first.** As of today the project ships a domain model and a CLI. There is no
-> workflow engine, no runner, no ingestion, and no isolation. Almost every control below is
-> **Designed**, not **Built**. Do not point this at anything you care about, and do not expose it
-> to input from people you do not trust, until the ingress and egress controls are built and this
-> notice is gone.
+> **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
+> executes `script` steps, a state store, and the ports every integration will sit behind — with
+> in-memory implementations, not real adapters. There is no runner, no agent step, no ingestion,
+> and no isolation. Most controls below are **Designed**, not **Built**. Do not point this at
+> anything you care about, and do not expose it to input from people you do not trust, until the
+> ingress and egress controls are built and this notice is gone.
 
 ---
 
@@ -85,10 +86,11 @@ worst realistic outcome, not the average one.
 | **T14** | Memory poisoning via discovery notes | Medium | A2, A4 | Designed |
 | **T15** | Approval bypass or self-approval | Medium | A4 | Built (schema) + designed |
 | **T16** | Command injection via workflow arguments | Medium | A2, A3 | **Built** |
-| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema) |
+| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema + port) |
 | **T18** | MCP credential over-exposure | Medium | scoped | Partly accepted |
 | **T19** | Unauthenticated control surface | Medium | A4, A5 | Designed |
 | **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
+| **T21** | Credentials recorded into committed test fixtures | Medium | A1, A6 | **Built** |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -280,6 +282,22 @@ under the operator's own account and inherits its permissions.
 follow from R7, that the operator's own machine is trusted. Backup and restore, which will move
 this data off that machine and make its handling somebody's explicit decision, is S4b's.
 
+### T21 · Credentials recorded into committed test fixtures — **built**
+
+New with the test harness (S5) and specific to it. Agent tests replay recorded LLM interactions,
+and those recordings are committed. A raw recording contains the request headers, which carry the
+API key, and the prompt text, which is where a *user's* pasted key ends up. `git rm` does not
+remove either from history.
+
+**Mitigations:** redaction happens on the way *in*, before anything is written — both fields named
+like a credential (`authorization`, `api_key`, `bearer`, …) and values shaped like one anywhere in
+the payload, including inside prompt text. The same `REDACTED` marker as the rest of the system, so
+one grep answers "did we leak here". Recording is reachable only by setting `CLAWDENCE_CASSETTE`,
+so no default or missing file can put the suite into a mode that writes new material. The error
+raised on a cassette miss prints part of the request to identify it, and redacts that too.
+
+Commit-time and full-history gitleaks scanning is the second layer, as for T11.
+
 ### T12 · Poisoned runner base image
 
 Base images per language are shipped to other people and contain the toolchain the runner executes.
@@ -342,7 +360,7 @@ Three further properties are enforced by the engine rather than by the type:
   a credential-shaped variable does not reach the child, and that the allowlist itself names nothing
   credential-shaped.
 
-### T17 · Merging code whose evidence does not apply — **built (schema)**
+### T17 · Merging code whose evidence does not apply — **built (schema + port)**
 
 The subtle one, and the highest blast radius against A4. Tests pass at commit X. A conflict forces
 a rebase onto an advanced base. The merge lands tree Y, which nothing ever verified. Nobody
@@ -353,8 +371,17 @@ green check.
 the tree it was produced against, and it is invalid for any other tree. Abbreviated hashes are
 refused, because two abbreviations of different lengths can name the same commit and that makes the
 comparison unreliable. Any tree mutation — rebase, force-push, base advance — invalidates prior
-evidence and requires re-verification before merge. Enforcement in the merge path is still to
-build; the type makes the unsafe state unrepresentable rather than merely discouraged.
+evidence and requires re-verification before merge. The type makes the unsafe state
+unrepresentable rather than merely discouraged.
+
+**Enforced at the merge boundary (S5).** `VcsPort.merge` takes `expect_head` and `expect_base` as
+**required** arguments and refuses with `StaleMergeError` when either has moved. Required rather
+than optional is the control: an optional safety check is one that gets omitted under deadline
+pressure and reads as a reasonable diff, while a required one means the caller had to produce two
+hashes and therefore had to look at its evidence. The contract suite checks both refusals for
+every adapter, so the real GitHub adapter (S15) inherits the obligation rather than reimplementing
+it. What is still to build is the pipeline that *calls* merge with the hashes from a
+`VerificationResult` — the boundary is closed, the caller does not exist yet.
 
 ### T18 · MCP credential over-exposure
 
@@ -367,6 +394,15 @@ written into, so a profile committed to disk or printed by a probe cannot carry 
 
 **Partly accepted:** whatever an MCP token grants, a compromised runner gets. Scope those tokens
 narrowly. §6.
+
+**What the ports layer adds (S5).** Secrets are resolved by name, as late as possible, by
+`SecretProvider` — and what comes back is a `Secret`, not a `str`. Its `repr` and `str` both name
+the secret instead of showing it, so a credential cannot reach a log line, an f-string or a
+traceback without somebody calling `.reveal()`, which is one short grep to audit. The default
+provider holds nothing, so an unconfigured system fails at the first step that needs a key rather
+than inheriting whatever is in the ambient environment. `EnvSecrets` takes an allowlist of names,
+because without one it is `os.environ` and any caller that chooses the name it asks for — including
+one whose name came out of a workflow file — can read `AWS_SECRET_ACCESS_KEY`.
 
 ### T19 · Unauthenticated control surface
 
@@ -426,7 +462,12 @@ The honest summary. Most of this is not built.
 |---|---|---|
 | Argv-only script commands; single-pass expansion; uninterpolatable `command[0]` | T16 | **Built** |
 | Declared-environment-plus-allowlist for script subprocesses | T3, T16 | **Built** |
-| Evidence bound to a tree hash | T17 | **Built** (schema); merge-path enforcement to come |
+| Evidence bound to a tree hash | T17 | **Built** (schema) |
+| `merge` requires the verified head and base, and refuses when either moved | T17 | **Built** (port); the caller that supplies them is S15 |
+| `Secret` wrapper — no credential becomes a `str` without `.reveal()` | T3, T18 | **Built** |
+| Name-allowlisted environment secrets; nothing-holding default provider | T3, T18 | **Built** |
+| Redaction on write for recorded test fixtures | T21 | **Built** |
+| Suite runs with TCP and DNS blocked; a cassette miss is an error | T21, T8 | **Built** |
 | Budgets that can only abort | T8 | **Built** (schema); ledger and enforcement to come |
 | Approver identity constraints | T15 | **Built** (schema); gate implementation to come |
 | Credential-free runner request; env-var-name-only MCP config | T3, T18 | **Built** (schema) |
