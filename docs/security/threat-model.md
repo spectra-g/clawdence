@@ -296,6 +296,21 @@ There is no shell in the path and no string for an interpolated value to break o
 containing spaces, semicolons, or backticks remains exactly one argument. This is enforced by the
 type, so it cannot be got wrong by a careless caller.
 
+Three further properties are enforced by the engine rather than by the type:
+
+- **Expansion is single-pass.** A value that expands to text containing another `${…}` placeholder
+  is not rescanned. Without this, step output — which an agent, and through it a repository or an
+  issue body, can control — would be a way to address any stage in the run.
+- **`command[0]` is never interpolated,** and a workflow that tries is rejected at load time. Which
+  executable runs is the workflow author's decision; no value produced by an earlier step gets to
+  choose it.
+- **The child process gets a declared environment, not ours.** The control plane holds every
+  provider credential in the system. A script step's subprocess receives the stage's own `env:` plus
+  a fixed allowlist of `PATH`, `HOME`, `LANG`, `LC_ALL` and `TZ` — so a workflow that can run a
+  command still cannot read the keys the process running it holds. A test asserts both halves: that
+  a credential-shaped variable does not reach the child, and that the allowlist itself names nothing
+  credential-shaped.
+
 ### T17 · Merging code whose evidence does not apply — **built (schema)**
 
 The subtle one, and the highest blast radius against A4. Tests pass at commit X. A conflict forces
@@ -378,7 +393,8 @@ The honest summary. Most of this is not built.
 
 | Control | Addresses | Status |
 |---|---|---|
-| Argv-only script commands | T16 | **Built** |
+| Argv-only script commands; single-pass expansion; uninterpolatable `command[0]` | T16 | **Built** |
+| Declared-environment-plus-allowlist for script subprocesses | T3, T16 | **Built** |
 | Evidence bound to a tree hash | T17 | **Built** (schema); merge-path enforcement to come |
 | Budgets that can only abort | T8 | **Built** (schema); ledger and enforcement to come |
 | Approver identity constraints | T15 | **Built** (schema); gate implementation to come |

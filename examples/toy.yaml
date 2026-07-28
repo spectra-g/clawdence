@@ -1,0 +1,68 @@
+# A workflow that exercises the whole of the M1 engine and nothing else:
+# a conditional branch, interpolation between stages, and a failure that stops
+# the run without stopping the process.
+#
+#     clawdence run examples/toy.yaml
+#     clawdence run examples/toy.yaml --json
+#
+# It uses `python3` only because every machine that can run clawdence has one.
+# Real workflows call real build tooling; nothing here needs a repo, a network,
+# or an API key.
+
+schema_version: 1
+name: toy
+version: 1.0.0
+description: Demonstrates conditions, interpolation, and on_error handling.
+
+stages:
+  # Emit JSON on stdout and the engine parses it, so later stages can branch on
+  # fields rather than on exit codes.
+  - id: classify
+    type: script
+    name: Decide what kind of change this is
+    command:
+      - python3
+      - -c
+      - 'import json; print(json.dumps({"verdict": "APPROVED", "size": "M"}))'
+    timeout_seconds: 30
+
+  # Runs. `&&` — not `and`: the grammar is C-style, and the English spellings
+  # are rejected at load time rather than misread at run time.
+  - id: implement
+    type: script
+    name: Do the work
+    when: '$classify.json.parsed.verdict == "APPROVED" && $classify.json.parsed.size != "L"'
+    command:
+      - python3
+      - -c
+      - 'import sys; print("implementing a " + sys.argv[1] + " change")'
+      # Interpolated as one whole argv element. There is no shell here, so a
+      # value containing spaces or semicolons stays a single argument.
+      - ${classify.json.parsed.size}
+
+  # Does not run: the guard is false. It still gets a step result, so the trace
+  # shows the branch was considered and not taken.
+  - id: split
+    type: script
+    name: Break a large change into stories
+    when: '$classify.json.parsed.size == "L"'
+    command: [python3, -c, 'print("splitting")']
+
+  # Fails on purpose. `skip_rest` stops the run without treating it as a crash.
+  - id: verify
+    type: script
+    name: Run the tests
+    on_error: skip_rest
+    retry:
+      max_attempts: 2
+      backoff_seconds: 0.1
+    command:
+      - python3
+      - -c
+      - 'import sys; print("1 failing assertion", file=sys.stderr); sys.exit(1)'
+
+  # Never reached, and recorded as skipped rather than left out of the trace.
+  - id: publish
+    type: script
+    name: Open the pull request
+    command: [python3, -c, 'print("opening a PR")']

@@ -21,8 +21,12 @@ classifiers = [
 #
 # pydantic is the single source of the domain model (S2): the Python types are
 # authored once and the JSON Schema in `schemas/` is generated from them.
+# PyYAML parses workflow files, and only ever through `yaml.safe_load` — the
+# full loader constructs arbitrary Python objects, which for a file format the
+# system executes would be remote code execution by configuration.
 dependencies = [
     "pydantic==2.13.4",
+    "pyyaml==6.0.3",
 ]
 
 [project.scripts]
@@ -42,6 +46,7 @@ dev = [
     "pytest-cov==7.1.0",
     "ruff==0.16.0",
     "types-jsonschema==4.26.0.20260518",
+    "types-pyyaml==6.0.12.20260724",
 ]
 
 [build-system]

@@ -3,9 +3,9 @@
 Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
-setup, and the domain model — the typed contracts everything else will be written against. There
-is no engine, no state store, and no runner. It is public early so the build is inspectable from
-the start, not because any of it is ready to use.
+setup, the domain model, and a workflow engine that executes `script` steps. There is no state
+store, no runner, and no agent step — so it can run a build, not a sprint. It is public early so
+the build is inspectable from the start, not because any of it is ready to use.
 
 ## Decisions taken so far
 
@@ -33,6 +33,35 @@ tree it was produced against, and exceeding a budget has no configuration under 
 
 `schemas/` is generated from those types and committed, so a contract change shows up as a diff in
 review. CI fails if the two drift.
+
+## The workflow engine
+
+The process is data. [`examples/toy.yaml`](examples/toy.yaml) is a workflow you can run today:
+
+```sh
+uv run clawdence run examples/toy.yaml          # a per-stage trace
+uv run clawdence run examples/toy.yaml --json   # the full report, every attempt
+```
+
+Stages run in order, each with an optional `when` guard, a retry policy, a declared timeout, and an
+`on_error` policy of `fail`, `continue` or `skip_rest`. A guard reads a prior stage as
+`$stage.json.field` (its output), `$stage.response.field` (what a human submitted), or
+`$stage.succeeded` / `.failed` / `.skipped`. The same references interpolate into arguments as
+`${stage.json.field}`.
+
+Two things it does deliberately differently from the engines it borrows its shape from:
+
+- **A workflow that will fail fails before it costs anything.** Bad YAML, an unparseable condition,
+  a reference to a stage that does not exist or has not run yet, a placeholder that names nothing —
+  all rejected at load time, rather than when execution reaches them and the stages ahead have
+  already called an LLM.
+- **There is no shell.** `command` is argv, values interpolate into a single element, and expanded
+  text is never rescanned. A value containing `; rm -rf /` is one argument that contains
+  semicolons. Script steps also get a declared environment plus a small allowlist, never the
+  control plane's own — which is where the API keys live.
+
+`agent`, `runner` and `approval` steps parse and validate, and refuse to run with an error naming
+the work that will implement them.
 
 ## Development
 
