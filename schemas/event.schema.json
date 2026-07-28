@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "description": "Who or what caused an event.",
+      "properties": {
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Name"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActorKind"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "ActorKind": {
+      "description": "Whether a human, a model, or the system itself did the thing.\n\nWorth separating: \"an approval was recorded\" means something different\ndepending on which of these three produced it, and that difference is\nexactly what an audit trail is read to establish.",
+      "enum": [
+        "human",
+        "agent",
+        "runner",
+        "system"
+      ],
+      "title": "ActorKind",
+      "type": "string"
+    },
+    "EventKind": {
+      "description": "What happened. Coarse by design.\n\nThese name transitions worth reconstructing months later, not every\nfunction call. A log granular enough to trace execution is a log nobody\nreads and a disk nobody has — v1's processing log reached 300MB.",
+      "enum": [
+        "work_item.received",
+        "work_item.routed",
+        "run.started",
+        "run.status_changed",
+        "run.finished",
+        "run.cancelled",
+        "step.started",
+        "step.finished",
+        "step.retried",
+        "step.timed_out",
+        "approval.requested",
+        "approval.decided",
+        "verification.recorded",
+        "budget.exceeded",
+        "halted_for_human",
+        "degraded"
+      ],
+      "title": "EventKind",
+      "type": "string"
+    },
+    "JsonValue": {}
+  },
+  "$id": "https://clawdence.dev/schemas/event.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One append-only audit record.",
+  "properties": {
+    "actor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Actor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EventKind"
+    },
+    "payload": {
+      "$ref": "#/$defs/JsonValue",
+      "default": null
+    },
+    "redacted": {
+      "default": true,
+      "title": "Redacted",
+      "type": "boolean"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stage_id": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stage Id"
+    },
+    "work_item_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Work Item Id"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "at"
+  ],
+  "title": "Event",
+  "type": "object"
+}

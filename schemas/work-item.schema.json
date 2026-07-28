@@ -1,0 +1,209 @@
+{
+  "$defs": {
+    "IngestSource": {
+      "enum": [
+        "cli",
+        "slack",
+        "github",
+        "webhook"
+      ],
+      "title": "IngestSource",
+      "type": "string"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "description": "Where the item came from — and therefore where replies go.\n\nA request from GitHub is answered on GitHub. ``conversation_id``\ngeneralises v1's ``slackTs``: the BA asking a question and getting an\nanswer is one conversation, not two unrelated events.",
+      "properties": {
+        "conversation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "external_id": {
+          "title": "External Id",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IngestSource"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "source",
+        "external_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    },
+    "Submitter": {
+      "additionalProperties": false,
+      "description": "Who asked.\n\n``trusted`` is deny-by-default and gates more than politeness: work from an\nuntrusted submitter may not use ``container+docker:socket``, because socket\naccess defeats both the egress allowlist and the plane split.",
+      "properties": {
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Name"
+        },
+        "external_id": {
+          "title": "External Id",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IngestSource"
+        },
+        "trusted": {
+          "default": false,
+          "title": "Trusted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source",
+        "external_id"
+      ],
+      "title": "Submitter",
+      "type": "object"
+    },
+    "WorkItemType": {
+      "enum": [
+        "epic",
+        "story",
+        "task",
+        "bug",
+        "spike"
+      ],
+      "title": "WorkItemType",
+      "type": "string"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/work-item.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A request, normalised. Produced by every ingestion adapter.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "labels": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Labels",
+      "type": "array"
+    },
+    "parent_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Id"
+    },
+    "raw_text": {
+      "title": "Raw Text",
+      "type": "string"
+    },
+    "repos": {
+      "default": [],
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        "type": "string"
+      },
+      "title": "Repos",
+      "type": "array"
+    },
+    "size_estimate": {
+      "anyOf": [
+        {
+          "pattern": "^(XS|S|M|L|XL)$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Size Estimate"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/SourceRef"
+    },
+    "submitter": {
+      "$ref": "#/$defs/Submitter"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/WorkItemType"
+    },
+    "workflow_override": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workflow Override"
+    }
+  },
+  "required": [
+    "id",
+    "type",
+    "title",
+    "raw_text",
+    "submitter",
+    "source_ref",
+    "created_at"
+  ],
+  "title": "WorkItem",
+  "type": "object"
+}

@@ -1,0 +1,590 @@
+{
+  "$defs": {
+    "Budget": {
+      "additionalProperties": false,
+      "description": "A cap on what one run, or one step, may spend.\n\nEvery limit is optional; ``None`` means unlimited on that axis. A budget\nwith every field ``None`` is legal and means \"no cap\" — which is a choice\nthe operator has to make explicitly rather than inherit.",
+      "properties": {
+        "max_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "max_usd": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Usd"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        },
+        "on_exceeded": {
+          "const": "abort",
+          "default": "abort",
+          "title": "On Exceeded",
+          "type": "string"
+        }
+      },
+      "title": "Budget",
+      "type": "object"
+    },
+    "BuildSystem": {
+      "enum": [
+        "maven",
+        "gradle",
+        "npm",
+        "yarn",
+        "pnpm",
+        "uv",
+        "poetry",
+        "pip",
+        "go",
+        "cargo",
+        "unknown"
+      ],
+      "title": "BuildSystem",
+      "type": "string"
+    },
+    "ContractKind": {
+      "description": "The four contracts v2.0 ships.\n\n``OUTSIDE_IN_TDD`` is one option among four rather than the welded-in\ndefault it was in v1 — 175 references to it inside the orchestrator is\nwhat made the process impossible to vary per work item.",
+      "enum": [
+        "outside-in-tdd",
+        "test-after",
+        "build-only",
+        "none"
+      ],
+      "title": "ContractKind",
+      "type": "string"
+    },
+    "E2EPolicy": {
+      "enum": [
+        "available",
+        "ci-only",
+        "skip"
+      ],
+      "title": "E2EPolicy",
+      "type": "string"
+    },
+    "EgressPolicy": {
+      "additionalProperties": false,
+      "description": "Per-run network allowlist.\n\nContainer isolation stops the runner reaching the host and says nothing\nabout it reaching the internet — an agent with a full checkout and open\negress exfiltrates the codebase in one request. This is also the strongest\navailable mitigation for prompt injection, because it holds whether or not\nthe model was fooled.",
+      "properties": {
+        "allow_git_remote": {
+          "default": false,
+          "title": "Allow Git Remote",
+          "type": "boolean"
+        },
+        "allow_llm_api": {
+          "default": true,
+          "title": "Allow Llm Api",
+          "type": "boolean"
+        },
+        "allow_mcp_servers": {
+          "default": true,
+          "title": "Allow Mcp Servers",
+          "type": "boolean"
+        },
+        "allow_package_registries": {
+          "default": true,
+          "title": "Allow Package Registries",
+          "type": "boolean"
+        },
+        "extra_allowed_hosts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Allowed Hosts",
+          "type": "array"
+        },
+        "unrestricted": {
+          "default": false,
+          "title": "Unrestricted",
+          "type": "boolean"
+        }
+      },
+      "title": "EgressPolicy",
+      "type": "object"
+    },
+    "IsolationTier": {
+      "description": "How much the runner is contained. See the plan's §3.2.\n\n``CONTAINER_DOCKER_SOCKET`` is not \"weaker isolation\" — a process that can\nreach the host daemon can ``docker run --net=host -v /:/host``, which\nescapes the network namespace (voiding the egress allowlist) and mounts the\nhost filesystem (voiding the plane split). It is *no* isolation, with extra\nsteps, and it is forbidden for anything that arrived via public ingestion.\n\n``MICROVM`` is declared and not implemented: the interface is open so the\ntier can land later without reshaping everything above it.",
+      "enum": [
+        "host",
+        "container",
+        "container+docker:socket",
+        "container+docker:dind-rootless",
+        "microvm"
+      ],
+      "title": "IsolationTier",
+      "type": "string"
+    },
+    "McpServer": {
+      "additionalProperties": false,
+      "description": "An MCP server a repo's tooling needs.\n\nThis is the honest exception to \"the runner holds no secrets\": a repo that\nconfigures MCP hands the runner a credential. The boundary is therefore\n*no control-plane secrets*, and these tokens are scoped per repo and\ninjected per run rather than made ambient.",
+      "properties": {
+        "bearer_token_env_var": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bearer Token Env Var"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "McpServer",
+      "type": "object"
+    },
+    "RepoProfile": {
+      "additionalProperties": false,
+      "description": "Everything the system knows about one repository.",
+      "properties": {
+        "agents_md_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agents Md Path"
+        },
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "build_command": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Build Command",
+          "type": "array"
+        },
+        "build_system": {
+          "$ref": "#/$defs/BuildSystem",
+          "default": "unknown"
+        },
+        "caps": {
+          "$ref": "#/$defs/ResourceCaps",
+          "default": {
+            "cpu_count": null,
+            "disk_mb": null,
+            "memory_mb": null,
+            "pid_limit": null,
+            "wall_clock_seconds": null
+          }
+        },
+        "default_branch": {
+          "default": "main",
+          "title": "Default Branch",
+          "type": "string"
+        },
+        "e2e_runner": {
+          "$ref": "#/$defs/E2EPolicy",
+          "default": "skip"
+        },
+        "egress": {
+          "$ref": "#/$defs/EgressPolicy",
+          "default": {
+            "allow_git_remote": false,
+            "allow_llm_api": true,
+            "allow_mcp_servers": true,
+            "allow_package_registries": true,
+            "extra_allowed_hosts": [],
+            "unrestricted": false
+          }
+        },
+        "exec_prefix": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exec Prefix",
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "install_command": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Install Command",
+          "type": "array"
+        },
+        "isolation_tier": {
+          "$ref": "#/$defs/IsolationTier",
+          "default": "container"
+        },
+        "keywords": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        },
+        "mcp_servers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/McpServer"
+          },
+          "title": "Mcp Servers",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "needs_docker": {
+          "default": false,
+          "title": "Needs Docker",
+          "type": "boolean"
+        },
+        "remote_url": {
+          "title": "Remote Url",
+          "type": "string"
+        },
+        "require_full_test_suite": {
+          "default": false,
+          "title": "Require Full Test Suite",
+          "type": "boolean"
+        },
+        "test_command": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Test Command",
+          "type": "array"
+        },
+        "test_reporter": {
+          "$ref": "#/$defs/TestReporter",
+          "default": "none"
+        },
+        "toolchain": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Toolchain",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "remote_url"
+      ],
+      "title": "RepoProfile",
+      "type": "object"
+    },
+    "ResourceCaps": {
+      "additionalProperties": false,
+      "description": "Caps per run. A container without these is a DoS surface against the\nhost the control plane is running on.",
+      "properties": {
+        "cpu_count": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Count"
+        },
+        "disk_mb": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disk Mb"
+        },
+        "memory_mb": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Mb"
+        },
+        "pid_limit": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pid Limit"
+        },
+        "wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wall Clock Seconds"
+        }
+      },
+      "title": "ResourceCaps",
+      "type": "object"
+    },
+    "ResumeVerb": {
+      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
+      "enum": [
+        "restart",
+        "retry",
+        "approve",
+        "skip"
+      ],
+      "title": "ResumeVerb",
+      "type": "string"
+    },
+    "TestReporter": {
+      "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
+      "enum": [
+        "junit-xml",
+        "jest-json",
+        "pytest-json-report",
+        "go-test-json",
+        "cargo-json",
+        "none"
+      ],
+      "title": "TestReporter",
+      "type": "string"
+    },
+    "VerificationContract": {
+      "additionalProperties": false,
+      "description": "A declaration of what counts as done, and what happens when it isn't.",
+      "properties": {
+        "allowed_resume_verbs": {
+          "default": [
+            "restart",
+            "retry",
+            "approve",
+            "skip"
+          ],
+          "items": {
+            "$ref": "#/$defs/ResumeVerb"
+          },
+          "title": "Allowed Resume Verbs",
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "on_exhausted": {
+          "const": "halt_to_human",
+          "default": "halt_to_human",
+          "title": "On Exhausted",
+          "type": "string"
+        },
+        "pre_verify": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pre Verify"
+        },
+        "require_full_test_suite": {
+          "default": false,
+          "title": "Require Full Test Suite",
+          "type": "boolean"
+        },
+        "require_non_empty_diff": {
+          "default": true,
+          "title": "Require Non Empty Diff",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "VerificationContract",
+      "type": "object"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/runner-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What the control plane hands a runner.",
+  "properties": {
+    "base_commit": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Base Commit",
+      "type": "string"
+    },
+    "branch": {
+      "title": "Branch",
+      "type": "string"
+    },
+    "budget": {
+      "$ref": "#/$defs/Budget"
+    },
+    "carried_stubs": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Carried Stubs",
+      "type": "array"
+    },
+    "contract": {
+      "$ref": "#/$defs/VerificationContract"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "plan": {
+      "title": "Plan",
+      "type": "string"
+    },
+    "profile": {
+      "$ref": "#/$defs/RepoProfile"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "stage_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Stage Id",
+      "type": "string"
+    },
+    "work_item_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Work Item Id",
+      "type": "string"
+    },
+    "worktree_path": {
+      "pattern": "^/.+",
+      "title": "Worktree Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "stage_id",
+    "work_item_id",
+    "worktree_path",
+    "branch",
+    "base_commit",
+    "profile",
+    "contract",
+    "budget",
+    "plan",
+    "idempotency_key",
+    "created_at"
+  ],
+  "title": "RunnerRequest",
+  "type": "object"
+}

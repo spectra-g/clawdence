@@ -1,0 +1,276 @@
+{
+  "$defs": {
+    "ContractKind": {
+      "description": "The four contracts v2.0 ships.\n\n``OUTSIDE_IN_TDD`` is one option among four rather than the welded-in\ndefault it was in v1 — 175 references to it inside the orchestrator is\nwhat made the process impossible to vary per work item.",
+      "enum": [
+        "outside-in-tdd",
+        "test-after",
+        "build-only",
+        "none"
+      ],
+      "title": "ContractKind",
+      "type": "string"
+    },
+    "FailingAssertion": {
+      "additionalProperties": false,
+      "description": "One failure, extracted from a reporter — not a stack trace dump.",
+      "properties": {
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Frames",
+          "type": "array"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "message"
+      ],
+      "title": "FailingAssertion",
+      "type": "object"
+    },
+    "ResumeVerb": {
+      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
+      "enum": [
+        "restart",
+        "retry",
+        "approve",
+        "skip"
+      ],
+      "title": "ResumeVerb",
+      "type": "string"
+    },
+    "TestEvidence": {
+      "additionalProperties": false,
+      "description": "Structured result of a test run.",
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "failed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "failures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FailingAssertion"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "passed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "reporter": {
+          "$ref": "#/$defs/TestReporter"
+        },
+        "skipped": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reporter"
+      ],
+      "title": "TestEvidence",
+      "type": "object"
+    },
+    "TestReporter": {
+      "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
+      "enum": [
+        "junit-xml",
+        "jest-json",
+        "pytest-json-report",
+        "go-test-json",
+        "cargo-json",
+        "none"
+      ],
+      "title": "TestReporter",
+      "type": "string"
+    },
+    "VerificationContract": {
+      "additionalProperties": false,
+      "description": "A declaration of what counts as done, and what happens when it isn't.",
+      "properties": {
+        "allowed_resume_verbs": {
+          "default": [
+            "restart",
+            "retry",
+            "approve",
+            "skip"
+          ],
+          "items": {
+            "$ref": "#/$defs/ResumeVerb"
+          },
+          "title": "Allowed Resume Verbs",
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "on_exhausted": {
+          "const": "halt_to_human",
+          "default": "halt_to_human",
+          "title": "On Exhausted",
+          "type": "string"
+        },
+        "pre_verify": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pre Verify"
+        },
+        "require_full_test_suite": {
+          "default": false,
+          "title": "Require Full Test Suite",
+          "type": "boolean"
+        },
+        "require_non_empty_diff": {
+          "default": true,
+          "title": "Require Non Empty Diff",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "VerificationContract",
+      "type": "object"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/verification-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evidence that a contract was met, bound to the tree it was met on.",
+  "properties": {
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "checked_at": {
+      "format": "date-time",
+      "title": "Checked At",
+      "type": "string"
+    },
+    "contract": {
+      "$ref": "#/$defs/VerificationContract"
+    },
+    "detail": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detail"
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "passed": {
+      "title": "Passed",
+      "type": "boolean"
+    },
+    "tree_hash": {
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "title": "Tree Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "passed",
+    "tree_hash",
+    "attempt",
+    "checked_at"
+  ],
+  "title": "VerificationResult",
+  "type": "object"
+}

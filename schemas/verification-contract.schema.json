@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "ContractKind": {
+      "description": "The four contracts v2.0 ships.\n\n``OUTSIDE_IN_TDD`` is one option among four rather than the welded-in\ndefault it was in v1 — 175 references to it inside the orchestrator is\nwhat made the process impossible to vary per work item.",
+      "enum": [
+        "outside-in-tdd",
+        "test-after",
+        "build-only",
+        "none"
+      ],
+      "title": "ContractKind",
+      "type": "string"
+    },
+    "ResumeVerb": {
+      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
+      "enum": [
+        "restart",
+        "retry",
+        "approve",
+        "skip"
+      ],
+      "title": "ResumeVerb",
+      "type": "string"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/verification-contract.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A declaration of what counts as done, and what happens when it isn't.",
+  "properties": {
+    "allowed_resume_verbs": {
+      "default": [
+        "restart",
+        "retry",
+        "approve",
+        "skip"
+      ],
+      "items": {
+        "$ref": "#/$defs/ResumeVerb"
+      },
+      "title": "Allowed Resume Verbs",
+      "type": "array"
+    },
+    "kind": {
+      "$ref": "#/$defs/ContractKind"
+    },
+    "max_attempts": {
+      "default": 3,
+      "maximum": 10,
+      "minimum": 1,
+      "title": "Max Attempts",
+      "type": "integer"
+    },
+    "on_exhausted": {
+      "const": "halt_to_human",
+      "default": "halt_to_human",
+      "title": "On Exhausted",
+      "type": "string"
+    },
+    "pre_verify": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pre Verify"
+    },
+    "require_full_test_suite": {
+      "default": false,
+      "title": "Require Full Test Suite",
+      "type": "boolean"
+    },
+    "require_non_empty_diff": {
+      "default": true,
+      "title": "Require Non Empty Diff",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "title": "VerificationContract",
+  "type": "object"
+}

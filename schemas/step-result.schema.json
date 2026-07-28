@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "JsonValue": {},
+    "StepError": {
+      "additionalProperties": false,
+      "description": "Why a step failed, in a form something can branch on.\n\n``kind`` is a stable, matchable token; ``message`` is for humans. A retry\npolicy that has to regex the message is a retry policy that breaks when\nsomeone improves the wording.",
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "title": "StepError",
+      "type": "object"
+    },
+    "StepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "awaiting_approval",
+        "succeeded",
+        "failed",
+        "skipped",
+        "timed_out",
+        "cancelled"
+      ],
+      "title": "StepStatus",
+      "type": "string"
+    },
+    "StepType": {
+      "enum": [
+        "script",
+        "agent",
+        "runner",
+        "approval"
+      ],
+      "title": "StepType",
+      "type": "string"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/step-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One execution of one stage.",
+  "properties": {
+    "attempt": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StepError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "output": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonValue"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonValue"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "stage_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Stage Id",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "status": {
+      "$ref": "#/$defs/StepStatus"
+    },
+    "type": {
+      "$ref": "#/$defs/StepType"
+    }
+  },
+  "required": [
+    "id",
+    "run_id",
+    "stage_id",
+    "type",
+    "status",
+    "idempotency_key"
+  ],
+  "title": "StepResult",
+  "type": "object"
+}

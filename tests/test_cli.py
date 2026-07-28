@@ -5,6 +5,8 @@ These exist so CI has something real to fail on from commit 1.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from clawdence import __version__
@@ -26,3 +28,20 @@ def test_version_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--version"])
     assert exc.value.code == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_schema_export_then_check_agree(tmp_path: Path) -> None:
+    assert main(["schema", "export", "--out", str(tmp_path)]) == 0
+    assert main(["schema", "check", "--out", str(tmp_path)]) == 0
+
+
+def test_schema_check_fails_on_a_stale_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-zero exit is the whole point: this runs in CI.
+
+    A drift check that reports the problem and exits zero is a drift check
+    nobody finds out about.
+    """
+    assert main(["schema", "check", "--out", str(tmp_path)]) == 1
+    assert "out of date" in capsys.readouterr().out

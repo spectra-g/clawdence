@@ -1,0 +1,416 @@
+{
+  "$defs": {
+    "CostEntry": {
+      "additionalProperties": false,
+      "description": "One charge against a run's budget.\n\nDistinct from the audit trail: this ledger answers \"what did it cost\", the\naudit trail answers \"what happened\". v1 conflated them in\n``llm-audit.jsonl`` and could answer neither question well.",
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "stage_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stage Id"
+        },
+        "usage": {
+          "$ref": "#/$defs/TokenUsage",
+          "default": {
+            "cached_input_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0
+          }
+        },
+        "usd": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Usd"
+        }
+      },
+      "required": [
+        "run_id",
+        "at"
+      ],
+      "title": "CostEntry",
+      "type": "object"
+    },
+    "DiffStat": {
+      "additionalProperties": false,
+      "description": "Shape of the change, not the change itself.\n\nThe diff can be megabytes; the control plane usually needs to know only\nwhether there is one and roughly how large.",
+      "properties": {
+        "deletions": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Deletions",
+          "type": "integer"
+        },
+        "files_changed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Files Changed",
+          "type": "integer"
+        },
+        "insertions": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Insertions",
+          "type": "integer"
+        }
+      },
+      "title": "DiffStat",
+      "type": "object"
+    },
+    "FailingAssertion": {
+      "additionalProperties": false,
+      "description": "One failure, extracted from a reporter — not a stack trace dump.",
+      "properties": {
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Frames",
+          "type": "array"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "message"
+      ],
+      "title": "FailingAssertion",
+      "type": "object"
+    },
+    "RunnerOutcome": {
+      "description": "The failure taxonomy from the plan's §3.7.\n\nv1 collapsed nearly all of these into \"runner failed\", which meant the\nretry policy could not tell a flaky test from a budget cap from an OOM\nkill — and so treated them identically. Each value here needs different\nhandling, which is the entire reason they are distinct.",
+      "enum": [
+        "succeeded",
+        "tests-failed",
+        "empty-diff",
+        "non-zero-exit",
+        "timed-out",
+        "oom-killed",
+        "disk-full",
+        "budget-exceeded",
+        "network-denied",
+        "startup-failed",
+        "cancelled"
+      ],
+      "title": "RunnerOutcome",
+      "type": "string"
+    },
+    "TestEvidence": {
+      "additionalProperties": false,
+      "description": "Structured result of a test run.",
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "failed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "failures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FailingAssertion"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "passed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "reporter": {
+          "$ref": "#/$defs/TestReporter"
+        },
+        "skipped": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reporter"
+      ],
+      "title": "TestEvidence",
+      "type": "object"
+    },
+    "TestReporter": {
+      "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
+      "enum": [
+        "junit-xml",
+        "jest-json",
+        "pytest-json-report",
+        "go-test-json",
+        "cargo-json",
+        "none"
+      ],
+      "title": "TestReporter",
+      "type": "string"
+    },
+    "TokenUsage": {
+      "additionalProperties": false,
+      "description": "Tokens consumed by one LLM interaction.\n\nCached input is counted separately rather than folded into ``input_tokens``\nbecause it is priced differently, and a cost ledger that cannot see the\ndifference cannot explain its own numbers.",
+      "properties": {
+        "cached_input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Cached Input Tokens",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Reasoning Tokens",
+          "type": "integer"
+        }
+      },
+      "title": "TokenUsage",
+      "type": "object"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/runner-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What comes back. Untrusted until validated.",
+  "properties": {
+    "cost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CostEntry"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "diff": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DiffStat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "discovery_notes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Discovery Notes",
+      "type": "array"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exit Code"
+    },
+    "finished_at": {
+      "format": "date-time",
+      "title": "Finished At",
+      "type": "string"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "outcome": {
+      "$ref": "#/$defs/RunnerOutcome"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "stage_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Stage Id",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "test_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "tree_hash": {
+      "anyOf": [
+        {
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tree Hash"
+    },
+    "unresolved_stubs": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Unresolved Stubs",
+      "type": "array"
+    },
+    "usage": {
+      "$ref": "#/$defs/TokenUsage",
+      "default": {
+        "cached_input_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  "required": [
+    "run_id",
+    "stage_id",
+    "outcome",
+    "started_at",
+    "finished_at"
+  ],
+  "title": "RunnerResult",
+  "type": "object"
+}

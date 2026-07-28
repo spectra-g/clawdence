@@ -17,7 +17,7 @@ Or `make setup`, which does both.
 ## Before you push
 
 ```sh
-make check    # ruff, ruff format --check, mypy --strict, pytest
+make check    # ruff, ruff format --check, mypy --strict, pytest, schema drift
 ```
 
 CI runs the same commands plus a full-history secret scan. If `make check` passes locally, CI
@@ -47,6 +47,17 @@ resolving silently. Add dependencies with `uv add 'name==X.Y.Z'` and commit the 
 with them.
 
 GitHub Actions are pinned by commit SHA with the tag in a trailing comment. Keep both in sync.
+
+## The domain model and `schemas/`
+
+`src/clawdence/domain/` is the single source for both the Python types and the JSON Schema in
+`schemas/`. If you change a type, run `make schema` and commit the regenerated files in the same
+commit — `make check` and CI both fail when the two have drifted.
+
+Treat these types as the expensive thing to change, because everything is written against them.
+A new field is cheap; a renamed or re-shaped one is not. If a change loosens a constraint that a
+docstring says is deliberate — argv instead of shell strings, required tree hashes, budgets that
+can only abort — say why in the PR. Those are decisions, not defaults.
 
 ## Code style
 

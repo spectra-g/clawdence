@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "Budget": {
+      "additionalProperties": false,
+      "description": "A cap on what one run, or one step, may spend.\n\nEvery limit is optional; ``None`` means unlimited on that axis. A budget\nwith every field ``None`` is legal and means \"no cap\" — which is a choice\nthe operator has to make explicitly rather than inherit.",
+      "properties": {
+        "max_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "max_usd": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Usd"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        },
+        "on_exceeded": {
+          "const": "abort",
+          "default": "abort",
+          "title": "On Exceeded",
+          "type": "string"
+        }
+      },
+      "title": "Budget",
+      "type": "object"
+    },
+    "RunStatus": {
+      "description": "Where a run is. Mirrors the state machine in ARCHITECTURE.md §4.",
+      "enum": [
+        "queued",
+        "triaged",
+        "planning",
+        "consensus",
+        "splitting",
+        "exploring",
+        "coding",
+        "verifying",
+        "review",
+        "reverifying",
+        "merged",
+        "halted",
+        "cancelled",
+        "done"
+      ],
+      "title": "RunStatus",
+      "type": "string"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/run.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One execution of one workflow against one work item.",
+  "properties": {
+    "budget": {
+      "$ref": "#/$defs/Budget",
+      "default": {
+        "max_tokens": null,
+        "max_usd": null,
+        "max_wall_clock_seconds": null,
+        "on_exceeded": "abort"
+      }
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "repo_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Repo Id"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus",
+      "default": "queued"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "work_item_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Work Item Id",
+      "type": "string"
+    },
+    "workflow": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Workflow",
+      "type": "string"
+    },
+    "workflow_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$",
+      "title": "Workflow Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "work_item_id",
+    "workflow",
+    "workflow_version",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Run",
+  "type": "object"
+}

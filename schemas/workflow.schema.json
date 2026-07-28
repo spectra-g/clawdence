@@ -1,0 +1,739 @@
+{
+  "$defs": {
+    "AgentStage": {
+      "additionalProperties": false,
+      "description": "Invoke an LLM in a declared role.\n\nAgent steps are stateless: every execution starts from a clean context and\nall state lives in the store. v1 reset ``sessions.json`` before every spawn\nfor exactly this reason, and it is the single biggest reason its later\npipeline was more reliable than its earlier one.",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Budget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context_budget_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Budget Tokens"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "max_turns": {
+          "default": 1,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Turns",
+          "type": "integer"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelSelector"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_context_overflow": {
+          "$ref": "#/$defs/ContextOverflowPolicy",
+          "default": "fail"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Version"
+        },
+        "response_schema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Schema"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "salvage_partial_output": {
+          "default": false,
+          "title": "Salvage Partial Output",
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "type": {
+          "const": "agent",
+          "default": "agent",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "model"
+      ],
+      "title": "AgentStage",
+      "type": "object"
+    },
+    "ApprovalStage": {
+      "additionalProperties": false,
+      "description": "Ask a human, and carry what they said into what happens next.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "require_different_approver": {
+          "default": false,
+          "title": "Require Different Approver",
+          "type": "boolean"
+        },
+        "required_approver": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Required Approver"
+        },
+        "response_schema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Schema"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "timeout_seconds_override": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds Override"
+        },
+        "type": {
+          "const": "approval",
+          "default": "approval",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "prompt"
+      ],
+      "title": "ApprovalStage",
+      "type": "object"
+    },
+    "Budget": {
+      "additionalProperties": false,
+      "description": "A cap on what one run, or one step, may spend.\n\nEvery limit is optional; ``None`` means unlimited on that axis. A budget\nwith every field ``None`` is legal and means \"no cap\" — which is a choice\nthe operator has to make explicitly rather than inherit.",
+      "properties": {
+        "max_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "max_usd": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Usd"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        },
+        "on_exceeded": {
+          "const": "abort",
+          "default": "abort",
+          "title": "On Exceeded",
+          "type": "string"
+        }
+      },
+      "title": "Budget",
+      "type": "object"
+    },
+    "ContextOverflowPolicy": {
+      "description": "What happens when an agent step exceeds its context budget.\n\nSilently dropping context is not an option. v1's whole Kimi failure class —\ntool calls emitted inside think blocks, sessions ending with no reply — was\ncontext growth across turns with no declared policy.",
+      "enum": [
+        "compact",
+        "truncate",
+        "fail"
+      ],
+      "title": "ContextOverflowPolicy",
+      "type": "string"
+    },
+    "ModelCapability": {
+      "enum": [
+        "tool_calling",
+        "structured_output",
+        "long_context",
+        "vision"
+      ],
+      "title": "ModelCapability",
+      "type": "string"
+    },
+    "ModelSelector": {
+      "additionalProperties": false,
+      "description": "Which model runs a step, and what it must be able to do.\n\nModel is per *step*, not per agent — v1 pinned it per agent in\n``openclaw.json``, so changing one role's model changed it everywhere that\nrole appeared.\n\n``requires`` exists so a model swap fails validation rather than failing\nmysteriously at run time. ``temperature`` and ``seed`` are pinned so the\neval harness measures prompt changes rather than sampling noise.",
+      "properties": {
+        "fallbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallbacks",
+          "type": "array"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "requires": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ModelCapability"
+          },
+          "title": "Requires",
+          "type": "array"
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Seed"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "ModelSelector",
+      "type": "object"
+    },
+    "OnError": {
+      "description": "What a stage failure does to the run.",
+      "enum": [
+        "fail",
+        "continue",
+        "skip_rest"
+      ],
+      "title": "OnError",
+      "type": "string"
+    },
+    "RetryPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "backoff_seconds": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Backoff Seconds",
+          "type": "number"
+        },
+        "max_attempts": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        }
+      },
+      "title": "RetryPolicy",
+      "type": "object"
+    },
+    "RunnerStage": {
+      "additionalProperties": false,
+      "description": "Execute repo code in the data plane.",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Budget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "isolation_tier_override": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Isolation Tier Override"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "runner",
+          "default": "runner",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RunnerStage",
+      "type": "object"
+    },
+    "ScriptStage": {
+      "additionalProperties": false,
+      "description": "Run a command. No shell, no interpolation into command text.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Command",
+          "type": "array"
+        },
+        "cwd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cwd"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "stdin": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stdin"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "script",
+          "default": "script",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "command"
+      ],
+      "title": "ScriptStage",
+      "type": "object"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/workflow.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An ordered process, versioned and pinned per run.",
+  "properties": {
+    "default_budget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Budget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "name": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "stages": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "agent": "#/$defs/AgentStage",
+            "approval": "#/$defs/ApprovalStage",
+            "runner": "#/$defs/RunnerStage",
+            "script": "#/$defs/ScriptStage"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/ScriptStage"
+          },
+          {
+            "$ref": "#/$defs/AgentStage"
+          },
+          {
+            "$ref": "#/$defs/RunnerStage"
+          },
+          {
+            "$ref": "#/$defs/ApprovalStage"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Stages",
+      "type": "array"
+    },
+    "version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "version",
+    "stages"
+  ],
+  "title": "Workflow",
+  "type": "object"
+}

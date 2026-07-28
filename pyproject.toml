@@ -16,10 +16,14 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 
-# Runtime dependencies are deliberately empty for now. Every dependency added
-# from here on is pinned to an exact version and resolved through uv.lock —
-# pinning from the first commit rather than retrofitting it later.
-dependencies = []
+# Every runtime dependency is pinned to an exact version and resolved through
+# uv.lock — pinning from the first commit rather than retrofitting it later.
+#
+# pydantic is the single source of the domain model (S2): the Python types are
+# authored once and the JSON Schema in `schemas/` is generated from them.
+dependencies = [
+    "pydantic==2.13.4",
+]
 
 [project.scripts]
 clawdence = "clawdence.cli:main"
@@ -29,11 +33,15 @@ Homepage = "https://github.com/spectra-g/clawdence"
 
 [dependency-groups]
 dev = [
+    # Validates domain instances against the *generated* schemas, so the JSON
+    # Schema projection is proven faithful rather than merely committed.
+    "jsonschema==4.26.0",
     "mypy==2.3.0",
     "pre-commit==4.6.1",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
     "ruff==0.16.0",
+    "types-jsonschema==4.26.0.20260518",
 ]
 
 [build-system]
@@ -67,6 +75,10 @@ select = [
 
 [tool.mypy]
 python_version = "3.12"
+# The domain model is pydantic, so mypy needs the plugin to see synthesised
+# __init__ signatures and frozen fields as read-only. Without it, strict mode
+# checks less of the spine than it appears to.
+plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
 strict = true
 warn_unreachable = true

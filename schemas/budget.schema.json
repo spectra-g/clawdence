@@ -1,0 +1,59 @@
+{
+  "$id": "https://clawdence.dev/schemas/budget.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A cap on what one run, or one step, may spend.\n\nEvery limit is optional; ``None`` means unlimited on that axis. A budget\nwith every field ``None`` is legal and means \"no cap\" — which is a choice\nthe operator has to make explicitly rather than inherit.",
+  "properties": {
+    "max_tokens": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Tokens"
+    },
+    "max_usd": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0.0,
+          "type": "number"
+        },
+        {
+          "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Usd"
+    },
+    "max_wall_clock_seconds": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Wall Clock Seconds"
+    },
+    "on_exceeded": {
+      "const": "abort",
+      "default": "abort",
+      "title": "On Exceeded",
+      "type": "string"
+    }
+  },
+  "title": "Budget",
+  "type": "object"
+}
