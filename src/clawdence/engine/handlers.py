@@ -21,6 +21,7 @@ The child gets ``env:`` from the stage plus a fixed, boring allowlist.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from collections.abc import Mapping
@@ -173,8 +174,11 @@ class ScriptHandler:
             )
         except asyncio.CancelledError:
             # A timeout cancels the await; the child is still running and would
-            # outlive the run. Kill it before letting the cancellation through.
-            _terminate(process)
+            # outlive the run. Kill it *and reap it* before letting the
+            # cancellation through — a killed process that is never waited on
+            # stays a zombie, and its pipes stay open, so the event loop closes
+            # underneath a transport that still intends to clean itself up.
+            await _kill_and_reap(process)
             raise
 
         stdout, out_truncated = _capture(raw_out)
@@ -225,13 +229,28 @@ class ScriptHandler:
             raise StepFailure("interpolation", f"{where}: {exc}", retryable=False) from exc
 
 
-def _terminate(process: asyncio.subprocess.Process) -> None:
-    """Best-effort kill of a child whose parent step is over."""
-    if process.returncode is None:
-        try:
-            process.kill()
-        except ProcessLookupError:  # pragma: no cover - it exited between checks
-            pass
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    """Kill a child whose step is over, then wait for it.
+
+    Both halves matter. Without the kill the process outlives the run — v1's
+    stale-spawn bug. Without the wait it becomes a zombie whose pipes are still
+    open, and the transport's finaliser then runs after the event loop has
+    closed, which surfaces as a stray ``RuntimeError: Event loop is closed``
+    from a thread nobody is looking at.
+
+    The wait is safe inside a cancellation handler: the process has already
+    been killed, so it resolves on the next loop iteration, and ``wait_for``
+    cancels its inner coroutine once and then awaits the result — it does not
+    re-cancel while this is unwinding.
+    """
+    if process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:  # pragma: no cover - it exited between checks
+        return
+    with contextlib.suppress(asyncio.CancelledError):
+        await process.wait()
 
 
 def _capture(raw: bytes) -> tuple[str, bool]:

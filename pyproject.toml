@@ -93,6 +93,11 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
+# Warnings are errors. The engine runs subprocesses under an event loop, where
+# the failure mode is a resource finalised after the loop closed — which pytest
+# reports as a warning and CI renders as an annotation on a green build. That is
+# exactly the kind of thing that gets scrolled past, so it fails here instead.
+filterwarnings = ["error"]
 
 [tool.coverage.run]
 source = ["src/clawdence"]
