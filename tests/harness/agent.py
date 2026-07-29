@@ -60,13 +60,55 @@ class FakeAgent:
         """Report token usage the way a CLI does — in prose, on stdout."""
         return self.say(f"{label}: {count}")
 
+    # ----------------------------------------------------------- event stream
+
+    def event(self, **fields: Any) -> Self:
+        """Emit one line of the agent's own JSON event stream.
+
+        The channel §3.7a's two invisible failures arrive on. Raw rather than
+        wrapped in a shape this harness invents, because the point of the
+        assertions built on it is that the reader copes with the shapes real
+        CLIs actually emit.
+        """
+        return self.say(json.dumps(fields))
+
+    def turn(self, text: str = "on it") -> Self:
+        """A model turn — the thing whose absence is ``NO_MODEL_RESPONSE``."""
+        return self.event(type="assistant", message={"role": "assistant", "content": text})
+
+    def provider_error(self, message: str) -> Self:
+        """A terminal turn carrying a provider failure.
+
+        The run still exits **0** unless a test says otherwise, which is the
+        whole finding: this is what a false success looks like from outside.
+        """
+        return self.event(type="result", subtype="error_during_execution", message=message)
+
     def write(self, path: str, contents: str) -> Self:
         """Write a file inside the worktree. This is 'doing the work'."""
         return self._add("write", [path, contents])
 
+    def copy(self, source: str, destination: str) -> Self:
+        """Copy one path in the worktree to another.
+
+        How a test sees what the agent was *given* — the conventions file the
+        runner installed, say — without the agent having to interpret it.
+        """
+        return self._add("copy", [source, destination])
+
     def append(self, path: str, text: str) -> Self:
         """Append to a file — a side effect that counts how often this ran."""
         return self._add("append", [path, text])
+
+    def commit(self, message: str = "agent: the work") -> Self:
+        """Commit the work, the way an agent that finished its job does.
+
+        Fluent and separate from ``write`` because **not** calling it is a test:
+        an agent that edits and never commits is §3.7a's dropped commit, the
+        characteristic weak-model failure, and until S6b the runner's own safety
+        commit made it indistinguishable from a run that went well.
+        """
+        return self._add("commit", message)
 
     def verdict(
         self,

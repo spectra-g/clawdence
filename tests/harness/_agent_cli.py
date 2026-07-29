@@ -28,6 +28,13 @@ from pathlib import Path
 from typing import Any
 
 
+def _git(*args: str) -> None:
+    """Git as the agent runs it — off ``PATH``, with whatever the runner's own
+    environment configured. Nothing here is hardened, because hardening it would
+    make this a worse stand-in for the CLIs it stands in for."""
+    subprocess.run(["git", *args], check=True)  # noqa: S603, S607
+
+
 def main(argv: list[str]) -> int:
     program: list[list[Any]] = json.loads(argv[1]) if len(argv) > 1 else []
 
@@ -42,6 +49,10 @@ def main(argv: list[str]) -> int:
             target = Path(value[0])
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(value[1], encoding="utf-8")
+        elif action == "copy":
+            source, destination = Path(value[0]), Path(value[1])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())
         elif action == "append":
             target = Path(value[0])
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +74,13 @@ def main(argv: list[str]) -> int:
             print(f"plan bytes: {len(data.encode('utf-8'))}", flush=True)
             if value:
                 Path(value).write_text(data, encoding="utf-8")
+        elif action == "commit":
+            # What a real coding CLI does, and what the runner's own commit is
+            # only a net for. Identity comes from `GIT_AUTHOR_*` in the
+            # environment — §3.9's "commits need a configured author inside the
+            # runner" — so this also proves that half of the I/O contract.
+            _git("add", "--all")
+            _git("commit", "--no-verify", "--no-gpg-sign", "--message", str(value))
         elif action == "spawn":
             # A background process that outlives this one and inherits its
             # stdout — a dev server, a build daemon, a language server. The

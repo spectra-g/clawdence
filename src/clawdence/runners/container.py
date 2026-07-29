@@ -70,7 +70,6 @@ from clawdence.ports.errors import PermanentError
 from clawdence.ports.secrets import SecretProvider
 from clawdence.runners import worktree as wt
 from clawdence.runners.agent import (
-    HOME_DIR,
     AgentCommand,
     AgentRunner,
     Launch,
@@ -82,6 +81,7 @@ from clawdence.runners.engine import (
     Mount,
     client_environment,
 )
+from clawdence.runners.installed import HOME_DIR, Installed
 from clawdence.runners.outcome import Completion
 from clawdence.runners.stream import LogSink
 
@@ -243,7 +243,7 @@ class ContainerRunner(AgentRunner):
         client.update({name: environment.values[name] for name in environment.secret_names})
         return Launch(argv=self._engine.run_argv(spec), env=client, cwd=worktree)
 
-    async def _prepare(self, request: RunnerRequest, worktree: Path) -> str | None:
+    async def _prepare(self, request: RunnerRequest, worktree: Path) -> Installed:
         """Clear a container this attempt's name already belongs to, then set up.
 
         The name is derived from the idempotency key, so a crashed control plane

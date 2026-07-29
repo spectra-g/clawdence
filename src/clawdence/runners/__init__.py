@@ -6,7 +6,7 @@ the I/O contract from the plan's §3.9 that every one of them shares.
 
 The layering is one-directional, as elsewhere::
 
-    verdict ─ worktree ─ stream ─ process
+    verdict ─ worktree ─ stream ─ process ─ turns ─ installed
        └─ plan
        └─ outcome
             └─ agent
@@ -29,6 +29,15 @@ the tier: a container is *told* it was OOM-killed, a host process can only infer
 it from a ``SIGKILL`` it did not send, and nothing observes a denied egress until
 S7b exists to deny one. Splitting them meant the taxonomy was completely testable
 in S6, and S7 filled in ``oom_killed`` without reopening the ranking.
+
+S6b added the two modules that answer questions the exit status cannot. ``turns``
+reads the agent's own event stream, because a provider failure arrives as an exit
+status of **zero** and reporting that as success is a false success — the one
+class of bug everything downstream is defenceless against. ``installed`` records
+the bytes the runner writes into the worktree, because "the tree is dirty" only
+means the agent left work behind if the dirt is not our own plan and conventions
+file, and because a repository that tracks a file at the path we install to gets
+our copy swept into its pull request otherwise (§3.9).
 
 Wiring one to a real CLI is configuration rather than code, because the runner
 CLIs move faster than this system will and hardcoding somebody else's flag names
@@ -70,9 +79,6 @@ from __future__ import annotations
 
 from clawdence.runners.agent import (
     FORBIDDEN_ENV,
-    HOME_DIR,
-    PLAN_PATH,
-    WORK_DIR,
     AgentCommand,
     AgentRunner,
     Environment,
@@ -96,6 +102,7 @@ from clawdence.runners.engine import (
 )
 from clawdence.runners.handler import RETRYABLE, Dispatch, RunnerHandler
 from clawdence.runners.host import INHERITED_ENV, HostRunner
+from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
 from clawdence.runners.outcome import Completion, classify
 from clawdence.runners.plan import build as build_plan
 from clawdence.runners.stream import (
@@ -107,6 +114,7 @@ from clawdence.runners.stream import (
     TokenTally,
     write_to,
 )
+from clawdence.runners.turns import MAX_ERROR_CHARS, TurnTracker
 from clawdence.runners.verdict import (
     MAX_VERDICT_BYTES,
     VERDICT_PATH,
@@ -123,6 +131,7 @@ __all__ = [
     "HOME_DIR",
     "INHERITED_ENV",
     "LABEL_NAMESPACE",
+    "MAX_ERROR_CHARS",
     "MAX_VERDICT_BYTES",
     "PLAN_PATH",
     "RETRYABLE",
@@ -143,6 +152,7 @@ __all__ = [
     "GitError",
     "GitIdentity",
     "HostRunner",
+    "Installed",
     "Launch",
     "LogLine",
     "LogSink",
@@ -154,6 +164,7 @@ __all__ = [
     "Tail",
     "TokenPrice",
     "TokenTally",
+    "TurnTracker",
     "VerdictError",
     "VerdictStatus",
     "build_plan",

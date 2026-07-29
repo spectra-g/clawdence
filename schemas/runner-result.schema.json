@@ -154,7 +154,7 @@
       "type": "object"
     },
     "RunnerOutcome": {
-      "description": "The failure taxonomy from the plan's §3.7.\n\nv1 collapsed nearly all of these into \"runner failed\", which meant the\nretry policy could not tell a flaky test from a budget cap from an OOM\nkill — and so treated them identically. Each value here needs different\nhandling, which is the entire reason they are distinct.\n\n``BLOCKED`` is the one value not in the plan's §3.7 list, added in S6 when\nthe runner needed somewhere to put \"the agent stopped because something\noutside its control was missing\". Reporting that as ``TESTS_FAILED`` gets it\nretried until the attempts run out, which is v1's behaviour and how a budget\nis spent re-discovering that a fixture still does not exist. It is a failure\nthat a second identical attempt cannot change, so it halts to a human.",
+      "description": "The failure taxonomy from the plan's §3.7.\n\nv1 collapsed nearly all of these into \"runner failed\", which meant the\nretry policy could not tell a flaky test from a budget cap from an OOM\nkill — and so treated them identically. Each value here needs different\nhandling, which is the entire reason they are distinct.\n\n``BLOCKED`` is the one value not in the plan's §3.7 list, added in S6 when\nthe runner needed somewhere to put \"the agent stopped because something\noutside its control was missing\". Reporting that as ``TESTS_FAILED`` gets it\nretried until the attempts run out, which is v1's behaviour and how a budget\nis spent re-discovering that a fixture still does not exist. It is a failure\nthat a second identical attempt cannot change, so it halts to a human.\n\nThe last three are §3.7a's, added in S6b. Each names a failure that never\nreaches the process's exit status, which is what everything above them is\nanchored on, and each has cost somebody a production incident:\n\n- ``PROVIDER_ERROR`` — the agent exited **0** having emitted a final turn\n  that carried an error: a rate limit, a 400, \"your credit balance is too\n  low\". Reported as ``SUCCEEDED`` this is a **false success**, and a false\n  success is a different severity of bug from a misclassified failure —\n  everything downstream, from the merge gate to the epic aggregator, is\n  built to trust that one value.\n- ``DROPPED_COMMIT`` — the agent edited files and never committed them.\n  Reported as ``EMPTY_DIFF`` it reads as a deliberate no-op, and it is the\n  characteristic weak-model failure rather than a rare one.\n- ``NO_MODEL_RESPONSE`` — events flowed but not one model turn did, because\n  the credential was rejected. Reported as ``STARTUP_FAILED`` it is\n  indistinguishable from a missing image, which is a different repair.",
       "enum": [
         "succeeded",
         "tests-failed",
@@ -167,7 +167,10 @@
         "budget-exceeded",
         "network-denied",
         "startup-failed",
-        "cancelled"
+        "cancelled",
+        "provider-error",
+        "dropped-commit",
+        "no-model-response"
       ],
       "title": "RunnerOutcome",
       "type": "string"
@@ -280,8 +283,14 @@
   "$id": "https://clawdence.dev/schemas/runner-result.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "What comes back. Untrusted until validated.",
+  "description": "What comes back. Untrusted until validated.\n\nThe artifacts below ``diff`` are §3.10's half of the boundary: they are\ngathered by the tier, in the workspace, at the moment the work is collected,\nbecause that is the only moment they are true. Deriving them afterwards from\n``worktree_path`` is what this replaces.",
   "properties": {
+    "commits_ahead": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Commits Ahead",
+      "type": "integer"
+    },
     "cost": {
       "anyOf": [
         {
@@ -303,6 +312,21 @@
         }
       ],
       "default": null
+    },
+    "dirty": {
+      "default": false,
+      "title": "Dirty",
+      "type": "boolean"
+    },
+    "dirty_paths": {
+      "default": [],
+      "items": {
+        "maxLength": 1024,
+        "type": "string"
+      },
+      "maxItems": 200,
+      "title": "Dirty Paths",
+      "type": "array"
     },
     "discovery_notes": {
       "default": [],

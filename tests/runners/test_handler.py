@@ -58,6 +58,11 @@ def test_a_successful_run_becomes_a_step_output() -> None:
         "files_changed": 2,
         "insertions": 2,
         "deletions": 0,
+        # §3.10's artifacts, forwarded so a later stage can ask "did the agent
+        # commit anything" without running git against a worktree it may not be
+        # able to reach.
+        "commits_ahead": 1,
+        "dirty": False,
         "tests_failed": None,
         "input_tokens": 0,
         "output_tokens": 0,

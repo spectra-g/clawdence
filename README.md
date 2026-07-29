@@ -153,18 +153,35 @@ it the hard way:
 
 - **Output streams while it runs.** v1 captured it all and delivered it at the end, so forty
   minutes of an agent going nowhere looked exactly like forty minutes of progress.
-- **Eleven outcomes, not "failed".** Timeout, OOM kill, disk full, non-zero exit, empty diff,
+- **Fourteen outcomes, not "failed".** Timeout, OOM kill, disk full, non-zero exit, empty diff,
   failing tests, budget exceeded, network denied, blocked, cancelled, startup failure. They are
   handled differently — failing tests are worth another attempt, an agent blocked on a missing
   dependency is worth a human — and a taxonomy with one value cannot express that.
+- **Three of them are invisible to the exit status**, which is what everything above is anchored
+  on. An agent can exit **0** having emitted a final turn carrying "your credit balance is too
+  low"; that is a *false success*, and it is worse than one undifferentiated value, because
+  everything downstream is built to trust the one value it is not allowed to doubt. So the
+  agent's own event stream is read for the turn it ended on (`provider-error`) and for whether the
+  model ever answered at all (`no-model-response`, the rejected credential — which otherwise looks
+  identical to a missing image). The third is `dropped-commit`: an agent that edited files and
+  never committed them. The runner commits the work anyway so none of it is lost, and reports
+  that the agent never claimed it.
+- **The result carries artifacts, not a path to go and look at.** Commits ahead of the declared
+  base, whether the tree was left dirty, and which paths — collected in the workspace at the moment
+  the work is collected, before the container is removed. The control plane decides the outcome
+  from the payload rather than from a directory it may no longer be able to reach. Telling the
+  agent's mess from the runner's own is why the files the runner installs are recorded byte for
+  byte: a repository that keeps its own `AGENTS.md` gets it back untouched, and an agent that
+  deliberately edited that file keeps its edit.
 - **Budgets abort mid-run.** Tokens are counted off the stream as they are reported and the
   process is killed when the cap is passed. A dollar cap with no configured prices is refused at
   dispatch rather than accepted and ignored.
 - **The worktree is treated as output, not as a workspace.** The diff is re-derived with `git`
   rather than taken from the agent's word, the verdict file is size-capped and never followed
   through a symlink, git is invoked with the config knobs that execute programs pinned off, and
-  everything the runner installs — plan, verdict, conventions file — is excluded from git so none
-  of it can reach a pull request.
+  everything the runner installs — plan, verdict, conventions file — is excluded from git and put
+  back afterwards, so none of it can reach a pull request even at a path the repository already
+  tracks, where an exclude file has no effect.
 - **No control-plane credential is in the environment to steal.** The child's environment is built
   from an allowlist, and the runner refuses to start if a chat, tracker or VCS credential is in it.
   A test asserts that from inside a running agent — and on the container tier, from inside a real

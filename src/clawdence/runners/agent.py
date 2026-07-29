@@ -46,7 +46,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -57,6 +56,7 @@ from pathlib import Path
 from typing import ClassVar, Final
 
 from clawdence.domain import (
+    MAX_DIRTY_PATHS,
     Budget,
     ContractKind,
     CostEntry,
@@ -73,6 +73,7 @@ from clawdence.ports.secrets import NullSecrets, SecretProvider
 from clawdence.runners import plan as plan_text
 from clawdence.runners import verdict as verdict_file
 from clawdence.runners import worktree as wt
+from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
 from clawdence.runners.outcome import Completion, classify
 from clawdence.runners.process import kill_and_reap
 from clawdence.runners.stream import (
@@ -84,20 +85,7 @@ from clawdence.runners.stream import (
     TokenTally,
     pump,
 )
-
-#: Directory the runner owns inside the worktree. One entry in git's exclude file
-#: covers everything installed into it, so nothing the runner writes can reach a
-#: pull request.
-WORK_DIR: Final = ".clawdence"
-
-#: Where the plan is written when the CLI reads it from a file.
-PLAN_PATH: Final = f"{WORK_DIR}/plan.md"
-
-#: A writable ``HOME`` for the agent, inside the directory already hidden from
-#: git. The container tier needs one because the image's ``HOME`` may not be
-#: writable by the uid we run as, and a CLI whose first act is writing a config
-#: file fails on a permission error that reads like a bug in this system.
-HOME_DIR: Final = f"{WORK_DIR}/home"
+from clawdence.runners.turns import TurnTracker
 
 #: Names, and prefixes, that must never reach a runner. This is §3.1's trust
 #: boundary written as a check. A denylist *on top of* each tier's allowlist —
@@ -367,14 +355,22 @@ class AgentRunner(ABC):
 
         installed = await self._prepare(request, worktree)
         try:
-            completion = await self._run_agent(request, worktree, tally)
-        except asyncio.CancelledError:
-            if request.idempotency_key not in self._stopping:
-                # The engine's own timeout, unwinding. One path out for "did not
-                # finish" is the executor's contract, and it is a different event
-                # from an operator pressing stop.
-                raise
-            completion = Completion(cancelled=True, killed_by_us=True)
+            try:
+                completion = await self._run_agent(request, worktree, tally)
+            except asyncio.CancelledError:
+                if request.idempotency_key not in self._stopping:
+                    # The engine's own timeout, unwinding. One path out for "did
+                    # not finish" is the executor's contract, and it is a
+                    # different event from an operator pressing stop.
+                    raise
+                completion = Completion(cancelled=True, killed_by_us=True)
+            # Inside the try, and so **before teardown** (§3.10). The artifacts
+            # are only true at the moment the work is collected: afterwards the
+            # container is gone. On this tier they happen to survive teardown —
+            # the worktree is a host bind mount — but ordering the collection
+            # around that would be depending on a coincidence of the one tier
+            # where the assumption holds, which is the assumption §3.10 removes.
+            completion = await self._collect(request, worktree, completion, installed)
         finally:
             # Teardown before tidy, and both before anything can fail: whatever
             # the tier allocated outlives this process otherwise, and a leaked
@@ -382,7 +378,6 @@ class AgentRunner(ABC):
             await self._teardown(request)
             self._tidy(worktree, installed)
 
-        completion = await self._inspect(request, worktree, completion)
         return self._result(request, completion, started_at=started_at, tally=tally)
 
     async def _not_runnable(self, request: RunnerRequest, worktree: Path) -> Completion | None:
@@ -401,29 +396,33 @@ class AgentRunner(ABC):
             )
         return None
 
-    async def _prepare(self, request: RunnerRequest, worktree: Path) -> str | None:
-        """Install what the agent needs and hide all of it from git.
+    async def _prepare(self, request: RunnerRequest, worktree: Path) -> Installed:
+        """Install what the agent needs, hide all of it from git, and record it.
 
         The exclusion is not housekeeping. Every file installed here would
         otherwise be picked up by ``git add --all`` and land in the pull request —
         the conventions file, the plan, the verdict — which is changes nobody
         asked for appearing in somebody's repository under our name.
 
-        Returns the conventions filename if one was installed, so the cleanup
-        removes only what this run put there.
+        The *record* is the S6b half, and it exists because the exclusion is not
+        enough on its own: ``$GIT_DIR/info/exclude`` has no effect on a path the
+        repository already tracks (§3.9). Knowing the bytes is what lets
+        ``_collect`` put such a path back, and it is what makes "the tree is
+        dirty" mean the agent's work rather than ours.
         """
+        installed = Installed(worktree=worktree)
         (worktree / HOME_DIR).mkdir(parents=True, exist_ok=True)
         verdict_file.clear(worktree)
 
-        installed = self._install_conventions(request, worktree)
-        excluded = [f"/{WORK_DIR}/"] + ([f"/{installed}"] if installed else [])
+        conventions = self._install_conventions(request, installed)
+        excluded = [f"/{WORK_DIR}/"] + ([f"/{conventions}"] if conventions else [])
         await wt.exclude(worktree, *excluded)
 
         if self._command.delivery is PlanDelivery.FILE:
-            (worktree / PLAN_PATH).write_text(plan_text.build(request), encoding="utf-8")
+            installed.write(PLAN_PATH, plan_text.build(request))
         return installed
 
-    def _install_conventions(self, request: RunnerRequest, worktree: Path) -> str | None:
+    def _install_conventions(self, request: RunnerRequest, installed: Installed) -> str | None:
         """Copy the repo's conventions file to where this CLI looks for it.
 
         v1's ``agentsMd``. The source is a control-plane path and the destination
@@ -431,9 +430,22 @@ class AgentRunner(ABC):
         file is ``AGENTS.md`` to one CLI and ``CLAUDE.md`` to another, and a
         repository should not have to keep two.
 
-        A file the repository already has is left alone. Copying over it would
-        show up as a modification to a tracked file — the pull request containing
-        changes nobody asked for, again.
+        **S6 skipped a destination that already existed; S6b writes over it.**
+        The skip avoided one bug by causing a quieter one: a repository that
+        tracks its own ``AGENTS.md`` — the common case in the repositories this
+        is pointed at — silently ignored the conventions file an operator had
+        configured for it, and the field went dead exactly where it was needed.
+        What makes overwriting safe is the record: ``_collect`` reverts the path
+        wherever it still holds our bytes, so the repository's own copy comes
+        back and nothing reaches a pull request. An agent that *deliberately*
+        edited the file has its edit survive, which is the case the byte
+        comparison exists to protect.
+
+        The residue, stated because it is real: an agent editing that file edits
+        *our* version of it, so its diff is against our content rather than the
+        repository's. That is the price of the conventions file being installed
+        at all, and it is paid only on repositories that track a file at the
+        same path.
         """
         source_path = request.profile.agents_md_path
         if source_path is None:
@@ -442,25 +454,33 @@ class AgentRunner(ABC):
         if not source.is_file():
             return None
 
-        destination = worktree / self._command.conventions_filename
-        if destination.exists():
+        destination = self._command.conventions_filename
+        try:
+            installed.copy(source, destination)
+        except OSError:
+            # A conventions file we cannot install is not a reason to fail a run
+            # that has not started. The agent works without it, slightly worse.
             return None
-        shutil.copyfile(source, destination)
-        return self._command.conventions_filename
+        return destination
 
-    def _tidy(self, worktree: Path, installed: str | None) -> None:
+    def _tidy(self, worktree: Path, installed: Installed) -> None:
         """Take back what this run installed. Runs even when it was cancelled.
 
-        The verdict is deliberately *not* removed: it is the only account of what
-        the agent thought it was doing, it is excluded from git, and the next
-        attempt clears it before starting. Removing it here would delete the
-        evidence at exactly the moment somebody wants to read it.
+        Only paths this run wrote, and only where they still hold what it wrote:
+        an agent that replaced the conventions file with something of its own has
+        made that file the agent's, and deleting it here would delete work.
+
+        The verdict is deliberately *not* removed — it is not written by us and
+        so is not in the record. It is the only account of what the agent thought
+        it was doing, it is excluded from git, and the next attempt clears it
+        before starting. Removing it here would delete the evidence at exactly
+        the moment somebody wants to read it.
         """
-        with contextlib.suppress(OSError):
-            (worktree / PLAN_PATH).unlink(missing_ok=True)
-        if installed is not None:
+        for path in installed.paths():
+            if not installed.owns(path):
+                continue
             with contextlib.suppress(OSError):
-                (worktree / installed).unlink(missing_ok=True)
+                (worktree / path).unlink(missing_ok=True)
 
     async def _run_agent(
         self,
@@ -533,6 +553,11 @@ class AgentRunner(ABC):
             budget_exceeded=watcher.overspent or (timed_out and limit_is_budget),
             killed_by_us=timed_out or watcher.overspent,
             stderr_tail=watcher.stderr.last(),
+            # §3.7a: the two things the exit status cannot say. Both come off the
+            # stream that was already being read for tokens — reading it twice
+            # would be two chances to disagree about what arrived.
+            provider_error=watcher.turns.terminal_error,
+            model_turn_seen=watcher.turns.model_turn_seen,
         )
         return await self._observe(request, completion)
 
@@ -558,22 +583,37 @@ class AgentRunner(ABC):
         await asyncio.gather(_feed(process, feed), *readers)
         await process.wait()
 
-    async def _inspect(
+    async def _collect(
         self,
         request: RunnerRequest,
         worktree: Path,
         completion: Completion,
+        installed: Installed,
     ) -> Completion:
-        """Find out what happened to the tree, and what the agent said about it.
+        """Take the work, and the artifacts that say what it is (§3.10).
 
         Re-derived rather than reported: the diff comes from ``git``, not from
         the agent, because the number that decides whether a pull request gets
         opened should not come from the process being judged.
 
-        Host-side on every tier, and that is the point of path identity: the
-        container writes to a bind mount, so by the time it has exited the tree
-        the control plane reads is the tree the agent wrote. There is no copy
-        step to get wrong and no second answer to reconcile.
+        **The order is the design.** Each of the first three steps is only
+        answerable before the one after it has run:
+
+        1. *What did the agent leave uncommitted* — asked before anything is
+           committed, and with the runner's own installed files taken out,
+           because our plan and conventions file are in that tree on every run
+           and a naive probe would call every run dirty.
+        2. *How many commits did the agent make* — asked before the safety
+           commit below, which would otherwise be counted as one of them and
+           make ``DROPPED_COMMIT`` inexpressible.
+        3. *Put our files back* — the §3.9 repair. It reads ``owns`` per path,
+           so it has to run after step 1 has already decided whose each path is:
+           reverting first would turn every installed path into agent dirt.
+
+        Only then the safety commit. It stays, and it is why a dropped commit is
+        reported rather than lost: the work is preserved on a real tree that a
+        person can look at, and the *outcome* is what says the agent never
+        claimed it.
         """
         verdict = None
         problem = None
@@ -586,6 +626,13 @@ class AgentRunner(ABC):
             problem = str(exc)
 
         try:
+            pending = await wt.pending_changes(worktree)
+            ours = tuple(path for path in pending if installed.owns(path))
+            theirs = tuple(path for path in pending if path not in set(ours))
+
+            commits = await wt.commits_ahead(worktree, request.base_commit)
+            await self._reclaim(worktree, request.base_commit, installed)
+
             await wt.commit_all(
                 worktree,
                 f"clawdence: {request.stage_id} for {request.work_item_id}",
@@ -605,9 +652,32 @@ class AgentRunner(ABC):
             tree_hash=head,
             diff=diff,
             files_changed=diff.files_changed,
+            commits_ahead=commits,
+            # Truncated rather than refused: the domain caps this field, and a
+            # result that failed validation for having too many paths in it
+            # would be the reporting destroying the report.
+            dirty_paths=theirs[:MAX_DIRTY_PATHS],
             requires_evidence=request.contract.kind in _NEEDS_EVIDENCE,
             stderr_tail=problem or completion.stderr_tail,
         )
+
+    async def _reclaim(self, worktree: Path, base: str, installed: Installed) -> None:
+        """Undo the runner's own installs, wherever they are still the runner's.
+
+        The condition is the entire control. A path that still holds the bytes we
+        wrote was never touched by the agent and has no business in a pull
+        request; a path whose contents have changed is the agent's work, whatever
+        we originally put there, and reverting it would delete a deliberate edit
+        by an agent that was asked to make one.
+
+        Reverting to the **base** rather than undoing a modification is what
+        makes this work against a real CLI: agents run ``git add --all``, and by
+        the time this runs our conventions file is usually already committed.
+        ``wt.revert_to`` explains the four cases.
+        """
+        for path in installed.paths():
+            if installed.owns(path):
+                await wt.revert_to(worktree, base, path)
 
     # ----------------------------------------------------------------- hooks
 
@@ -723,7 +793,7 @@ class AgentRunner(ABC):
         tally: TokenTally,
     ) -> RunnerResult:
         outcome = classify(completion)
-        produced = outcome in (RunnerOutcome.SUCCEEDED, RunnerOutcome.TESTS_FAILED)
+        produced = outcome in _PRODUCED_A_TREE
         verdict = completion.verdict
 
         # A CLI that reports its own usage is believed over a regular expression
@@ -740,6 +810,9 @@ class AgentRunner(ABC):
             exit_code=completion.exit_code,
             diff=completion.diff,
             test_evidence=verdict.tests if verdict is not None else None,
+            commits_ahead=completion.commits_ahead,
+            dirty=bool(completion.dirty_paths),
+            dirty_paths=completion.dirty_paths,
             usage=usage,
             cost=(
                 CostEntry(
@@ -772,6 +845,13 @@ class AgentRunner(ABC):
             parts.append(completion.startup_error)
         elif completion.exit_code is not None:
             parts.append(f"exit {completion.exit_code}")
+        # Not gated on `include_stderr_tail`, and the difference is the point: a
+        # `provider-error` that does not say which provider error is a value
+        # nobody can act on, and this is a bounded field from a structured event
+        # rather than an unbounded echo of whatever the process printed. The
+        # residue is named in `turns.MAX_ERROR_CHARS`.
+        if completion.provider_error is not None:
+            parts.append(completion.provider_error)
         if completion.verdict is not None and completion.verdict.summary:
             parts.append(completion.verdict.summary)
         if self._command.include_stderr_tail and completion.stderr_tail:
@@ -782,6 +862,16 @@ class AgentRunner(ABC):
 #: Contracts whose definition of done is passing tests. For these, and only
 #: these, an absent verdict means the same thing as a failing one.
 _NEEDS_EVIDENCE: Final = frozenset({ContractKind.OUTSIDE_IN_TDD, ContractKind.TEST_AFTER})
+
+#: Outcomes that leave a tree worth naming. ``DROPPED_COMMIT`` is here because
+#: the runner's safety commit means the work exists: the agent never claimed it,
+#: which is what the outcome says, but somebody looking into the failure needs
+#: the hash to see what was nearly done. Every other failure gets ``None``, and
+#: ``ports.runner.validate_result`` enforces that from the other side — a hash on
+#: a timeout is a hash something eventually tries to merge.
+_PRODUCED_A_TREE: Final = frozenset(
+    {RunnerOutcome.SUCCEEDED, RunnerOutcome.TESTS_FAILED, RunnerOutcome.DROPPED_COMMIT}
+)
 
 
 @dataclass(slots=True)
@@ -799,6 +889,7 @@ class _Watcher:
     prices: TokenPrice | None
     stop: Callable[[], None]
     stderr: Tail = field(default_factory=Tail)
+    turns: TurnTracker = field(default_factory=TurnTracker)
     overspent: bool = False
 
     def line(self, line: LogLine) -> None:
@@ -806,6 +897,12 @@ class _Watcher:
             self.stderr.add(line.text)
         if self.sink is not None:
             self.sink(line)
+
+        # Stdout only. A CLI's event stream is its stdout; its stderr is where
+        # warnings and a provider's echo of a rejected request go, and reading
+        # turns out of *that* would let a diagnostic decide the outcome.
+        if line.stream is Stream.STDOUT:
+            self.turns.observe(line.text)
 
         self.tally.observe(line.text)
         if self.overspent or not self._over_budget():

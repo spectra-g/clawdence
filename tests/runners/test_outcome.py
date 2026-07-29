@@ -150,3 +150,100 @@ def test_a_crash_outranks_anything_the_agent_claimed() -> None:
     """A verdict written before the process died says what it hoped, not what
     happened."""
     assert classify(passing(exit_code=2)) is RunnerOutcome.NON_ZERO_EXIT
+
+
+# --------------------------------------------------------------------------- #
+# §3.7a — the band the exit status cannot see (S6b)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_provider_error_is_not_a_success() -> None:
+    """**The test that matters most.** The agent exits 0 with a terminal turn
+    carrying a provider failure, and having changed nothing anybody asked for.
+    Reported as ``succeeded`` this opens a pull request and advances the
+    workflow — a false success, which everything downstream is defenceless
+    against because everything downstream is built to trust that one value."""
+    assert classify(passing(provider_error="credit balance too low")) is (
+        RunnerOutcome.PROVIDER_ERROR
+    )
+
+
+def test_a_provider_error_outranks_the_exit_status_in_both_directions() -> None:
+    """Zero is the case it exists for; non-zero is ranked the same way because
+    "the provider returned a 400" is a more useful answer than "exit 1"."""
+    assert classify(passing(provider_error="a 400", exit_code=0)) is RunnerOutcome.PROVIDER_ERROR
+    assert classify(passing(provider_error="a 400", exit_code=1)) is RunnerOutcome.PROVIDER_ERROR
+
+
+def test_no_model_turn_is_its_own_failure_and_not_a_startup_one() -> None:
+    """Events flowed and not one model turn did, because the credential was
+    rejected. ``startup-failed`` is what a missing image produces, and the two
+    want opposite repairs."""
+    assert classify(passing(model_turn_seen=False)) is RunnerOutcome.NO_MODEL_RESPONSE
+
+
+def test_no_model_response_outranks_the_provider_error_it_arrives_with() -> None:
+    """A rejected credential produces both — an error frame, and no model turn
+    anywhere. The more specific of the two is the one that says nothing happened
+    at all, which leaves ``provider-error`` meaning what it should: the model was
+    working and the provider stopped it."""
+    both = passing(model_turn_seen=False, provider_error="invalid x-api-key")
+    assert classify(both) is RunnerOutcome.NO_MODEL_RESPONSE
+
+
+def test_a_cli_that_emits_no_events_is_not_reported_as_silent() -> None:
+    """``None`` is not ``False``. Most CLIs emit prose, and a reader that could
+    not say so would report ``no-model-response`` for every run of every one of
+    them."""
+    assert classify(passing(model_turn_seen=None)) is RunnerOutcome.SUCCEEDED
+
+
+def test_we_stopped_it_still_outranks_what_it_said() -> None:
+    """Band 3 went in above the exit status, not above band 1. A run we cancelled
+    that also happened to emit an error frame is a run we cancelled."""
+    assert classify(passing(cancelled=True, provider_error="a 400")) is RunnerOutcome.CANCELLED
+    assert classify(passing(timed_out=True, model_turn_seen=False)) is RunnerOutcome.TIMED_OUT
+
+
+# --------------------------------------------------------------------------- #
+# §3.7a — the three-way empty diff
+# --------------------------------------------------------------------------- #
+
+
+def test_an_agent_that_edited_and_never_committed_is_a_dropped_commit() -> None:
+    """The characteristic weak-model failure. Reported as ``empty-diff`` it reads
+    as a deliberate no-op, which is the opposite of what happened."""
+    dropped = passing(files_changed=0, commits_ahead=0, dirty_paths=("app.py",))
+    assert classify(dropped) is RunnerOutcome.DROPPED_COMMIT
+
+
+def test_a_clean_tree_with_nothing_committed_is_still_an_empty_diff() -> None:
+    """The agent read the plan and concluded there was nothing to do. That is a
+    no-op, and asking again gets the same conclusion at the same price."""
+    assert classify(passing(files_changed=0, commits_ahead=0)) is RunnerOutcome.EMPTY_DIFF
+
+
+def test_dirt_in_the_runners_own_files_is_not_a_dropped_commit() -> None:
+    """``dirty_paths`` arrives with our own installed files already removed. If
+    it did not, this would fire on every run: the plan, the conventions file and
+    the verdict are in that tree every single time."""
+    assert classify(passing(files_changed=0, commits_ahead=0, dirty_paths=())) is (
+        RunnerOutcome.EMPTY_DIFF
+    )
+
+
+def test_leftover_dirt_after_a_real_commit_is_not_a_dropped_commit() -> None:
+    """Both halves are required. An agent that committed four times and left a
+    scratch file behind has not dropped anything."""
+    tidy_enough = passing(files_changed=2, commits_ahead=4, dirty_paths=("scratch.txt",))
+    assert classify(tidy_enough) is RunnerOutcome.SUCCEEDED
+
+
+def test_a_failing_verdict_outranks_a_dropped_commit() -> None:
+    """Band 5 keeps S6's order: what it *said* before what it *produced*. The
+    cost is that an agent which wrote a failing verdict and also forgot to commit
+    reports as failing tests — visible on the result as ``commits_ahead``, and
+    with no consequence, because both are retried the same way."""
+    verdict = RunnerVerdict(status=VerdictStatus.FAILED)
+    both = passing(verdict=verdict, files_changed=0, commits_ahead=0, dirty_paths=("app.py",))
+    assert classify(both) is RunnerOutcome.TESTS_FAILED

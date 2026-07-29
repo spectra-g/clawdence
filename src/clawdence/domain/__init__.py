@@ -43,7 +43,13 @@ from clawdence.domain.repo import (
     ResourceCaps,
 )
 from clawdence.domain.run import Run, RunStatus, StepError, StepResult, StepStatus
-from clawdence.domain.runner import DiffStat, RunnerOutcome, RunnerRequest, RunnerResult
+from clawdence.domain.runner import (
+    MAX_DIRTY_PATHS,
+    DiffStat,
+    RunnerOutcome,
+    RunnerRequest,
+    RunnerResult,
+)
 from clawdence.domain.verification import (
     ContractKind,
     FailingAssertion,
@@ -79,6 +85,7 @@ from clawdence.domain.workflow import (
 
 __all__ = [
     "EVENT_SCHEMA_VERSION",
+    "MAX_DIRTY_PATHS",
     "WORKFLOW_SCHEMA_VERSION",
     "Actor",
     "ActorKind",

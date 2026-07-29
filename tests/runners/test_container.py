@@ -30,14 +30,16 @@ from pathlib import Path
 
 import pytest
 
-from clawdence.domain import Budget, ResourceCaps, RunnerOutcome
+from clawdence.domain import Budget, ResourceCaps, RunnerOutcome, RunnerRequest
 from clawdence.ports import PermanentError, StaticSecrets
 from clawdence.runners import (
     LABEL_NAMESPACE,
+    Completion,
     ContainerEngine,
     ContainerRunner,
     ContainerSpec,
     EngineError,
+    Installed,
     Mount,
     PlanDelivery,
     TokenPrice,
@@ -62,7 +64,9 @@ TESTS_PASSED = {"reporter": "pytest-json-report", "total": 4, "passed": 4}
 
 def working(**verdict: object) -> FakeAgent:
     verdict.setdefault("tests", TESTS_PASSED)
-    return FakeAgent().say("working").write("app.py", CHANGED).verdict(**verdict)  # type: ignore[arg-type]
+    return (
+        FakeAgent().say("working").write("app.py", CHANGED).commit().verdict(**verdict)  # type: ignore[arg-type]
+    )
 
 
 def runner_for(
@@ -514,6 +518,89 @@ def test_the_container_is_removed_afterwards(
     request = request_for(profile=container_profile())
     run(runner_for(fake_engine).dispatch(request))
     assert container_name(request) in fake_engine.removals()
+
+
+def test_the_artifacts_are_collected_before_the_container_is_removed(
+    request_for: RequestFactory, repo: FixtureRepo, fake_engine: FakeEngine
+) -> None:
+    """§3.10's ordering requirement, asserted where the ordering actually lives.
+
+    On this tier the worktree is a host bind mount, so the artifacts happen to
+    survive teardown — which is exactly why the ordering needs a test rather
+    than a comment. Collecting after removal works today and stops working the
+    moment a runner is anywhere but this machine, and that is the assumption
+    §3.10 exists to remove. A hidden dependency on a coincidence of the one tier
+    where it holds is worse than no ordering at all.
+    """
+    order: list[str] = []
+
+    class Recording(ContainerRunner):
+        __slots__ = ()
+
+        async def _collect(
+            self,
+            request: RunnerRequest,
+            worktree: Path,
+            completion: Completion,
+            installed: Installed,
+        ) -> Completion:
+            order.append("collect")
+            return await super()._collect(request, worktree, completion, installed)
+
+        async def _teardown(self, request: RunnerRequest) -> None:
+            order.append("teardown")
+            await super()._teardown(request)
+
+    runner = Recording(working().command(), image=PINNED_IMAGE, engine=fake_engine.engine)
+    run(runner.dispatch(request_for(profile=container_profile())))
+
+    # The first teardown is `_prepare` clearing a previous attempt's leftovers.
+    # What matters is the pair at the end.
+    assert order[-2:] == ["collect", "teardown"]
+
+
+def test_the_artifacts_come_back_from_this_tier_too(
+    request_for: RequestFactory, repo: FixtureRepo, fake_engine: FakeEngine
+) -> None:
+    """§3.10 is a property of the boundary, not of one implementation of it.
+    Both tiers fill these in, through the same collection path."""
+    agent = (
+        FakeAgent()
+        .write("app.py", CHANGED)
+        .commit()
+        .write("scratch.txt", "left behind\n")
+        .verdict(tests=TESTS_PASSED)
+    )
+    result = run(runner_for(fake_engine, agent).dispatch(request_for(profile=container_profile())))
+
+    assert result.outcome is RunnerOutcome.SUCCEEDED
+    assert result.commits_ahead == 1
+    assert result.dirty is True
+    assert result.dirty_paths == ("scratch.txt",)
+
+
+def test_a_provider_error_is_not_a_success_on_this_tier_either(
+    request_for: RequestFactory, repo: FixtureRepo, fake_engine: FakeEngine
+) -> None:
+    """The stream is read through the engine client, which is a second process
+    between the agent and the reader. A false success that only the host tier
+    catches is a false success on the tier that is actually the default."""
+    agent = working().turn("starting").provider_error("your credit balance is too low")
+    result = run(runner_for(fake_engine, agent).dispatch(request_for(profile=container_profile())))
+
+    assert result.outcome is RunnerOutcome.PROVIDER_ERROR
+    assert "credit balance" in (result.message or "")
+
+
+def test_an_agent_that_edits_and_never_commits_is_a_dropped_commit_here_too(
+    request_for: RequestFactory, repo: FixtureRepo, fake_engine: FakeEngine
+) -> None:
+    agent = FakeAgent().write("app.py", CHANGED).verdict(tests=TESTS_PASSED)
+    result = run(runner_for(fake_engine, agent).dispatch(request_for(profile=container_profile())))
+
+    assert result.outcome is RunnerOutcome.DROPPED_COMMIT
+    assert result.commits_ahead == 0
+    assert "app.py" in result.dirty_paths
 
 
 def test_a_stale_container_from_a_crashed_attempt_is_cleared_first(

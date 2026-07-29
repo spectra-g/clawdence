@@ -139,6 +139,7 @@ def runner_result(
     outcome: RunnerOutcome = RunnerOutcome.SUCCEEDED,
     tree_hash: str | None = None,
     files_changed: int = 1,
+    commits_ahead: int = 1,
     started: float = 0.0,
     finished: float = 10.0,
 ) -> RunnerResult:
@@ -148,13 +149,22 @@ def runner_result(
     one by naming the single field they are breaking, which keeps each of them
     about one rule.
     """
-    produced = outcome in (RunnerOutcome.SUCCEEDED, RunnerOutcome.TESTS_FAILED)
+    produced = outcome in (
+        RunnerOutcome.SUCCEEDED,
+        RunnerOutcome.TESTS_FAILED,
+        RunnerOutcome.DROPPED_COMMIT,
+    )
     return RunnerResult(
         run_id=run_id,
         stage_id=stage_id,
         outcome=outcome,
         tree_hash=(commit(2) if produced else None) if tree_hash is None else tree_hash,
         diff=DiffStat(files_changed=files_changed, insertions=files_changed, deletions=0),
+        # A default that is *consistent* with the diff above: a result claiming
+        # two changed files and no commits behind them is §3.7a's dropped
+        # commit, and every test using this as a baseline would be asserting
+        # against that rather than against the happy path.
+        commits_ahead=commits_ahead,
         started_at=at(started),
         finished_at=at(finished),
     )

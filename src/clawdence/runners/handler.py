@@ -4,7 +4,7 @@ The engine owns control flow and knows nothing about step types; this is the
 other half of that split, and it is the piece S3 left a hole for. What it adds
 over "call the port and unwrap the answer" is the mapping from
 ``RunnerOutcome`` to what the engine does next, and that mapping is the whole
-reason the taxonomy has eleven values.
+reason the taxonomy has fourteen values.
 
 **Which failures are worth a second attempt.** Failing tests are — that is the
 loop the whole system is built around. A timeout might be. A budget cap is not:
@@ -52,6 +52,15 @@ from clawdence.ports import PortError, RunnerPort
 #: set halts the run to a human, which is what ``on_exhausted`` means one step
 #: earlier: nothing here force-proceeds, and there is no value that expresses
 #: "give up and merge anyway".
+#:
+#: S6b's three — ``PROVIDER_ERROR``, ``DROPPED_COMMIT``, ``NO_MODEL_RESPONSE`` —
+#: are **deliberately absent**, and that is a decision rather than an oversight.
+#: What is worth another attempt is S13's question, and the safe answer until it
+#: is asked properly is the one that stops: a rejected credential and an exhausted
+#: balance are both things a retry re-discovers at full price, which is the exact
+#: failure mode ``BLOCKED`` was added for. ``DROPPED_COMMIT`` is the arguable one
+#: — a second attempt might well commit — and it is left out for consistency
+#: rather than conviction.
 RETRYABLE: frozenset[RunnerOutcome] = frozenset(
     {
         RunnerOutcome.TESTS_FAILED,
@@ -128,6 +137,11 @@ class RunnerHandler:
             "files_changed": result.diff.files_changed if result.diff else 0,
             "insertions": result.diff.insertions if result.diff else 0,
             "deletions": result.diff.deletions if result.diff else 0,
+            # §3.10's artifacts, forwarded rather than re-derived. A later stage
+            # asking "did the agent actually commit anything" reads this instead
+            # of running git against a worktree it may not be able to reach.
+            "commits_ahead": result.commits_ahead,
+            "dirty": result.dirty,
             "tests_failed": result.test_evidence.failed if result.test_evidence else None,
             "input_tokens": result.usage.input_tokens,
             "output_tokens": result.usage.output_tokens,

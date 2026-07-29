@@ -40,7 +40,14 @@ from clawdence.ports.errors import PermanentError
 #: Outcomes that mean the runner produced a tree worth talking about. Anything
 #: else must not carry a ``tree_hash``, because a hash attached to a timeout is
 #: a hash something will eventually try to merge.
-_PRODUCED_WORK = frozenset({RunnerOutcome.SUCCEEDED, RunnerOutcome.TESTS_FAILED})
+#:
+#: ``DROPPED_COMMIT`` (S6b) is one of them, which reads oddly for a failure and
+#: is not: the runner commits whatever the agent left uncommitted, so the work
+#: exists on a real tree. The outcome says the agent never claimed it — that is
+#: the failure — and the hash is how a person finds what it nearly did.
+_PRODUCED_WORK = frozenset(
+    {RunnerOutcome.SUCCEEDED, RunnerOutcome.TESTS_FAILED, RunnerOutcome.DROPPED_COMMIT}
+)
 
 
 class RunnerPort(Protocol):

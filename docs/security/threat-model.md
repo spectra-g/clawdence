@@ -41,6 +41,7 @@ the fact describes a design; this one is meant to constrain it.
 | **A4** | Integrity of merged code | The system's output lands in real repositories. Code merged on the strength of evidence that does not apply is a supply-chain compromise of the operator's own product. |
 | **A5** | The operator's money | LLM spend is unbounded without caps, and the coding runner dominates it — roughly 91% of token spend in the predecessor system, with a single work item reaching 3.68M tokens. |
 | **A6** | Truthfulness of the audit trail | If the record of what happened can be forged or is silently incomplete, none of the above can be investigated after the fact. |
+| **A7** | The standard the work is measured against | The workflow definitions, the verification contracts, the approval policy and the trigger configuration. These decide what "done" means and when the system acts. An attacker who edits them does not need to defeat any other control — they move the bar instead. |
 
 ## 2. Trust zones
 
@@ -105,6 +106,7 @@ worst realistic outcome, not the average one.
 | **T19** | Unauthenticated control surface | Medium | A4, A5 | Designed |
 | **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
 | **T21** | Credentials recorded into committed test fixtures | Medium | A1, A6 | **Built** |
+| **T22** | Agent output alters the standard it is measured against | **High** | **A7**, A4 | **Accepted, unmitigated** |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -471,6 +473,37 @@ disclosure surface into an **unauthenticated write surface controlling code that
 **Mitigation:** authentication ships in the same change as the controls, never after. Not a
 follow-up item, not a configuration option.
 
+### T22 · Agent output alters the standard it is measured against — **accepted, unmitigated**
+
+Every other threat here is about what an **adversary** does to the system. This one is about what
+the system's own output is allowed to change **about the system**, and it is specific to a factory
+whose product is commits, pointed at repositories — one of which will eventually be this one.
+
+The assets are the workflow definitions, the verification contracts, the approval policy and the
+trigger configuration (A7). An agent that can edit those does not have to produce code that passes
+review; it can produce a change that makes review pass. The shapes this takes are ordinary rather
+than exotic, which is what makes it worth writing down:
+
+- a contract requiring passing tests is edited to require a build;
+- an approval gate's approver constraint is widened, or the gate is removed from the workflow;
+- a trigger is added, so the system schedules its own future work;
+- the guard that would have caught any of the above is itself the thing edited.
+
+It is not prompt injection (T1, T2) — no adversary is needed, and a model that is merely
+over-eager gets there. It is not approval bypass (T15) — the approval is granted correctly, against
+a standard that has already moved.
+
+**Intended mitigation, when the steps exist:** agent output is a proposal in the normal review
+path, never applied directly, and **no run can satisfy the gate that merges its own proposal**. The
+guard covers changes to itself, so removing it is a change that is also visible in review. S12
+(agent steps) is where output first becomes a diff and S17 (approval gates) is where the gate
+becomes real; both trace here.
+
+**Disposition today: accepted, unmitigated.** Neither step exists. There is no agent step, so
+nothing produces a diff, so nothing can propose a change to anything — the risk is currently
+theoretical because the capability is absent, not because a control is present. Stated rather than
+scored as low, because the day the capability arrives the disposition has to change with it.
+
 ---
 
 ## 5. Isolation tiers, traced to threats
@@ -508,6 +541,7 @@ what it does.
 | **R6** | Single-machine, single-tenant only | Multi-tenant and multi-machine are stated non-goals. There is no tenant isolation because there are no tenants. | A hosted mode, which is not planned. |
 | **R7** | The operator's own machine is trusted | The control plane, the state store, and the runners share a host. A compromised host is a total compromise. | Nothing. This is the deployment model. |
 | **R8** | Denial of service against the system itself | Rate limits and budgets bound the damage; they do not prevent a determined submitter from making the system unavailable to its operator. | Nothing planned. Availability is not a security goal here. |
+| **R9** | The system's own output changing the standard it is judged by (T22) | Accepted only because nothing today can produce a diff: there is no agent step. It is an absence of capability, not a control. | S12 shipping. The proposal-plus-self-approval-refusal in T22 has to exist in the same change that makes an agent step able to write one. |
 
 ---
 
@@ -568,6 +602,8 @@ cannot, and nothing built before them should be exposed to input from strangers.
   are the current basis for "what can run"; a fifth needs its own analysis.
 - Any change that lets request text influence workflow, repository, or isolation selection. That
   would collapse T2's mitigation entirely.
+- **An agent step that can write a diff.** T22 is accepted today only because nothing can, and the
+  control it needs has to land in the same change rather than after it.
 
 ## 9. Reporting a problem
 

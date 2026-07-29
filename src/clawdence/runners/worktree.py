@@ -31,6 +31,7 @@ there is one and roughly how big, which is exactly what ``DiffStat`` holds.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -174,6 +175,62 @@ async def pending_changes(worktree: Path) -> tuple[str, ...]:
         paths.append(record[3:])
         skip_next = record[:1] in ("R", "C")
     return tuple(paths)
+
+
+async def commits_ahead(worktree: Path, base: str, target: str = "HEAD") -> int:
+    """How many commits ``target`` has that ``base`` does not.
+
+    Called **before** the runner's own safety commit, which is the only time it
+    answers the question anybody wants: how many commits *the agent* made. After
+    ``commit_all`` the number always includes ours, and "the agent committed
+    nothing" — §3.7a's dropped commit, the characteristic weak-model failure —
+    stops being expressible.
+
+    ``--count`` rather than counting lines, because a repository can produce a
+    lot of them and this only ever needs the number.
+    """
+    raw = await git(worktree, "rev-list", "--count", f"{base}..{target}")
+    return int(raw or 0)
+
+
+async def exists_at(worktree: Path, commit: str, path: str) -> bool:
+    """Whether ``commit`` has anything at ``path``."""
+    try:
+        await git(worktree, "cat-file", "-e", f"{commit}:{path}")
+    except (GitError, OSError):
+        return False
+    return True
+
+
+async def revert_to(worktree: Path, base: str, path: str) -> None:
+    """Put ``path`` back to whatever ``base`` had there — including nothing.
+
+    This is §3.9's repair, and it is deliberately anchored on the **base commit**
+    rather than on ``HEAD``. The obvious version — ``git checkout -- path``,
+    undo the modification — works only if the file is still merely modified, and
+    by the time anybody looks it usually is not: the agent ran ``git add --all``
+    like every coding CLI does, ``$GIT_DIR/info/exclude`` has no effect on a
+    tracked path, and so the runner's own conventions file is already *inside* the
+    agent's commit. Reverting against ``HEAD`` at that point restores our copy.
+
+    Against the base it is right in all four cases: the repository tracked the
+    path and gets its own content back, or it did not and the file goes away,
+    and either is true whether or not the agent committed over it. What is left
+    behind is a change against ``HEAD``, which the runner's own commit then
+    records — so the branch ends up with a tree that never contained our file,
+    which is the only property that matters to whoever reviews it.
+    """
+    if await exists_at(worktree, base, path):
+        await git(worktree, "checkout", base, "--", path)
+        return
+
+    # Nothing at the base, so the file leaves entirely. `--ignore-unmatch`
+    # because the common case is a path git never knew about — the plan, under
+    # the runner's own directory — and `rm` refusing that would make this a
+    # branch instead of a call.
+    await git(worktree, "rm", "--force", "--quiet", "--ignore-unmatch", "--", path)
+    with contextlib.suppress(OSError):
+        (worktree / path).unlink(missing_ok=True)
 
 
 async def commit_all(

@@ -166,3 +166,94 @@ def test_a_filename_with_a_newline_is_one_path(repo: FixtureRepo) -> None:
     git's output turns one such file into two phantom paths."""
     repo.write("odd\nname.txt", "surprise\n")
     assert run(wt.pending_changes(repo.path)) == ("odd\nname.txt",)
+
+
+# --------------------------------------------------------------------------- #
+# Counting the agent's own commits, and undoing the runner's own files (S6b)
+# --------------------------------------------------------------------------- #
+
+
+def test_commits_ahead_counts_only_what_came_after_the_base(repo: FixtureRepo) -> None:
+    base = repo.head
+    assert run(wt.commits_ahead(repo.path, base)) == 0
+
+    repo.write("app.py", "first\n")
+    repo.commit("first")
+    repo.write("app.py", "second\n")
+    repo.commit("second")
+    assert run(wt.commits_ahead(repo.path, base)) == 2
+
+
+def test_an_uncommitted_change_is_not_a_commit(repo: FixtureRepo) -> None:
+    """The distinction the whole ``DROPPED_COMMIT`` split rests on."""
+    repo.write("app.py", "edited but not committed\n")
+    assert run(wt.commits_ahead(repo.path, repo.head)) == 0
+
+
+def test_exists_at_asks_about_a_commit_and_not_about_the_worktree(repo: FixtureRepo) -> None:
+    base = repo.head
+    repo.write("late.py", "added afterwards\n")
+    repo.commit("late")
+
+    assert run(wt.exists_at(repo.path, base, "app.py")) is True
+    assert run(wt.exists_at(repo.path, base, "late.py")) is False
+    assert run(wt.exists_at(repo.path, "HEAD", "late.py")) is True
+
+
+def test_revert_to_restores_a_tracked_file_the_agent_committed_over(repo: FixtureRepo) -> None:
+    """The case ``git checkout -- path`` gets wrong, and the reason ``revert_to``
+    is anchored on the base rather than on ``HEAD``.
+
+    Every coding CLI runs ``git add --all``, and ``$GIT_DIR/info/exclude`` has no
+    effect on a tracked path — so by the time anybody looks, the runner's own
+    conventions file is already inside the agent's commit. Undoing a
+    *modification* at that point restores our copy rather than the repository's.
+    """
+    base = repo.head
+    original = repo.read("app.py")
+
+    repo.write("app.py", "the runner's own content\n")
+    repo.commit("the agent swept it in")
+    assert repo.read("app.py") != original
+
+    run(wt.revert_to(repo.path, base, "app.py"))
+    assert repo.read("app.py") == original
+
+
+def test_revert_to_removes_a_file_the_base_never_had(repo: FixtureRepo) -> None:
+    """A path the repository does not track — the plan, under the runner's own
+    directory — leaves entirely rather than being restored to nothing."""
+    base = repo.head
+    repo.write("ours.md", "installed by the runner\n")
+    run(wt.revert_to(repo.path, base, "ours.md"))
+    assert not (repo.path / "ours.md").exists()
+
+
+def test_revert_to_removes_a_file_the_base_never_had_even_once_committed(
+    repo: FixtureRepo,
+) -> None:
+    """Same case, after the agent swept it into a commit. It has to come out of
+    the index as well as off the disk, or the next commit puts it back.
+
+    The removal itself then shows up as a pending *deletion*, which is why the
+    runner probes for dirtiness before it reclaims rather than after: reclaiming
+    first would put every installed path back into the dirty set as the agent's
+    work, and turn every run into a dropped commit.
+    """
+    base = repo.head
+    repo.write("ours.md", "installed by the runner\n")
+    repo.commit("the agent swept it in")
+
+    run(wt.revert_to(repo.path, base, "ours.md"))
+    assert not (repo.path / "ours.md").exists()
+    assert run(wt.pending_changes(repo.path)) == ("ours.md",)
+
+    repo.write("app.py", "real work\n")
+    run(wt.commit_all(repo.path, "the runner's own commit"))
+    assert run(wt.exists_at(repo.path, "HEAD", "ours.md")) is False
+
+
+def test_reverting_a_path_nothing_ever_knew_about_is_not_an_error(repo: FixtureRepo) -> None:
+    """Called from a cleanup path, over whatever was installed. A file the agent
+    deleted must not turn the collection step into a failure."""
+    run(wt.revert_to(repo.path, repo.head, "never-existed.md"))

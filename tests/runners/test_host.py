@@ -34,7 +34,8 @@ from clawdence.runners import (
     TokenPrice,
 )
 from clawdence.runners import process as process_module
-from clawdence.runners.agent import WORK_DIR
+from clawdence.runners import worktree as wt
+from clawdence.runners.installed import WORK_DIR
 from clawdence.runners.process import kill, kill_and_reap
 from tests.harness.agent import FakeAgent, missing_command
 from tests.harness.repos import FixtureRepo
@@ -52,9 +53,28 @@ TESTS_PASSED = {"reporter": "pytest-json-report", "total": 4, "passed": 4}
 
 
 def working(**verdict: object) -> FakeAgent:
-    """An agent that edits a file, runs its tests, and reports success."""
+    """An agent that edits a file, commits it, runs its tests, reports success.
+
+    The ``commit`` is not decoration and was added in S6b. An agent that edits
+    and never commits is §3.7a's dropped commit — a distinct outcome now — and a
+    baseline fixture that skipped it would make every test here assert against
+    the failure rather than against the happy path.
+    """
     verdict.setdefault("tests", TESTS_PASSED)
-    return FakeAgent().say("working").write("app.py", CHANGED).verdict(**verdict)  # type: ignore[arg-type]
+    return (
+        FakeAgent().say("working").write("app.py", CHANGED).commit().verdict(**verdict)  # type: ignore[arg-type]
+    )
+
+
+async def changed_paths(worktree: Path, base: str) -> frozenset[str]:
+    """What the run's commits actually touched, asked of git.
+
+    Used wherever the question is "did our own installed file reach the branch",
+    which ``DiffStat``'s counts cannot answer — it reports how many files
+    changed, not which.
+    """
+    raw = await wt.git(worktree, "diff", "--name-only", "-z", base, "HEAD", strip=False)
+    return frozenset(record for record in raw.split("\0") if record)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,11 +112,12 @@ def test_a_diff_and_a_result_come_back(request_for: RequestFactory, repo: Fixtur
     assert "added mul" in (result.message or "")
 
 
-def test_the_agents_work_is_committed_with_the_runners_identity(
+def test_the_agents_work_lands_on_a_tree_the_result_can_name(
     request_for: RequestFactory, repo: FixtureRepo
 ) -> None:
-    """An agent that does not commit still gets a tree, because the result binds
-    evidence to one and there has to be one to bind to."""
+    """The result binds evidence to a tree, so there has to be one to bind to —
+    whether the agent committed its own work or the runner's safety commit did
+    it for them."""
     runner = HostRunner(working().command())
     result = run(runner.dispatch(request_for()))
     assert repo.read("app.py") == CHANGED
@@ -317,6 +338,154 @@ def test_an_unknown_base_commit_is_found_before_the_agent_runs(
 
 
 # --------------------------------------------------------------------------- #
+# §3.7a — the failures the exit status cannot see, end to end (S6b)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_provider_error_is_reported_instead_of_a_false_success(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """**The test that matters most in S6b.**
+
+    Everything about this run looks like a success from outside: exit 0, a
+    committed diff, a verdict claiming passing tests. What actually happened is
+    on the event stream — the last turn carried a provider failure — and until
+    S6b nothing read it. A pull request would have opened and the workflow would
+    have advanced, which is a false success, and a false success is a different
+    severity of bug from a misclassified failure.
+    """
+    agent = working().turn("starting").provider_error("your credit balance is too low").exit_with(0)
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+
+    assert result.outcome is RunnerOutcome.PROVIDER_ERROR
+    assert result.exit_code == 0
+    assert "credit balance" in (result.message or "")
+    # No tree hash, because nothing downstream should be able to merge this.
+    assert result.tree_hash is None
+
+
+def test_an_error_the_agent_recovered_from_does_not_fail_the_run(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """The other half of the same rule, and the one that stops this being a
+    false-failure machine: a rate limit the CLI waited out and carried on past
+    is not a terminal turn."""
+    agent = (
+        FakeAgent()
+        .provider_error("rate limited, retrying")
+        .turn("carrying on")
+        .say("working")
+        .write("app.py", CHANGED)
+        .commit()
+        .verdict(tests=TESTS_PASSED)
+    )
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+    assert result.outcome is RunnerOutcome.SUCCEEDED
+
+
+def test_a_rejected_credential_is_not_a_startup_failure(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """Events flowed — an init frame, a banner — and not one model turn did.
+    ``startup-failed`` is also what a missing image produces, and the two want
+    opposite repairs: one is a key, the other is a registry."""
+    agent = (
+        FakeAgent()
+        .event(type="system", subtype="init", model="some-model")
+        .event(type="error", error={"message": "invalid x-api-key"})
+        .exit_with(1)
+    )
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+    assert result.outcome is RunnerOutcome.NO_MODEL_RESPONSE
+
+
+def test_an_agent_that_edits_and_never_commits_is_a_dropped_commit(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """§3.7a's second failure, and the one this codebase had to work to see: the
+    runner's own safety commit means there *is* a diff, so the exit status, the
+    tree and the diff stat all look like a run that worked.
+
+    The work is still preserved — that is what the safety commit is for, and the
+    tree hash comes back so a person can go and look at what was nearly done.
+    What says the agent never finished is ``commits_ahead == 0``.
+    """
+    agent = FakeAgent().say("editing").write("app.py", CHANGED).verdict(tests=TESTS_PASSED)
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+
+    assert result.outcome is RunnerOutcome.DROPPED_COMMIT
+    assert result.commits_ahead == 0
+    assert result.dirty is True
+    assert "app.py" in result.dirty_paths
+    assert result.tree_hash is not None
+    assert repo.read("app.py") == CHANGED
+
+
+def test_an_agent_that_changes_nothing_is_a_no_op_and_not_a_dropped_commit(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """The clean half of the split. The agent read the plan and concluded there
+    was nothing to do, which is a conclusion rather than a failure to finish."""
+    agent = FakeAgent().say("nothing to do here").verdict(tests=TESTS_PASSED)
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+
+    assert result.outcome is RunnerOutcome.EMPTY_DIFF
+    assert result.dirty is False
+    assert result.dirty_paths == ()
+    assert result.commits_ahead == 0
+
+
+def test_dirt_that_is_only_the_runners_own_installed_files_is_still_a_no_op(
+    request_for: RequestFactory, repos: object, tmp_path: Path
+) -> None:
+    """The third case, and the reason the split cannot be a one-line
+    ``is_dirty`` check — **including when the repository tracks a file at the
+    path we install to**, which is where ``$GIT_DIR/info/exclude`` stops
+    working. The agent did nothing; the only thing making that tree dirty is our
+    own conventions file, and calling that a dropped commit would fail every
+    run against every repository that keeps one.
+    """
+    source = tmp_path / "AGENTS.md"
+    source.write_text("ours\n")
+    owned = repos(extra_files={"AGENTS.md": "theirs\n", "app.py": "x = 1\n"})  # type: ignore[operator]
+
+    profile = host_profile(agents_md_path=str(source))
+    request = request_for(profile=profile, worktree=owned.path).model_copy(
+        update={"base_commit": owned.head}
+    )
+    agent = FakeAgent().say("nothing to do here").verdict(tests=TESTS_PASSED)
+    result = run(HostRunner(agent.command()).dispatch(request))
+
+    assert result.outcome is RunnerOutcome.EMPTY_DIFF
+    assert result.dirty is False
+    assert result.dirty_paths == ()
+    assert owned.read("AGENTS.md") == "theirs\n"
+
+
+def test_the_result_carries_the_artifacts_rather_than_a_path_to_go_and_look_at(
+    request_for: RequestFactory, repo: FixtureRepo
+) -> None:
+    """§3.10. Everything needed to decide an outcome is on the payload, taken at
+    the moment the work was collected — not derived afterwards from a directory
+    the control plane may not be able to reach."""
+    agent = (
+        FakeAgent()
+        .write("app.py", CHANGED)
+        .commit("first")
+        .write("extra.py", "y = 2\n")
+        .commit("second")
+        .write("scratch.txt", "left behind\n")
+        .verdict(tests=TESTS_PASSED)
+    )
+    result = run(HostRunner(agent.command()).dispatch(request_for()))
+
+    assert result.outcome is RunnerOutcome.SUCCEEDED
+    assert result.commits_ahead == 2
+    assert result.dirty is True
+    assert result.dirty_paths == ("scratch.txt",)
+
+
+# --------------------------------------------------------------------------- #
 # Refusals — requests that cannot honestly be run
 # --------------------------------------------------------------------------- #
 
@@ -461,10 +630,18 @@ def test_nothing_the_runner_installs_reaches_the_diff(
     assert (repo.path / VERDICT_PATH).exists()
 
 
-def test_a_conventions_file_the_repository_already_has_is_left_alone(
+def test_a_conventions_file_the_repository_tracks_is_installed_then_put_back(
     request_for: RequestFactory, repos: object, tmp_path: Path
 ) -> None:
-    """Copying over it would show up as a modification to a tracked file."""
+    """§3.9's repair, and the case that breaks a naive probe.
+
+    ``$GIT_DIR/info/exclude`` hides everything the runner installs, but it has
+    no effect on a path the repository already **tracks** — and a repository
+    that keeps its own ``AGENTS.md`` is the common case here. S6 avoided that by
+    not installing at all, which quietly ignored the conventions file an
+    operator had configured. S6b installs, records the bytes, and puts the path
+    back afterwards wherever it still holds them.
+    """
     source = tmp_path / "AGENTS.md"
     source.write_text("ours\n")
     owned = repos(extra_files={"AGENTS.md": "theirs\n", "app.py": "x = 1\n"})  # type: ignore[operator]
@@ -473,8 +650,55 @@ def test_a_conventions_file_the_repository_already_has_is_left_alone(
     request = request_for(profile=profile, worktree=owned.path).model_copy(
         update={"base_commit": owned.head}
     )
-    run(HostRunner(working().command()).dispatch(request))
+    # The agent reads the conventions file it was given and copies it out, which
+    # is how the test sees that our version was the one in the tree while the
+    # agent ran — the whole point of installing it.
+    agent = (
+        FakeAgent()
+        .say("working")
+        .copy("AGENTS.md", "seen.txt")
+        .write("app.py", CHANGED)
+        .commit()
+        .verdict(tests=TESTS_PASSED)
+    )
+    result = run(HostRunner(agent.command()).dispatch(request))
+
+    assert owned.read("seen.txt") == "ours\n"
     assert owned.read("AGENTS.md") == "theirs\n"
+    # And it never reached the branch: the file is unchanged against the base,
+    # so the diff is `app.py` and `seen.txt` and nothing else.
+    assert result.outcome is RunnerOutcome.SUCCEEDED
+    assert "AGENTS.md" not in run(changed_paths(owned.path, request.base_commit))
+
+
+def test_an_agents_own_edit_to_the_conventions_file_survives(
+    request_for: RequestFactory, repos: object, tmp_path: Path
+) -> None:
+    """The byte comparison is what separates our copy from the agent's work.
+
+    Reverting the path unconditionally would be the same bug in the other
+    direction: an agent told to update the conventions file would watch its
+    change be deleted by the cleanup that runs after it.
+    """
+    source = tmp_path / "AGENTS.md"
+    source.write_text("ours\n")
+    owned = repos(extra_files={"AGENTS.md": "theirs\n", "app.py": "x = 1\n"})  # type: ignore[operator]
+
+    profile = host_profile(agents_md_path=str(source))
+    request = request_for(profile=profile, worktree=owned.path).model_copy(
+        update={"base_commit": owned.head}
+    )
+    agent = (
+        FakeAgent()
+        .write("AGENTS.md", "the agent rewrote this\n")
+        .commit()
+        .verdict(tests=TESTS_PASSED)
+    )
+    result = run(HostRunner(agent.command()).dispatch(request))
+
+    assert owned.read("AGENTS.md") == "the agent rewrote this\n"
+    assert result.outcome is RunnerOutcome.SUCCEEDED
+    assert "AGENTS.md" in run(changed_paths(owned.path, request.base_commit))
 
 
 def test_a_conventions_path_that_does_not_exist_is_skipped(
@@ -486,6 +710,22 @@ def test_a_conventions_path_that_does_not_exist_is_skipped(
     result = run(HostRunner(working().command()).dispatch(request_for(profile=profile)))
     assert result.outcome is RunnerOutcome.SUCCEEDED
     assert not (repo.path / "AGENTS.md").exists()
+
+
+def test_a_conventions_file_that_cannot_be_installed_does_not_fail_the_run(
+    request_for: RequestFactory, repo: FixtureRepo, tmp_path: Path
+) -> None:
+    """Same reasoning one step later: the path resolves and the write still
+    fails, because something is already at the destination that is not a file.
+    The agent works without its conventions file, slightly worse — which is a
+    much better outcome than refusing to run at all."""
+    source = tmp_path / "AGENTS.md"
+    source.write_text("ours\n")
+    (repo.path / "AGENTS.md").mkdir()
+
+    profile = host_profile(agents_md_path=str(source))
+    result = run(HostRunner(working().command()).dispatch(request_for(profile=profile)))
+    assert result.outcome is RunnerOutcome.SUCCEEDED
 
 
 def test_a_worktree_git_cannot_read_afterwards_is_a_startup_failure(
@@ -504,7 +744,13 @@ def test_the_plan_can_be_delivered_as_an_argument(
 ) -> None:
     """Three delivery modes because the CLIs anybody will wire this to each want
     a different one, and guessing wrong runs the agent with an empty prompt."""
-    agent = FakeAgent().dump_env("env.txt").write("app.py", CHANGED).verdict(tests=TESTS_PASSED)
+    agent = (
+        FakeAgent()
+        .dump_env("env.txt")
+        .write("app.py", CHANGED)
+        .commit()
+        .verdict(tests=TESTS_PASSED)
+    )
     result = run(HostRunner(agent.command(delivery=PlanDelivery.ARGUMENT)).dispatch(request_for()))
     assert result.outcome is RunnerOutcome.SUCCEEDED
 
@@ -520,7 +766,13 @@ def test_an_mcp_server_without_a_token_needs_no_secret(
             {"name": "docs", "url": "https://docs.invalid", "bearer_token_env_var": "ABSENT_TOKEN"},
         ]
     )
-    agent = FakeAgent().dump_env("env.txt").write("app.py", CHANGED).verdict(tests=TESTS_PASSED)
+    agent = (
+        FakeAgent()
+        .dump_env("env.txt")
+        .write("app.py", CHANGED)
+        .commit()
+        .verdict(tests=TESTS_PASSED)
+    )
     result = run(HostRunner(agent.command()).dispatch(request_for(profile=profile)))
 
     # An unconfigured token is left out rather than passed as an empty string:
@@ -547,7 +799,7 @@ def test_a_previous_attempts_verdict_does_not_answer_this_one(
 def test_a_malformed_verdict_does_not_fail_the_dispatch(request_for: RequestFactory) -> None:
     """It is an absent verdict plus a complaint. What an absence means is the
     contract's business."""
-    agent = FakeAgent().write("app.py", CHANGED).verdict(raw="{not json")
+    agent = FakeAgent().write("app.py", CHANGED).commit().verdict(raw="{not json")
     contract = VerificationContract(kind=ContractKind.BUILD_ONLY)
     result = run(HostRunner(agent.command()).dispatch(request_for(contract=contract)))
     assert result.outcome is RunnerOutcome.SUCCEEDED
@@ -608,7 +860,7 @@ def test_a_redelivery_giving_up_does_not_stop_the_original(
     """The dispatch is shielded, so the waiter that walks away is the only thing
     that stops. Otherwise a watchdog's redelivery timing out would kill the run
     it was checking on."""
-    agent = FakeAgent().sleep(0.5).write("app.py", CHANGED).verdict(tests=TESTS_PASSED)
+    agent = FakeAgent().sleep(0.5).write("app.py", CHANGED).commit().verdict(tests=TESTS_PASSED)
     runner = HostRunner(agent.command())
     request = request_for()
 

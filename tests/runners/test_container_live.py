@@ -35,6 +35,7 @@ import shutil
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -89,6 +90,21 @@ def agent(script: str, **kwargs: object) -> AgentCommand:
         **kwargs,  # type: ignore[arg-type]
     )
 
+
+#: The outcome a scripted agent that did its work produces **in this image**.
+#:
+#: Not ``SUCCEEDED``, and the reason is worth stating rather than working around:
+#: the base image has no git, so the "agent" here physically cannot commit, and
+#: the runner's own safety commit is what turns its edits into a tree. That is
+#: exactly §3.7a's dropped commit, correctly reported — the work exists, and the
+#: agent never claimed it. The tests below are about the container rather than
+#: about the taxonomy, so they name the outcome they actually expect instead of
+#: pretending a shell script is a coding agent.
+#:
+#: It also earns its keep: the classification is proven end to end through a real
+#: daemon, a real bind mount and a real process boundary, which is more than the
+#: hermetic suite can say.
+WORKED: Final = RunnerOutcome.DROPPED_COMMIT
 
 #: Writes the verdict the ``TEST_AFTER`` contract wants. Appended to a script so
 #: the run's outcome is about the thing under test rather than about evidence.
@@ -163,10 +179,20 @@ def test_a_real_container_produces_a_real_diff(workdir: Path) -> None:
 
     result = dispatch(repo.path, repo.head, agent(script))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     assert result.diff is not None and result.diff.files_changed >= 1  # type: ignore[attr-defined]
     assert repo.read("app.py") == "x = 2\n"
     assert "write a file called out.txt" in repo.read("plan-seen.txt")
+
+    # §3.10, through a real daemon: the artifacts were gathered while the
+    # container still existed, and they describe what the *agent* did rather
+    # than what the runner did on its behalf.
+    assert result.commits_ahead == 0  # type: ignore[attr-defined]
+    assert result.dirty is True  # type: ignore[attr-defined]
+    assert "app.py" in result.dirty_paths  # type: ignore[attr-defined]
+    # And nothing the runner installed is in there — the plan and the verdict
+    # are both sitting in that tree right now.
+    assert not any(path.startswith(".clawdence") for path in result.dirty_paths)  # type: ignore[attr-defined]
 
 
 def test_files_come_back_owned_by_us(workdir: Path) -> None:
@@ -176,7 +202,7 @@ def test_files_come_back_owned_by_us(workdir: Path) -> None:
     repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
     result = dispatch(repo.path, repo.head, agent(f"echo made > new.txt && {PASSED}"))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     assert (repo.path / "new.txt").stat().st_uid == os.getuid()
 
 
@@ -206,7 +232,7 @@ def test_no_control_plane_credential_is_reachable_from_inside(
     repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
     result = dispatch(repo.path, repo.head, agent(f"env > seen-env.txt && {PASSED}"))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     seen = repo.read("seen-env.txt")
     for leaked in ("xoxb-not-real", "jira-not-real", "ghp-not-real", "aws-not-real"):
         assert leaked not in seen
@@ -227,7 +253,7 @@ def test_the_scoped_key_is_reachable_and_never_was_in_a_command_line(workdir: Pa
     )
     result = run(runner.dispatch(request_for(repo.path, repo.head)))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED
+    assert result.outcome is WORKED
     assert repo.read("seen-key.txt").strip() == "sk-live-scoped"
 
 
@@ -247,7 +273,7 @@ def test_the_other_repositories_are_not_on_the_filesystem(workdir: Path) -> None
     )
     result = dispatch(repo.path, repo.head, agent(script))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     seen = repo.read("sibling.txt")
     assert "rc=0" not in seen
     assert "nope" not in seen
@@ -260,7 +286,7 @@ def test_the_docker_socket_is_not_in_there(workdir: Path) -> None:
     script = f"( test -S /var/run/docker.sock && echo FOUND || echo absent ) > sock.txt ; {PASSED}"
     result = dispatch(repo.path, repo.head, agent(script))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     assert repo.read("sock.txt").strip() == "absent"
 
 
@@ -271,7 +297,7 @@ def test_every_capability_is_dropped(workdir: Path) -> None:
     script = f"grep CapEff /proc/self/status > caps.txt ; {PASSED}"
     result = dispatch(repo.path, repo.head, agent(script))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     assert repo.read("caps.txt").split()[1].strip("0") == ""
 
 
@@ -285,7 +311,7 @@ def test_the_image_filesystem_is_read_only(workdir: Path) -> None:
     )
     result = dispatch(repo.path, repo.head, agent(script))
 
-    assert result.outcome is RunnerOutcome.SUCCEEDED  # type: ignore[attr-defined]
+    assert result.outcome is WORKED  # type: ignore[attr-defined]
     seen = repo.read("rootfs.txt")
     assert "WROTE" not in seen and "refused" in seen
     # …and /tmp still works, or `--read-only` would break every build tool.
@@ -327,7 +353,7 @@ def test_a_fork_bomb_hits_the_pid_ceiling(workdir: Path) -> None:
 
     # Either the shell could not fork (errors on stderr) or the container was
     # killed trying. Both are the ceiling doing its job; neither is 60 processes.
-    assert result.outcome is not RunnerOutcome.SUCCEEDED or int(repo.read("forks.txt")) > 0  # type: ignore[attr-defined]
+    assert result.outcome is not WORKED or int(repo.read("forks.txt")) > 0  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------- #

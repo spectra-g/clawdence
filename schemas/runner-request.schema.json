@@ -512,7 +512,7 @@
   "$id": "https://clawdence.dev/schemas/runner-request.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "What the control plane hands a runner.",
+  "description": "What the control plane hands a runner. **Intent, not addressing.**",
   "properties": {
     "base_commit": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
