@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -357,6 +359,103 @@ class TestReapCommand:
         assert main(["reap", "--state", str(tmp_path / "state.db"), "--no-caches"]) == 0
         assert "nothing to reclaim" in capsys.readouterr().out
         assert stale.is_dir()
+
+
+class TestProbe:
+    """``clawdence probe`` — the proposal, and what it refuses to do with it."""
+
+    def test_a_report_names_the_commands_and_writes_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Exit 1 because this checkout has no remote to record, which is the
+        one thing outstanding — see ``test_unfinished_business_is_the_exit_status``."""
+        repo = _python_repo(tmp_path)
+        before = sorted(path.name for path in repo.iterdir())
+
+        assert main(["probe", str(repo)]) == 1
+
+        out = capsys.readouterr().out
+        assert "uv run pytest" in out
+        assert "proposal" in out
+        assert sorted(path.name for path in repo.iterdir()) == before
+
+    def test_json_is_the_profile_and_the_reasoning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["probe", str(_python_repo(tmp_path)), "--json"]) == 1
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["profile"]["build_system"] == "uv"
+        assert payload["findings"]
+
+    def test_out_writes_the_profile_alone_and_will_not_clobber(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The profile is what gets committed; the findings are the review.
+        Refusing to overwrite matters because the file a second probe would
+        replace is the one somebody has already edited by hand."""
+        target = tmp_path / "profiles" / "etl.json"
+
+        assert main(["probe", str(_python_repo(tmp_path)), "--out", str(target)]) == 1
+        capsys.readouterr()
+        assert json.loads(target.read_text(encoding="utf-8"))["id"] == "repo"
+
+        assert main(["probe", str(_python_repo(tmp_path)), "--out", str(target)]) == 2
+        assert "pass --force" in capsys.readouterr().err
+
+    def test_unfinished_business_is_the_exit_status(self, tmp_path: Path) -> None:
+        """1 means "a person still has to look at this" — the answer a script
+        probing twenty repositories wants. The repository here is fine; the
+        profile is not finished, because nothing has granted the daemon its
+        tests need."""
+        repo = tmp_path / "needs-docker"
+        (repo / "src").mkdir(parents=True)
+        (repo / "go.mod").write_text(
+            "module x\n\nrequire github.com/testcontainers/testcontainers-go v0.34.0\n",
+            encoding="utf-8",
+        )
+
+        assert main(["probe", str(repo)]) == 1
+
+    def test_a_finished_proposal_exits_zero(self, tmp_path: Path) -> None:
+        """The other half of the exit status: a checkout with a remote, a
+        lockfile and a test command leaves a person nothing to do."""
+        if shutil.which("git") is None:
+            pytest.skip("git is not on PATH")
+        repo = _python_repo(tmp_path)
+        for args in (
+            ("init", "-q", "-b", "main"),
+            ("remote", "add", "origin", "https://github.invalid/acme/etl.git"),
+        ):
+            subprocess.run(  # noqa: S603 - fixed argv, no shell
+                ["git", "-C", str(repo), *args],  # noqa: S607 - PATH lookup is checked above
+                check=True,
+                capture_output=True,
+            )
+
+        assert main(["probe", str(repo)]) == 0
+
+    def test_a_bad_id_is_refused_rather_than_written(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["probe", str(_python_repo(tmp_path)), "--id", "not a valid id"]) == 2
+        assert "id" in capsys.readouterr().err
+
+    def test_a_path_that_is_not_a_directory_says_so(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["probe", str(tmp_path / "absent")]) == 2
+        assert "not a directory" in capsys.readouterr().err
+
+
+def _python_repo(root: Path) -> Path:
+    """A uv project, with no git and no remote: probing does not need either."""
+    repo = root / "repo"
+    (repo / "tests").mkdir(parents=True, exist_ok=True)
+    (repo / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (repo / "tests" / "conftest.py").write_text("", encoding="utf-8")
+    return repo
 
 
 def _stale_worktree(root: Path, name: str) -> Path:

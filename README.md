@@ -227,6 +227,45 @@ not resolve gets an empty directory rather than an error, and a test that cannot
 hangs rather than fails. They are opt-in because they need Docker and a network, and the rest of
 the suite has neither.
 
+## The project probe
+
+[`src/clawdence/probe/`](src/clawdence/probe/) reads a repository and proposes the profile the
+runner needs — build system, the three commands, toolchain pins, whether the tests need Docker.
+v1 kept all of this in a hand-written registry, where every field was something somebody had to
+know and keep current.
+
+```sh
+clawdence probe ~/code/acme-billing              # a report, and what still needs a person
+clawdence probe ~/code/acme-billing --json       # the profile and the reasoning
+clawdence probe ~/code/acme-billing --out repos/acme-billing.json
+```
+
+It **proposes**. Nothing is written, registered, or applied; the output is JSON to read and commit,
+and the exit status is `1` when something in it still needs a human — the answer a script probing
+twenty repositories wants.
+
+Three properties are worth stating, because each is somewhere the obvious version goes wrong:
+
+- **Every field carries the file that justified it**, and every field it *declines* to set says
+  what was missing. A proposal with no evidence is unreviewable, and the only question a reviewer
+  has is how the probe knows.
+- **It leaves a field empty rather than guessing.** An empty `test_command` asks its reviewer a
+  question; a plausible wrong one answers it and gets committed. So a `package.json` with no
+  `scripts.test` gets nothing rather than `npm test`, a Python repo with no sign of pytest gets
+  nothing rather than a command that collects nothing and exits 0, and a Node repo with no lockfile
+  gets no install command rather than one that resolves fresh versions on every run.
+- **It cannot grant the Docker socket.** `needs_docker` is inferred from *declared* dependencies
+  and compose files — not from a `Dockerfile`, which says the project is packaged as an image, and
+  not from what is installed under `node_modules`, which is somebody else's manifest. But the tier
+  that provides a daemon needs `docker_socket_acknowledged`, and that is a person accepting
+  something equivalent to host root. So the probe raises the question, names the evidence, and
+  proposes a tier with no daemon in it. Nothing this command emits can be committed straight into a
+  run with a socket in it.
+
+The repository is read as untrusted input, because it is: bounded file reads, no walk of the tree,
+nothing outside the root followed through a symlink, and `pom.xml` and the Gradle DSL matched as
+text rather than handed to an XML parser or executed.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). It manages the Python version too, so nothing else

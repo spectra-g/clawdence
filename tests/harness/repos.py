@@ -114,6 +114,13 @@ _TESTCONTAINERS: Final[Mapping[BuildSystem, str]] = {
 }
 
 
+#: Written with the executable bit set, because git records that bit and the
+#: probe (S9) checks it: a repository whose ``mvnw`` is committed non-executable
+#: is a repository whose wrapper cannot be invoked, on every machine. A fixture
+#: without the bit would silently be testing that case instead of the normal one.
+_EXECUTABLE: Final[frozenset[str]] = frozenset({"mvnw", "gradlew"})
+
+
 class GitUnavailableError(RuntimeError):
     """``git`` is not on PATH, so a real repository cannot be built."""
 
@@ -194,6 +201,8 @@ def build_repo(
 def _write(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents, encoding="utf-8")
+    if path.name in _EXECUTABLE:
+        path.chmod(0o755)
 
 
 def _git(cwd: Path, *args: str) -> str:

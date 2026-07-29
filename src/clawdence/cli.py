@@ -26,6 +26,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from clawdence import __version__
 from clawdence.domain import RunStatus, jsonschema
 from clawdence.engine import (
@@ -35,6 +37,9 @@ from clawdence.engine import (
     render_json,
     render_text,
 )
+from clawdence.probe import ProbeError, probe, render_profile
+from clawdence.probe import render_json as render_probe_json
+from clawdence.probe import render_text as render_probe_text
 from clawdence.runners import (
     DEFAULT_CACHE_RETENTION,
     DEFAULT_GRACE,
@@ -161,6 +166,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Leave dependency caches alone. Reclaiming one only costs a slow install.",
     )
 
+    probe_parser = subcommands.add_parser(
+        "probe",
+        help="Read a repository and propose a profile for it.",
+    )
+    probe_parser.add_argument(
+        "repo", type=Path, metavar="REPO", help="Path to a repository checkout."
+    )
+    probe_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the profile and the findings as JSON instead of a report.",
+    )
+    probe_parser.add_argument(
+        "--out",
+        type=Path,
+        metavar="PATH",
+        help="Write the profile (without the findings) here. Refuses to overwrite.",
+    )
+    probe_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow --out to overwrite an existing file.",
+    )
+    probe_parser.add_argument(
+        "--name", metavar="NAME", help="Override the derived repository name."
+    )
+    probe_parser.add_argument(
+        "--id", dest="repo_id", metavar="ID", help="Override the derived repo id."
+    )
+
     schema = subcommands.add_parser(
         "schema",
         help="Generate or verify the JSON Schema projected from the domain model.",
@@ -282,6 +318,42 @@ def _run_command(
 
     print(render_json(report) if as_json else render_text(report))
     return 0 if report.succeeded else 1
+
+
+def _probe_command(
+    repo: Path,
+    *,
+    as_json: bool,
+    out: Path | None,
+    force: bool,
+    name: str | None,
+    repo_id: str | None,
+) -> int:
+    """Propose a profile, and say what a human still has to decide.
+
+    The exit status is about the *proposal*, not about the repository: 1 when
+    something in it still needs a person, which is the answer a script wants
+    when it probes twenty repositories and needs to know which ones to look at.
+    A repository that simply needs its test command written by hand is not a
+    failure, but it is not done either.
+    """
+    try:
+        result = probe(repo, name=name, repo_id=repo_id)
+    except (ProbeError, ValidationError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    if out is not None:
+        if out.exists() and not force:
+            print(f"{out} exists; pass --force to overwrite it", file=sys.stderr)
+            return 2
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(render_profile(result) + "\n", encoding="utf-8")
+
+    print(render_probe_json(result) if as_json else render_probe_text(result))
+    if out is not None:
+        print(f"\nprofile written to {out}", file=sys.stderr)
+    return 1 if result.actions else 0
 
 
 def _runs_list(state: Path | None, *, status: str | None, limit: int) -> int:
@@ -432,6 +504,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             work_root=args.work_root,
             older_than=args.older_than,
             no_caches=args.no_caches,
+        )
+
+    if args.command == "probe":
+        return _probe_command(
+            args.repo,
+            as_json=args.as_json,
+            out=args.out,
+            force=args.force,
+            name=args.name,
+            repo_id=args.repo_id,
         )
 
     if args.command == "schema":
