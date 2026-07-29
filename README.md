@@ -266,6 +266,48 @@ The repository is read as untrusted input, because it is: bounded file reads, no
 nothing outside the root followed through a symlink, and `pom.xml` and the Gradle DSL matched as
 text rather than handed to an XML parser or executed.
 
+## Ingestion
+
+[`src/clawdence/ingest/`](src/clawdence/ingest/) turns a request into a `WorkItem`, and
+[`store/intake.py`](src/clawdence/store/intake.py) keeps it. The command line is the first
+`IngestPort` source; Slack and GitHub issues are the same package with a different envelope, and
+neither may be enabled before the ingress trust boundary exists.
+
+```sh
+clawdence submit --ref REQ-1 --text "Fix the checkout total"   # or --file, or a pipe
+clawdence submit --ref REQ-1 --text "Fix the tax line" --amend # updates; does not duplicate
+clawdence submit --withdraw REQ-1                              # takes it back
+clawdence submit --reply thread-9 --text "Only on CI"          # continues a conversation
+clawdence inbox list                                           # what has been submitted
+clawdence inbox show REQ-1                                     # verbatim, with its conversation
+```
+
+The CLI looks like the easy adapter and is the only one that **cannot cheat**: Slack holds a socket
+and GitHub holds a connection, so either could deduplicate in a dictionary and look correct.
+`submit` is one process and whatever acts on the request is another, so the guard has to be a
+unique constraint in a file. Four properties fall out of that, and each is one the obvious version
+gets wrong:
+
+- **A request is not a message.** v1 took Slack messages and every message was new work, so it
+  never modelled what a request does over its life. Four verbs here — submit, amend, withdraw,
+  reply — because every source does all four. `--ref` is the idempotency key and you own it:
+  submitting the same one twice is one request said twice.
+- **An amendment is inferred from content, never from a verb the source sent.** A webhook
+  redelivery and an edit are the same POST. So an arrival is compared against what is stored, with
+  the identity fields excluded — and if the edit lands *after* the pipeline picked the request up,
+  it goes back in the queue and says so, because a correction that arrives thirty seconds late is
+  still the request.
+- **The body is stored byte for byte.** No summarising, no reflowing, no stripping. Repository
+  routing reads this field, and v1's rewrite is what dropped the product names from it. A derived
+  title is the first line — a selection from the text, not a summary of it.
+- **The system will not ingest its own output.** It posts to the channels it reads from, so
+  without one reserved identity, refused once at intake, its own summary becomes work that
+  produces another summary.
+
+Rate limiting, submitter authorisation and webhook signatures are **not here** — they are the
+ingress trust boundary, and the size caps in this package are resource bounds rather than that
+control.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). It manages the Python version too, so nothing else

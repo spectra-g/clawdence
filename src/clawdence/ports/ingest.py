@@ -24,14 +24,53 @@ here every adapter keys on the same thing, and the contract suite checks it.
 ``WorkItem.raw_text`` arrives from outside the trust boundary — a public issue is
 text a stranger wrote (see ``domain.work_item``). Ingestion normalises the
 envelope and never the content: no summarising, no rewriting, no stripping.
+
+Three constants below are the rules every adapter inherits rather than restates:
+``SELF_ID`` (what this system's own posts look like when they come back round),
+``MAX_REQUEST_CHARS`` and ``MAX_TITLE_CHARS``. They live here, next to
+``dedupe_key``, for the reason ``MAX_STEERING_CHARS`` lives in ``control``: a
+bound that each adapter chooses for itself is a bound two adapters eventually
+disagree about.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Protocol
+from typing import Final, Protocol
 
-from clawdence.domain import WorkItem
+from clawdence.domain import Submitter, WorkItem
+
+#: The submitter identity this system uses for anything it posts itself.
+#:
+#: **Bot-loop prevention, expressed as one reserved name.** The system posts to
+#: the same channels it reads: a summary in Slack, a comment on the issue that
+#: started the run. Every one of those is an arrival at some adapter, and an
+#: adapter that cannot recognise its own voice submits it, works on it, posts
+#: about that, and does not stop. The rule is enforced once, at intake, rather
+#: than in each adapter — an adapter's only obligation is to map its own bot
+#: identity onto this string, which is a line of code somebody writing a new
+#: adapter can be told to write. Enforcing it per-adapter is how v1's duplicate
+#: guards drifted.
+SELF_ID: Final = "clawdence"
+
+#: Longest request body intake will store, in characters.
+#:
+#: A resource bound, and deliberately not the trust control — rate limiting,
+#: authorisation and injection handling are S10b's, and none of them is a length.
+#: What this stops is duller and real today: ``clawdence submit`` reads stdin, and
+#: an unbounded read of a pipe is a control plane that dies on whatever somebody
+#: cat'd into it. Refused rather than truncated, for ``MessageRejectedError``'s
+#: reason — half a request can ask for the opposite of the whole one.
+MAX_REQUEST_CHARS: Final = 64_000
+
+#: Longest title. Short because it is a line in a list, a branch name and a PR
+#: title before it is anything else.
+MAX_TITLE_CHARS: Final = 200
+
+
+def is_self(submitter: Submitter) -> bool:
+    """Did this system submit it? See ``SELF_ID``."""
+    return submitter.external_id == SELF_ID
 
 
 def dedupe_key(item: WorkItem) -> str:

@@ -45,6 +45,36 @@ class MessageRejectedError(StoreError):
     """
 
 
+class SubmissionRejectedError(StoreError):
+    """An arrival the intake will not take (S10).
+
+    Refused at the door rather than stored and dealt with later. Everything
+    reaching this is a fact about the *envelope* — nothing in it, too much in
+    it, or our own output coming back round — and each of those is cheaper to
+    answer at the submitting surface, which still has a person in front of it,
+    than three steps downstream where the only evidence left is a work item
+    nobody meant to create.
+    """
+
+
+class UnknownSubmissionError(StoreError):
+    """No arrival with that key or work item id.
+
+    Distinct from a withdrawn one: "there is nothing to amend" and "you already
+    withdrew that" are different mistakes and need different answers.
+    """
+
+
+class UnknownConversationError(StoreError):
+    """A reply arrived for a conversation nothing was submitted under.
+
+    Raised rather than opening a new request under it. A follow-up whose parent
+    is missing is either a routing bug or a stray message, and inventing a work
+    item out of half a conversation is how v1's threading failures turned into
+    duplicate epics.
+    """
+
+
 class ConcurrentUpdateError(StoreError):
     """A run was modified by someone else and the retries ran out.
 

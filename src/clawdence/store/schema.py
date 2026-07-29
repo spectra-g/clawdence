@@ -174,6 +174,65 @@ _MIGRATIONS: Final[tuple[str, ...]] = (
         acknowledged_at TEXT
     ) STRICT;
     """,
+    # 3 — S10: what arrived, and what has happened to it since.
+    """
+    CREATE TABLE intake (
+        -- Arrival order, assigned by the database, for the reason ``audit`` and
+        -- ``steering`` have one: a backlog has to be worked through in an order
+        -- a clock cannot make ambiguous.
+        seq                   INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+
+        -- ``source:external_id`` — ``ports.ingest.dedupe_key``. The identity of
+        -- a *request*, not of a delivery, which is what makes a redelivered
+        -- webhook collide here instead of becoming a second work item. UNIQUE
+        -- rather than checked in Python: the guard has to hold across the two
+        -- processes that a CLI submission and a running control plane are.
+        dedupe_key            TEXT    NOT NULL UNIQUE,
+
+        -- The id we minted, on first arrival, and never again. Amendments keep
+        -- it: everything downstream refers to a work item by this, and an edit
+        -- that renamed it would strand every reference.
+        work_item_id          TEXT    NOT NULL UNIQUE,
+
+        source                TEXT    NOT NULL,
+        conversation_id       TEXT,
+        state                 TEXT    NOT NULL,
+
+        -- Bumps on every amendment. What tells a reader "the third version of
+        -- one request" from "three requests".
+        revision              INTEGER NOT NULL DEFAULT 1,
+
+        -- The revision that was handed to the pipeline, or NULL. Kept after an
+        -- amendment re-queues the item, because "we ran revision 1 and they are
+        -- now on revision 3" is the thing somebody debugging needs to see.
+        acknowledged_revision INTEGER,
+
+        item                  TEXT    NOT NULL,
+        received_at           TEXT    NOT NULL,
+        updated_at            TEXT    NOT NULL,
+        acknowledged_at       TEXT,
+        closed_at             TEXT,
+        reason                TEXT
+    ) STRICT;
+
+    -- The collect query: what has not been dealt with, in arrival order.
+    CREATE INDEX intake_pending ON intake (state, seq);
+
+    -- Reply routing: a source plus a conversation identifies the request a
+    -- follow-up belongs to.
+    CREATE INDEX intake_conversation ON intake (source, conversation_id);
+
+    CREATE TABLE intake_turns (
+        seq        INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        id         TEXT    NOT NULL UNIQUE,
+        dedupe_key TEXT    NOT NULL REFERENCES intake (dedupe_key) ON DELETE CASCADE,
+        author     TEXT    NOT NULL,
+        body       TEXT    NOT NULL,
+        at         TEXT    NOT NULL
+    ) STRICT;
+
+    CREATE INDEX intake_turns_request ON intake_turns (dedupe_key, seq);
+    """,
 )
 
 #: The schema version this build writes and expects.

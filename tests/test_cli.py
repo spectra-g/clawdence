@@ -22,7 +22,8 @@ import pytest
 from clawdence import __version__
 from clawdence.cli import main
 from clawdence.domain import Run, RunStatus, StepResult, StepStatus, StepType
-from clawdence.store import StateStore
+from clawdence.ports.ingest import SELF_ID
+from clawdence.store import Intake, StateStore
 
 
 def test_version_is_populated() -> None:
@@ -446,6 +447,213 @@ class TestProbe:
     ) -> None:
         assert main(["probe", str(tmp_path / "absent")]) == 2
         assert "not a directory" in capsys.readouterr().err
+
+
+class TestSubmit:
+    """``clawdence submit`` — the CLI as an ``IngestPort`` source.
+
+    Every test names an explicit ``--state`` for the reason in the module
+    docstring, and here it is load-bearing twice over: the whole point of this
+    adapter is that its dedupe guard is a file, so a test that shared the real
+    one would be sharing state with the developer's own inbox.
+    """
+
+    def db(self, root: Path) -> str:
+        return str(root / "state.db")
+
+    def test_a_request_is_created(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["submit", "--state", self.db(tmp_path), "--text", "Fix the total"]) == 0
+        assert "created" in capsys.readouterr().out
+
+    def test_the_same_ref_twice_creates_one_request(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The verification S10 asks for, at the surface a person uses: a script
+        that re-submits on retry must not fan out into two pieces of work."""
+        argv = ["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the total"]
+        assert main(argv) == 0
+        capsys.readouterr()
+        assert main(argv) == 0
+        assert "already submitted" in capsys.readouterr().out
+
+        assert main(["inbox", "list", "--state", self.db(tmp_path)]) == 0
+        assert capsys.readouterr().out.count("cli:REQ-1") == 1
+
+    def test_dedupe_survives_the_process(self, tmp_path: Path) -> None:
+        """Two ``main`` calls are one process here, so the real check is that
+        the guard is in the database rather than in a live object — nothing is
+        carried between the calls but the path."""
+        argv = ["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the total"]
+        main(argv)
+        with StateStore.open(self.db(tmp_path)) as store:
+            rows = store.connection.execute("SELECT COUNT(*) FROM intake").fetchone()[0]
+        main(argv)
+        with StateStore.open(self.db(tmp_path)) as store:
+            assert store.connection.execute("SELECT COUNT(*) FROM intake").fetchone()[0] == rows
+
+    def test_editing_updates_rather_than_duplicates(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the total"])
+        capsys.readouterr()
+        assert (
+            main(
+                [
+                    "submit",
+                    "--state",
+                    self.db(tmp_path),
+                    "--ref",
+                    "REQ-1",
+                    "--text",
+                    "Fix the tax line",
+                    "--amend",
+                ]
+            )
+            == 0
+        )
+        assert "amended" in capsys.readouterr().out
+
+        assert main(["inbox", "show", "--state", self.db(tmp_path), "REQ-1"]) == 0
+        out = capsys.readouterr().out
+        assert "Fix the tax line" in out
+        assert "Fix the total" not in out
+
+    def test_an_edit_after_pickup_is_a_distinct_exit_status(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """3, not 0. Something is working from the older text, and a script
+        submitting into a running pipeline has to be able to branch on that."""
+        main(["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the total"])
+        capsys.readouterr()
+        with StateStore.open(self.db(tmp_path)) as store:
+            item = Intake(store).collect()[0]
+            Intake(store).acknowledge(item.id)
+
+        argv = ["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the tax"]
+        assert main(argv) == 3
+        assert "older version" in capsys.readouterr().out
+
+    def test_withdrawing_takes_it_out_of_the_queue(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", "Fix the total"])
+        capsys.readouterr()
+        assert main(["submit", "--state", self.db(tmp_path), "--withdraw", "REQ-1"]) == 0
+        assert "withdrawn" in capsys.readouterr().out
+
+        assert main(["inbox", "list", "--state", self.db(tmp_path), "--status", "pending"]) == 0
+        assert "nothing submitted" in capsys.readouterr().out
+
+    def test_a_reply_lands_on_the_originating_request(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Reply routing symmetry, inbound. The answer belongs to the request
+        that asked, and it must not become a second one."""
+        main(
+            [
+                "submit",
+                "--state",
+                self.db(tmp_path),
+                "--ref",
+                "REQ-1",
+                "--conversation",
+                "thread-9",
+                "--text",
+                "Flaky checkout test",
+            ]
+        )
+        capsys.readouterr()
+        assert (
+            main(["submit", "--state", self.db(tmp_path), "--reply", "thread-9", "--text", "On CI"])
+            == 0
+        )
+        assert "reply recorded" in capsys.readouterr().out
+
+        main(["inbox", "show", "--state", self.db(tmp_path), "REQ-1"])
+        assert "On CI" in capsys.readouterr().out
+        main(["inbox", "list", "--state", self.db(tmp_path)])
+        assert capsys.readouterr().out.count("cli:") == 1
+
+    def test_a_reply_to_no_conversation_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = ["submit", "--state", self.db(tmp_path), "--reply", "thread-9", "--text", "hello?"]
+        assert main(argv) == 2
+        assert "nothing for this reply to continue" in capsys.readouterr().err
+
+    def test_the_system_will_not_submit_to_itself(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Bot-loop prevention, at the surface. ``--as clawdence`` is the CLI's
+        version of the system's own summary arriving back through a channel."""
+        argv = [
+            "submit",
+            "--state",
+            self.db(tmp_path),
+            "--as",
+            SELF_ID,
+            "--text",
+            "Run finished: 3 PRs opened",
+        ]
+        assert main(argv) == 2
+        assert "loop" in capsys.readouterr().err
+
+    def test_the_request_is_read_from_a_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = tmp_path / "request.md"
+        path.write_text("Fix the checkout total\n\nIt rounds down.\n", encoding="utf-8")
+        assert main(["submit", "--state", self.db(tmp_path), "--file", str(path)]) == 0
+        assert "Fix the checkout total" in capsys.readouterr().out
+
+    def test_two_sources_for_the_body_are_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = ["submit", "--state", self.db(tmp_path), "--text", "a", "--file", "b"]
+        assert main(argv) == 2
+        assert "pass one" in capsys.readouterr().err
+
+    def test_two_verbs_are_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = ["submit", "--state", self.db(tmp_path), "--withdraw", "REQ-1", "--amend"]
+        assert main(argv) == 2
+        assert "ask for different things" in capsys.readouterr().err
+
+    def test_json_carries_the_work_item(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(["submit", "--state", self.db(tmp_path), "--text", "Fix the total", "--json"]) == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["disposition"] == "created"
+        assert payload["work_item"]["raw_text"] == "Fix the total"
+
+    def test_the_verbatim_body_is_what_show_prints(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Nothing between the submitting surface and the reviewing one rewrites
+        it — the ``slackMessageRaw`` lesson, checked end to end."""
+        body = "Fix **Checkout-Pro**'s totals.\n\nThey round down."
+        main(["submit", "--state", self.db(tmp_path), "--ref", "REQ-1", "--text", body])
+        capsys.readouterr()
+        main(["inbox", "show", "--state", self.db(tmp_path), "REQ-1"])
+        out = capsys.readouterr().out
+        assert "Fix **Checkout-Pro**'s totals." in out
+        assert "They round down." in out
+
+    def test_showing_something_never_submitted_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["inbox", "show", "--state", self.db(tmp_path), "REQ-9"]) == 2
+        assert "REQ-9" in capsys.readouterr().err
+
+    def test_an_empty_inbox_says_so(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["inbox", "list", "--state", self.db(tmp_path)]) == 0
+        assert "nothing submitted" in capsys.readouterr().out
 
 
 def _python_repo(root: Path) -> Path:

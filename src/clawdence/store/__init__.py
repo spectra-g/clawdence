@@ -11,12 +11,15 @@ rebuilds to keep working forever.
 The layering, as elsewhere, is one-directional::
 
     errors ─ schema ─ codec
-                └─ audit ─ state ─ control ─ ledger ─ watchdog
+                └─ audit ─ state ─ control · intake ─ ledger ─ watchdog
 
 ``ledger`` is the seam with the engine: it satisfies ``engine.Ledger``, so the
 executor persists a run without knowing that it does. ``control`` is the same
 kind of seam facing the other way (S6c): it satisfies ``ports.ControlPort``, so
 a runner can be steered and stopped mid-flight without importing this package.
+``intake`` is the third (S10) and satisfies ``ports.IngestPort`` — durable
+because the CLI adapter's arrival and the pipeline's collection are two
+different processes, so an in-memory dedupe guard would guard nothing.
 """
 
 from __future__ import annotations
@@ -41,8 +44,19 @@ from clawdence.store.errors import (
     DuplicateAttemptError,
     MessageRejectedError,
     StoreError,
+    SubmissionRejectedError,
+    UnknownConversationError,
     UnknownRunError,
+    UnknownSubmissionError,
     UnsupportedDatabaseError,
+)
+from clawdence.store.intake import (
+    Admission,
+    ArrivalState,
+    Disposition,
+    Intake,
+    StoreIngest,
+    Turn,
 )
 from clawdence.store.ledger import SqliteLedger
 from clawdence.store.schema import IN_MEMORY, SCHEMA_VERSION, connect, migrate, transaction
@@ -61,12 +75,16 @@ __all__ = [
     "IN_MEMORY",
     "MAX_CLAIM",
     "SCHEMA_VERSION",
+    "Admission",
+    "ArrivalState",
     "AuditLog",
     "Cancellations",
     "ConcurrentUpdateError",
     "DeadLetter",
+    "Disposition",
     "DuplicateAttemptError",
     "Inbox",
+    "Intake",
     "MessageRejectedError",
     "MessageState",
     "Redactor",
@@ -78,7 +96,12 @@ __all__ = [
     "SteeringMessage",
     "StoreControl",
     "StoreError",
+    "StoreIngest",
+    "SubmissionRejectedError",
+    "Turn",
+    "UnknownConversationError",
     "UnknownRunError",
+    "UnknownSubmissionError",
     "UnsupportedDatabaseError",
     "connect",
     "detect",

@@ -13,6 +13,13 @@ keeps the entry-point rule true for the build as well as for users.
 a run, read what it did, and unstick it. The read *surface* is HQ's (S19); what
 belongs here is the part an operator needs when HQ is not the thing that is
 working.
+
+``submit`` and ``inbox`` arrive with ingestion (S10), and they are not a
+convenience wrapper over one: the command line *is* an ``IngestPort`` source,
+the first one, and the only one whose arrival and whose consumption are
+guaranteed to be different processes. Everything Slack and GitHub will need —
+deduplication that survives a restart, edits, withdrawal, conversation
+threading — has to work here before there is a socket to hide it behind.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from clawdence import __version__
-from clawdence.domain import RunStatus, jsonschema
+from clawdence.domain import RunStatus, WorkItemType, jsonschema
 from clawdence.engine import (
     WorkflowLoadError,
     execute,
@@ -37,6 +44,9 @@ from clawdence.engine import (
     render_json,
     render_text,
 )
+from clawdence.ingest import DEFAULT_TYPE, NormaliseError
+from clawdence.ingest import cli as ingest_cli
+from clawdence.ingest import report as ingest_report
 from clawdence.probe import ProbeError, probe, render_profile
 from clawdence.probe import render_json as render_probe_json
 from clawdence.probe import render_text as render_probe_text
@@ -49,7 +59,15 @@ from clawdence.runners import (
     Reaper,
     Reclaimed,
 )
-from clawdence.store import SqliteLedger, StateStore, detect, sweep
+from clawdence.store import (
+    ArrivalState,
+    Intake,
+    SqliteLedger,
+    StateStore,
+    StoreError,
+    detect,
+    sweep,
+)
 
 DEFAULT_SCHEMA_DIR = Path("schemas")
 
@@ -165,6 +183,116 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Leave dependency caches alone. Reclaiming one only costs a slow install.",
     )
+
+    submit = subcommands.add_parser(
+        "submit",
+        help="Submit a request. Reads the text from --text, a file, or stdin.",
+    )
+    submit.add_argument(
+        "--text",
+        metavar="TEXT",
+        help="The request itself. Omit to read it from --file, or from stdin.",
+    )
+    submit.add_argument(
+        "--file",
+        type=Path,
+        metavar="PATH",
+        help="Read the request from this file.",
+    )
+    submit.add_argument(
+        "--title",
+        metavar="TITLE",
+        help="Title. Defaults to the first line of the request, cut to length.",
+    )
+    submit.add_argument(
+        "--type",
+        dest="item_type",
+        choices=tuple(kind.value for kind in WorkItemType),
+        default=DEFAULT_TYPE.value,
+        help="What kind of request this is. Triage may reclassify it.",
+    )
+    submit.add_argument(
+        "--ref",
+        metavar="REF",
+        help=(
+            "Idempotency key for this request. Submitting the same REF twice is "
+            "one request said twice. Omitted means a fresh one per invocation."
+        ),
+    )
+    submit.add_argument(
+        "--conversation",
+        metavar="ID",
+        help="Conversation this belongs to, so replies can be threaded onto it.",
+    )
+    submit.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="LABEL",
+        dest="labels",
+        help="Attach a label. Repeatable.",
+    )
+    submit.add_argument(
+        "--workflow",
+        metavar="NAME",
+        help="Force a workflow instead of letting triage choose one.",
+    )
+    submit.add_argument(
+        "--as",
+        dest="submitter",
+        metavar="WHO",
+        help="Submit on behalf of this identity. Defaults to the current user.",
+    )
+    submit.add_argument(
+        "--amend",
+        action="store_true",
+        help="Replace the content of an existing --ref. Fails if there is none.",
+    )
+    submit.add_argument(
+        "--withdraw",
+        metavar="REF",
+        help="Take back a request. Needs no text.",
+    )
+    submit.add_argument(
+        "--reply",
+        metavar="CONVERSATION",
+        help="Add a follow-up to a conversation. Never creates a work item.",
+    )
+    submit.add_argument(
+        "--reason",
+        metavar="TEXT",
+        default="withdrawn from the command line",
+        help="Why, for --withdraw.",
+    )
+    submit.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the admission as JSON instead of a line.",
+    )
+    _add_state_argument(submit)
+
+    inbox = subcommands.add_parser("inbox", help="Inspect submitted requests.")
+    inbox_actions = inbox.add_subparsers(dest="inbox_command")
+
+    inbox_list = inbox_actions.add_parser("list", help="Requests, newest first.")
+    _add_state_argument(inbox_list)
+    # ``--status`` rather than ``--state``: ``--state`` is the database path on
+    # every other subcommand, and one flag meaning two things is how somebody
+    # eventually points a filter at a file.
+    inbox_list.add_argument(
+        "--status",
+        dest="state_filter",
+        choices=tuple(state.value for state in ArrivalState),
+        help="Show only requests in this state.",
+    )
+    inbox_list.add_argument("--limit", type=int, default=20, metavar="N")
+
+    inbox_show = inbox_actions.add_parser(
+        "show", help="One request, verbatim, with its conversation."
+    )
+    inbox_show.add_argument("ref", metavar="REF", help="The reference it was submitted under.")
+    _add_state_argument(inbox_show)
 
     probe_parser = subcommands.add_parser(
         "probe",
@@ -356,6 +484,125 @@ def _probe_command(
     return 1 if result.actions else 0
 
 
+def _read_request(text: str | None, file: Path | None) -> str:
+    """The request body, from whichever of the three ways it was given.
+
+    stdin is the fallback rather than a flag because ``gh issue view … |
+    clawdence submit`` is the shape this gets used in, and a pipe with no
+    terminal behind it is unambiguous. A *terminal* with nothing piped into it
+    is not: waiting there looks like the command has hung, so it refuses and
+    says what it wanted.
+    """
+    if text is not None and file is not None:
+        raise NormaliseError("--text and --file both give the request; pass one")
+    if text is not None:
+        return text
+    if file is not None:
+        try:
+            return file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise NormaliseError(f"cannot read {file}: {exc}") from exc
+    if sys.stdin.isatty():
+        raise NormaliseError("no request given — pass --text, --file, or pipe it in")
+    return sys.stdin.read()
+
+
+def _submit_command(
+    *,
+    text: str | None,
+    file: Path | None,
+    title: str | None,
+    item_type: str,
+    ref: str | None,
+    conversation: str | None,
+    labels: Sequence[str],
+    workflow: str | None,
+    submitter: str | None,
+    amend: bool,
+    withdraw: str | None,
+    reply: str | None,
+    reason: str,
+    as_json: bool,
+    state: Path | None,
+) -> int:
+    """One arrival at the CLI ingestion adapter.
+
+    Exit status is about *what happened to the request*, not about whether the
+    command worked: 0 when the intake now holds what the caller asked it to,
+    and 3 when it does but something already acted on the older version — the
+    case a script re-submitting into a running pipeline has to be able to
+    branch on, and the one a person needs to read twice.
+    """
+    now = datetime.now(UTC)
+    verbs = [name for name, given in (("--withdraw", withdraw), ("--reply", reply)) if given]
+    if amend:
+        verbs.append("--amend")
+    if len(verbs) > 1:
+        print(f"{' and '.join(verbs)} ask for different things; pass one", file=sys.stderr)
+        return 2
+
+    try:
+        with StateStore.open(state or default_state_path()) as store:
+            intake = Intake(store)
+            turn = None
+            if withdraw is not None:
+                admission = ingest_cli.withdraw(intake, withdraw, at=now, reason=reason)
+            elif reply is not None:
+                admission, turn = ingest_cli.reply(
+                    intake,
+                    reply,
+                    body=_read_request(text, file),
+                    at=now,
+                    author=submitter,
+                )
+            else:
+                admission = ingest_cli.submit(
+                    intake,
+                    text=_read_request(text, file),
+                    at=now,
+                    ref=ref,
+                    title=title,
+                    item_type=WorkItemType(item_type),
+                    conversation_id=conversation,
+                    labels=tuple(labels),
+                    workflow_override=workflow,
+                    submitter=ingest_cli.cli_submitter(submitter) if submitter else None,
+                    amend=amend,
+                )
+    except (NormaliseError, StoreError, ValidationError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    print(
+        ingest_report.render_json(admission, turn=turn)
+        if as_json
+        else ingest_report.render_text(admission)
+    )
+    return 3 if admission.requeued else 0
+
+
+def _inbox_list(state: Path | None, *, arrival_state: str | None, limit: int) -> int:
+    with StateStore.open(state or default_state_path()) as store:
+        admissions = Intake(store).list(
+            state=ArrivalState(arrival_state) if arrival_state else None, limit=limit
+        )
+    print(ingest_report.render_listing(admissions))
+    return 0
+
+
+def _inbox_show(ref: str, state: Path | None) -> int:
+    with StateStore.open(state or default_state_path()) as store:
+        intake = Intake(store)
+        key = ingest_cli.key(ref)
+        admission = intake.get(key)
+        if admission is None:
+            print(f"nothing has been submitted under {ref!r}", file=sys.stderr)
+            return 2
+        turns = intake.turns(key)
+    print(ingest_report.render_detail(admission, turns))
+    return 0
+
+
 def _runs_list(state: Path | None, *, status: str | None, limit: int) -> int:
     with StateStore.open(state or default_state_path()) as store:
         runs = store.list_runs(status=RunStatus(status) if status else None, limit=limit)
@@ -505,6 +752,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             older_than=args.older_than,
             no_caches=args.no_caches,
         )
+
+    if args.command == "submit":
+        return _submit_command(
+            text=args.text,
+            file=args.file,
+            title=args.title,
+            item_type=args.item_type,
+            ref=args.ref,
+            conversation=args.conversation,
+            labels=args.labels,
+            workflow=args.workflow,
+            submitter=args.submitter,
+            amend=args.amend,
+            withdraw=args.withdraw,
+            reply=args.reply,
+            reason=args.reason,
+            as_json=args.as_json,
+            state=args.state,
+        )
+
+    if args.command == "inbox":
+        if args.inbox_command == "list":
+            return _inbox_list(args.state, arrival_state=args.state_filter, limit=args.limit)
+        if args.inbox_command == "show":
+            return _inbox_show(args.ref, args.state)
+        parser.parse_args(["inbox", "--help"])
+        return 0  # pragma: no cover - --help exits
 
     if args.command == "probe":
         return _probe_command(

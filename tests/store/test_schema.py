@@ -14,6 +14,12 @@ from tests.store.factories import at
 
 PARK = "INSERT INTO dead_letters (at, origin, reason, body) VALUES (?, ?, ?, ?)"
 
+#: Tables the newest migration creates. Dropped and re-applied by the
+#: downgrade-then-upgrade test below, which is what makes it a test of the
+#: migration this build added rather than of one that has worked for months.
+#: Children first, so the foreign key does not object to the order.
+LATEST_TABLES = ("intake_turns", "intake")
+
 
 def park(connection: sqlite3.Connection) -> None:
     connection.execute(PARK, (iso(at(0)), "test", "because", "{}"))
@@ -44,23 +50,28 @@ class TestMigrations:
             "dead_letters",
             "steering",
             "cancellations",
+            "intake",
+            "intake_turns",
         } <= names
 
     def test_a_database_from_an_older_build_is_migrated_forward(
         self, connections: ConnectionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """S6c's tables arrive on a database that already has runs in it.
+        """The newest migration's tables arrive on a database that already has
+        runs in it — currently S10's ``intake``, as it was S6c's ``steering``.
 
-        Written as a real downgrade-then-upgrade rather than a hand-carved v1
+        Written as a real downgrade-then-upgrade rather than a hand-carved older
         file: what a migration has to survive is a database that was *written*
         by the earlier build, and a fixture typed out by hand is a guess about
-        what that looked like.
+        what that looked like. The cost of doing it this way is that the step
+        adding a migration also updates ``LATEST_TABLES``, which is the right
+        thing to have to notice.
         """
         path = tmp_path / "state.db"
         first = connections(path)
         park(first)
-        first.execute("DROP TABLE steering")
-        first.execute("DROP TABLE cancellations")
+        for table in LATEST_TABLES:
+            first.execute(f"DROP TABLE {table}")
         first.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
         first.close()
 
@@ -68,7 +79,8 @@ class TestMigrations:
 
         assert user_version(second) == SCHEMA_VERSION
         assert parked(second) == 1
-        assert second.execute("SELECT count(*) FROM steering").fetchone()[0] == 0
+        for table in LATEST_TABLES:
+            assert second.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # noqa: S608
 
     def test_migrating_again_changes_nothing(self, db: sqlite3.Connection) -> None:
         park(db)
