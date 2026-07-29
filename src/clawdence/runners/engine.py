@@ -160,6 +160,17 @@ class ContainerSpec:
     #: waiting for input nobody will send.
     interactive: bool = False
 
+    #: Extra ``/etc/hosts`` entries, as ``{name: address}``. Empty on the tiers
+    #: that need no name to reach the host, which is all of them but one: S8's
+    #: socket tier has to give the container a name for the machine outside it,
+    #: because that is where a sibling container's published ports appear.
+    extra_hosts: Mapping[str, str] = field(default_factory=dict)
+
+    #: Supplementary group ids. Also empty except on the socket tier, where the
+    #: container runs as an unprivileged user and the daemon's socket is
+    #: group-owned — ``--user`` without this is a mount the process cannot open.
+    group_add: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class ContainerState:
@@ -231,6 +242,10 @@ class ContainerEngine:
         if spec.interactive:
             argv.append("--interactive")
 
+        for group in spec.group_add:
+            argv += ["--group-add", group]
+        for name, address in sorted(spec.extra_hosts.items()):
+            argv += ["--add-host", f"{name}:{address}"]
         for path, options in sorted(spec.tmpfs.items()):
             argv += ["--tmpfs", f"{path}:{options}" if options else path]
         for mount in spec.mounts:
@@ -342,6 +357,46 @@ class ContainerEngine:
         existed, which is what makes it safe to call from a ``finally``."""
         await self._call("rm", "--force", "--volumes", name)
 
+    async def owning_group(self, image: str, path: str, *, timeout: float = 300.0) -> str | None:
+        """The gid that owns ``path`` **on the machine the daemon runs on**.
+
+        Asked by running a container rather than by calling ``stat`` here, and
+        that is not indirection for its own sake: on every VM-backed setup —
+        Docker Desktop, Colima, Lima, Rancher — the daemon is not on this
+        machine, so a local ``stat`` of ``/var/run/docker.sock`` answers a
+        question about the wrong filesystem, or finds nothing at all. The
+        difference is invisible until a container runs as a non-root user and
+        cannot open a mount that is plainly there.
+
+        ``None`` when the question could not be asked: no such path on the
+        daemon's side, or an image with no ``stat`` in it. The caller decides
+        what that means; it is not an error here, because both causes have the
+        same remedy and the caller is the one that can name it.
+
+        Generously timed, because this may be the call that pulls the image.
+        """
+        raw = await self._call(
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            "--mount",
+            f"type=bind,source={path},target={path}",
+            image,
+            "-c",
+            # Both spellings. ``-c`` is GNU and busybox, which is what a Linux
+            # runner image has; ``-f`` is BSD, which is what the test harness
+            # runs on when the maintainer is on a Mac. Trying both costs one
+            # failed exec and means this is not a function whose behaviour
+            # depends on where the suite is running.
+            f'stat -c %g "{path}" 2>/dev/null || stat -f %g "{path}"',
+            timeout=timeout,
+        )
+        if raw is None:
+            return None
+        found = raw.strip().splitlines()[-1].strip() if raw.strip() else ""
+        return found if found.isdigit() else None
+
     async def available(self) -> bool:
         """Whether there is a working daemon to talk to.
 
@@ -353,12 +408,13 @@ class ContainerEngine:
             return False
         return await self._call("version", "--format", "{{.Server.Version}}") is not None
 
-    async def _call(self, *args: str) -> str | None:
+    async def _call(self, *args: str, timeout: float | None = None) -> str | None:
         """Run a control command. ``None`` when the engine says no.
 
         Every caller here treats failure as absence rather than as an error,
-        because all three are asked in places where the run's fate is already
-        decided and raising would replace a real outcome with a plumbing one.
+        because they are asked in places where the run's fate is already decided
+        — or, for ``owning_group``, in a place where the caller has a better
+        error to raise than this one does.
         """
         try:
             process = await asyncio.create_subprocess_exec(
@@ -373,7 +429,8 @@ class ContainerEngine:
 
         try:
             raw_out, _ = await asyncio.wait_for(
-                process.communicate(), timeout=self.control_timeout_seconds
+                process.communicate(),
+                timeout=self.control_timeout_seconds if timeout is None else timeout,
             )
         except TimeoutError:
             # Bounded, and for a reason this module hit directly: a client that

@@ -140,6 +140,19 @@ class RunnerRequest(DomainModel):
     contract: VerificationContract
     budget: Budget
 
+    #: Whether the work this run came from arrived from a trusted submitter
+    #: (``Submitter.trusted``), carried down to the tier that has to gate on it.
+    #: **Deny by default**, matching the field it is derived from.
+    #:
+    #: §3.3 gates Docker capability on the *provenance of the work*, not on the
+    #: repository's configuration alone: a repository may legitimately need
+    #: testcontainers and still not be somewhere a stranger's issue text should
+    #: be able to reach the host daemon. Two facts, two fields — the profile says
+    #: what the repository needs, this says who asked — and the socket tier
+    #: requires both. A single field would mean a repository that opted in once
+    #: stayed opted in for every source that ever routed to it.
+    trusted_provenance: bool = False
+
     #: The augmented plan text — v1's ``_build_runner_plan_input``, which grew
     #: to 151 lines of constraint hardening because everything that plan text
     #: fails to say, the agent invents.

@@ -54,6 +54,8 @@ VALUED_FLAGS = frozenset(
         "--storage-opt",
         "--entrypoint",
         "--pull",
+        "--group-add",
+        "--add-host",
     }
 )
 
@@ -127,6 +129,13 @@ def _run(state_dir: Path, argv: list[str]) -> int:
 
     env = _container_env(flags)
     interactive = any(flag == "--interactive" for flag, _ in flags)
+    # An overridden entrypoint goes in front of the command, as the real client
+    # does. ``owning_group`` uses one, and without this the fake would try to
+    # execute its `-c` as a program and answer 127 — which the tier would read
+    # as "there is no socket there".
+    entrypoint = _one(flags, "--entrypoint")
+    if entrypoint is not None:
+        command = [entrypoint, *command]
     try:
         child = subprocess.Popen(  # noqa: S603 - argv, no shell, and the point
             command,
@@ -153,6 +162,11 @@ def _run(state_dir: Path, argv: list[str]) -> int:
     _pid_path(state_dir, name).write_text(str(child.pid), encoding="utf-8")
     code = child.wait()
     _pid_path(state_dir, name).unlink(missing_ok=True)
+
+    if any(flag == "--rm" for flag, _ in flags):
+        # The one place ``--rm`` is used: a throwaway container whose *output*
+        # is the answer, so there is no exit state anybody comes back for.
+        return 137 if code < 0 else code
 
     _write_state(
         state_dir,

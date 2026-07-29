@@ -29,6 +29,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from clawdence.domain import Budget, ResourceCaps, RunnerOutcome, RunnerRequest
 from clawdence.ports import PermanentError, StaticSecrets
@@ -681,10 +682,22 @@ def test_the_socket_tier_is_not_a_flag_away(
     request_for: RequestFactory, fake_engine: FakeEngine
 ) -> None:
     """Testcontainers support is S8 and it is a different tier value on purpose:
-    a process that can reach the host daemon is host root by another spelling."""
-    profile = container_profile(isolation_tier="container+docker:socket")
+    a process that can reach the host daemon is host root by another spelling.
+
+    Two refusals deep, and they are in the right order. The profile does not
+    validate without ``docker_socket_acknowledged`` — S8's configuration-time
+    gate — and a profile that *has* been acknowledged still gets no socket from
+    this runner, because the capability needs a runner built for it rather than
+    a repository that asked nicely.
+    """
+    with pytest.raises(ValidationError):
+        container_profile(isolation_tier="container+docker:socket")
+
+    acknowledged = container_profile(
+        isolation_tier="container+docker:socket", docker_socket_acknowledged=True
+    )
     with pytest.raises(PermanentError) as caught:
-        run(runner_for(fake_engine).dispatch(request_for(profile=profile)))
+        run(runner_for(fake_engine).dispatch(request_for(profile=acknowledged)))
     assert caught.value.kind == "isolation-tier-mismatch"
 
 

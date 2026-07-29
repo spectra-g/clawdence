@@ -194,6 +194,48 @@ def test_default_isolation_tier_is_a_container_without_a_docker_socket() -> None
     assert profile.isolation_tier.value == "container"
 
 
+def test_socket_mode_cannot_be_selected_without_acknowledging_it() -> None:
+    """§3.2's "opt-in per repo, loudly documented" as a rule the model enforces.
+
+    Loud is the hard part. A warning in a README is one nobody read, and the
+    person choosing this tier is usually the person least placed to know that a
+    mounted daemon socket is host root by another spelling. So the profile does
+    not validate without a second field saying so, and the refusal lands on
+    whoever writes the profile rather than on whoever is watching the run.
+    """
+    fields = {
+        "id": "r",
+        "name": "acme/r",
+        "remote_url": "https://example.invalid/r.git",
+        "isolation_tier": "container+docker:socket",
+    }
+    with pytest.raises(ValidationError, match="docker_socket_acknowledged"):
+        RepoProfile.model_validate(fields)
+    acknowledged = RepoProfile.model_validate({**fields, "docker_socket_acknowledged": True})
+    assert acknowledged.isolation_tier.value == "container+docker:socket"
+
+
+def test_needing_docker_does_not_by_itself_grant_it() -> None:
+    """Two facts, and the probe (S9) only establishes one of them: what the
+    repository's tests want is not what the operator agreed to hand over."""
+    profile = RepoProfile(
+        id="r", name="acme/r", remote_url="https://example.invalid/r.git", needs_docker=True
+    )
+    assert profile.isolation_tier.value == "container"
+    assert profile.docker_socket_acknowledged is False
+
+
+def test_work_is_untrusted_by_the_time_it_reaches_a_runner() -> None:
+    """``Submitter.trusted`` is deny-by-default and so is what it becomes.
+
+    §3.3 gates Docker capability on the provenance of the work rather than on
+    the repository alone, which only holds if the provenance survives the trip:
+    a field that defaulted to trusted here would quietly re-grant the capability
+    to every source that routes to an opted-in repository.
+    """
+    assert RUNNER_REQUEST.trusted_provenance is False
+
+
 def test_mcp_config_names_an_env_var_and_never_holds_a_token() -> None:
     """Profiles are written to disk and printed by ``clawdence probe``."""
     assert "mcp_servers" in RepoProfile.model_fields

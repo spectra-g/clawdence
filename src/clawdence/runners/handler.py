@@ -93,6 +93,13 @@ class Dispatch:
     #: M1, because epics fan out at S15b.
     carried_stubs: tuple[str, ...] = ()
 
+    #: Whether the work came from a trusted submitter (``Submitter.trusted``).
+    #: Deny by default, and carried rather than derived here for the same reason
+    #: everything else on this record is: triage knows who asked, and a default
+    #: computed at this layer would be this step deciding a question ingestion
+    #: owns. Only the socket tier reads it, and only to refuse.
+    trusted_provenance: bool = False
+
 
 @dataclass(slots=True)
 class RunnerHandler:
@@ -170,6 +177,7 @@ class RunnerHandler:
             budget=stage.budget or target.budget,
             plan=self._plan(ctx),
             carried_stubs=target.carried_stubs,
+            trusted_provenance=target.trusted_provenance,
             # The derivation the ledger uses, so a redelivered dispatch collides
             # with the row the previous incarnation wrote rather than running the
             # work — and charging for it — twice.

@@ -33,8 +33,10 @@ contract-tests: ## Run the port contract suite against every adapter
 # control-plane credential is in the environment, that no other repository is on
 # the filesystem, that a memory hog is killed by the cap. Argv cannot tell a flag
 # that works from a flag with a typo in it, so these need a daemon — and a daemon
-# is why they are opt-in rather than part of `check`.
-docker-tests: ## Run the container tier against a real daemon (needs docker/podman)
+# is why they are opt-in rather than part of `check`. The socket tier's three
+# constraints (§3.3) are here for a stronger reason: each of them fails silently
+# rather than loudly when it is wrong.
+docker-tests: ## Run the container tiers against a real daemon (needs docker/podman)
 	CLAWDENCE_DOCKER_TESTS=1 uv run pytest -m docker
 
 # Refreshes the recorded LLM interactions. Needs real credentials and spends

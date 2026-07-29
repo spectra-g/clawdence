@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -90,6 +91,34 @@ class FakeEngine:
         """Backdate the next container. The alternative is waiting a week."""
         return self._script("created", when.isoformat().replace("+00:00", "Z"))
 
+    def sibling(self, session: str, name: str | None = None) -> str:
+        """Start a container the way testcontainers does: a sibling, session-labelled.
+
+        Driven through the wrapper rather than written into the state directory,
+        so the container the sweep later finds is one the fake engine created by
+        the same path as everything else — including the labels, which is the
+        only thing the sweep can correlate on. A test that planted a state file
+        directly would be asserting against its own fixture.
+        """
+        container = name or f"testcontainers-{session}"
+        subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                str(self._wrapper()),
+                "run",
+                "--name",
+                container,
+                "--label",
+                "org.testcontainers=true",
+                "--label",
+                f"org.testcontainers.sessionId={session}",
+                "postgres@sha256:" + "f" * 64,
+                "true",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return container
+
     def refuse_to_start(self, code: int = 125) -> FakeEngine:
         """Fail the way a client fails when the image is not there.
 
@@ -112,7 +141,20 @@ class FakeEngine:
         )
 
     def runs(self) -> tuple[Call, ...]:
-        return tuple(call for call in self.calls() if call.command == "run")
+        """Containers started to *be* a phase of a run.
+
+        ``--rm`` ones are excluded and reported by ``probes`` instead: the
+        socket tier asks the daemon which group owns its socket by running a
+        throwaway container, and a question is not a phase. Without the split
+        every argv assertion in the suite would have to know which run it meant.
+        """
+        return tuple(
+            call for call in self.calls() if call.command == "run" and not call.has("--rm")
+        )
+
+    def probes(self) -> tuple[Call, ...]:
+        """Throwaway containers run to ask the daemon something."""
+        return tuple(call for call in self.calls() if call.command == "run" and call.has("--rm"))
 
     def only_run(self) -> Call:
         runs = self.runs()
@@ -121,6 +163,18 @@ class FakeEngine:
 
     def removals(self) -> tuple[str, ...]:
         return tuple(call.argv[-1] for call in self.calls() if call.command == "rm")
+
+    def alive(self) -> frozenset[str]:
+        """Containers that exist right now, by name.
+
+        Read from the state files rather than from the call log, because "was it
+        removed" and "does it still exist" are different questions once a name
+        can be created twice — and the sweep is judged on the second one.
+        """
+        return frozenset(
+            path.name.removeprefix("state-").removesuffix(".json")
+            for path in self.root.glob("state-*.json")
+        )
 
     # -------------------------------------------------------------- plumbing
 

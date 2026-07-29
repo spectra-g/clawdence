@@ -9,7 +9,9 @@ tests pass without ever meeting git's opinion.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import socket
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -79,10 +81,53 @@ def container_profile(**overrides: object) -> RepoProfile:
     return RepoProfile.model_validate(fields)
 
 
+def socket_profile(**overrides: object) -> RepoProfile:
+    """A profile the docker-socket runner will accept.
+
+    ``docker_socket_acknowledged`` is spelled out because the domain model will
+    not build the profile without it — which is the point of the field, and the
+    reason a test that wants this tier has to say so twice.
+    """
+    fields: dict[str, object] = {
+        "id": "repo.fixture",
+        "name": "fixture",
+        "remote_url": "https://forge.invalid/fixture",
+        "needs_docker": True,
+        "isolation_tier": IsolationTier.CONTAINER_DOCKER_SOCKET,
+        "docker_socket_acknowledged": True,
+    }
+    fields.update(overrides)
+    return RepoProfile.model_validate(fields)
+
+
 @pytest.fixture
 def fake_engine(tmp_path: Path) -> FakeEngine:
     """A container engine that records what it was asked for, and obeys."""
     return FakeEngine(root=tmp_path / "engine")
+
+
+@pytest.fixture
+def fake_socket(tmp_path: Path) -> Iterator[Path]:
+    """A real AF_UNIX socket standing in for the daemon's.
+
+    Real rather than an empty file: the socket tier refuses a path that is not a
+    socket, and that refusal is one of the things worth testing — a fixture that
+    was merely a file would make every other test in that module pass for the
+    wrong reason. Nothing listens on it; what is being exercised is the argv the
+    tier builds and the group it reads off the inode.
+    """
+    path = tmp_path / "docker.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # Bound from inside the directory, by name. An AF_UNIX path is capped at
+    # about a hundred bytes and pytest's ``tmp_path`` is most of that on its
+    # own, so binding the absolute path makes whether the suite runs at all
+    # depend on how deep the checkout happens to be.
+    with contextlib.chdir(tmp_path):
+        listener.bind("docker.sock")
+    try:
+        yield path
+    finally:
+        listener.close()
 
 
 @pytest.fixture
@@ -112,6 +157,7 @@ def request_for(repo: FixtureRepo) -> RequestFactory:
         carried_stubs: tuple[str, ...] = (),
         worktree: Path | None = None,
         wall_clock_seconds: float | None = None,
+        trusted_provenance: bool = False,
     ) -> RunnerRequest:
         resolved = profile or host_profile()
         if wall_clock_seconds is not None:
@@ -130,6 +176,7 @@ def request_for(repo: FixtureRepo) -> RequestFactory:
             budget=budget or Budget(),
             plan=plan,
             carried_stubs=carried_stubs,
+            trusted_provenance=trusted_provenance,
             idempotency_key=f"{run_id}:{stage_id}:{attempt}",
             created_at=at(0),
         )

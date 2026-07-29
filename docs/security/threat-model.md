@@ -10,8 +10,9 @@ the fact describes a design; this one is meant to constrain it.
 
 > **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
 > executes `script` steps, a state store, the ports every integration will sit behind — with
-> in-memory implementations, not real adapters — and **two runner tiers**: `host`, which has no
-> isolation at all, and `container`, which has the plane split. There is **no egress policy**, no
+> in-memory implementations, not real adapters — and **three runner tiers**: `host`, which has no
+> isolation at all, `container`, which has the plane split, and `container+docker:socket`, which
+> has the plane split and then hands out the means to undo it. There is **no egress policy**, no
 > agent step and no ingestion. Many controls below are **Designed**, not **Built**. Do not point
 > this at anything you care about, and do not expose it to input from people you do not trust,
 > until the ingress and egress controls are built and this notice is gone.
@@ -22,6 +23,11 @@ the fact describes a design; this one is meant to constrain it.
 > **What it does not do is bound the network.** It runs on an ordinary bridge and does not consult
 > `RepoProfile.egress` at all, so an agent that has been persuaded to exfiltrate can still reach
 > the internet. That is the single largest gap in this document today.
+>
+> The `container+docker:socket` tier exists because a repository whose integration tests need a
+> daemon cannot be verified without one, and it is the only place in this system where a control
+> is deliberately made defeatable. It is off unless four separate things say otherwise (T6), and
+> none of them make it *safe* — they make it deliberate. Read T6 before configuring it.
 >
 > The `host` runner exists for local development and says so in three places: the plan calls it
 > "never a default", `Ports` does not wire it, and it refuses any repository profile that asks for
@@ -90,7 +96,7 @@ worst realistic outcome, not the average one.
 | **T3** | Secret exfiltration by the runner | Medium | **A1, A2** | Partly built — plane split built, egress designed |
 | **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | **Built** (container tier) |
 | **T5** | Model-generated destructive command | **High** | A2, A3 | Partly accepted |
-| **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Designed + policy |
+| **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Partly built — socket tier gated four ways; rootless DinD absent |
 | **T7** | Resource exhaustion of the host | **High** | A3 | Partly built — caps, reaper and concurrency cap built; disk quota still absent |
 | **T8** | Financial exhaustion | **High** | A5 | Built (schema) + designed |
 | **T9** | Unauthorised submission | **High** | A5, A4 | Designed |
@@ -214,7 +220,7 @@ Work in progress lost to a bad command is recreated by re-running. We do not att
 which commands the model may issue inside its sandbox, because a command allowlist broad enough to
 build real software is broad enough to destroy the sandbox.
 
-### T6 · Host escape via the Docker socket
+### T6 · Host escape via the Docker socket — **partly built**
 
 Some repositories need Docker for their tests — testcontainers, in practice. The cheap way to
 provide it is to mount `/var/run/docker.sock` into the runner.
@@ -237,8 +243,44 @@ ingestion, not a later refinement. If it is not ready, the honest fallback is to
 testcontainers for trusted work only and say so — not to ship socket mode and describe the result
 as safe.
 
-**Known gap:** containers spawned by testcontainers are *siblings* on the host daemon, so they sit
-outside the runner's network policy even in the permitted case. Stated, not solved.
+**Built (S8).** `container+docker:socket` exists as a separate runner class,
+`runners.dockerd.DockerSocketRunner`, and the policy above is the code rather than a paragraph
+next to it. Reaching the daemon requires **four** independent things, each refused by a different
+layer:
+
+1. `RepoProfile.docker_socket_acknowledged` — the profile does not validate without it, so the
+   opt-in is taken at configuration time by whoever writes the profile. This is what "loudly
+   warned at configuration time" turned into: the validator's message is the warning, and there is
+   no way to select the tier without reading it.
+2. `RunnerRequest.trusted_provenance` — deny-by-default, derived from `Submitter.trusted`. This is
+   the row of the table above that matters: what the repository *needs* and what this request may
+   *have* are separate facts, so a repository that opted in once does not thereby opt in every
+   source that later routes to it. Untrusted work is **refused, not downgraded** — running a
+   testcontainers suite without a daemon would report a missing capability as the agent's failure.
+3. A `DockerSocketRunner` has to be constructed and wired. `ContainerRunner` refuses the tier
+   outright, so no amount of profile editing turns the default runner into this one.
+4. Testcontainers' own reaper stays on. `TESTCONTAINERS_RYUK_DISABLED` is set to `false` per run
+   and a request whose environment sets it true is refused, because Ryuk is the only thing that
+   knows which of the host's containers belong to a given session.
+
+The socket reaches the **agent phase only**. The setup phase runs the repository's
+`install_command` — arbitrary code from a lockfile, which is the least trusted thing in the run —
+and gets no daemon. On top of Ryuk, the tier sweeps sibling sessions that appeared during a run,
+including on the abort path, so a killed run does not wait on somebody else's reconnection
+timeout; a session that overlapping runs could each claim is deliberately left to Ryuk rather than
+guessed at.
+
+**Rootless DinD is still not built**, and `IsolationTier.CONTAINER_DOCKER_DIND_ROOTLESS` remains a
+value no runner accepts. Public ingestion (S10b) does not exist either, so today the system is in
+the position this section names as the honest fallback: testcontainers for trusted work only,
+enforced by gate 2 rather than by documentation.
+
+**Known gaps, unchanged.** Containers spawned by testcontainers are *siblings* on the host daemon,
+so they sit outside the runner's network policy even in the permitted case. And nothing above
+mitigates the escape itself — an agent that has been persuaded to run
+`docker run --net=host -v /:/host` still can. Every control in this section is about *who may
+reach the daemon*, not about what they can do once there, because there is nothing to be done
+about the second while the socket is mounted.
 
 ### T7 · Resource exhaustion of the host
 

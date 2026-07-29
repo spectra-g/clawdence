@@ -136,19 +136,29 @@ uv run pytest -m contract   # or: make contract-tests
 ## The runner
 
 [`src/clawdence/runners/`](src/clawdence/runners/) hands a plan and a worktree to a coding agent
-CLI and turns what comes back into a result. Two tiers exist:
+CLI and turns what comes back into a result. Three tiers exist:
 
 - **`container`** — the default. An ephemeral container per run with the worktree bind-mounted at
   the same absolute path it has on the host, every capability dropped, a read-only root filesystem,
   a pid and memory ceiling, and no docker socket. One mount goes in, so the other repositories in
   the registry are not permission-checked — they are absent from the filesystem.
+- **`container+docker:socket`** — the same, plus the host daemon's socket, for repositories whose
+  integration tests need one (testcontainers). It is the one place here where a control is
+  deliberately made defeatable: a process that can reach the daemon can ask it for a container with
+  the host's filesystem in it. So it costs four separate acknowledgements — the repository profile
+  does not validate without one, the work has to have come from a trusted submitter, a runner has
+  to have been built for the tier, and testcontainers' own reaper has to be left on — and the
+  socket reaches the agent's container only, never the dependency install. See
+  [the threat model](docs/security/threat-model.md#t6--host-escape-via-the-docker-socket--partly-built).
 - **`host`** — a subprocess on this machine, for local development only. It has no isolation at
   all, and it is never a default.
 
-Each refuses a repository profile that asks for the other rather than quietly substituting, because
+Each refuses a repository profile that asks for another rather than quietly substituting, because
 a repo configured for `container` running unisolated is not a smaller version of the intended
-behaviour. Both are the same runner with four things swapped — what gets spawned, what the agent's
-environment starts from, what the tier can report afterwards, and what has to be given back.
+behaviour — and a repo that needs a daemon, run without one, reports a missing capability as the
+agent's failure. All three are the same runner with four things swapped — what gets spawned, what
+the agent's environment starts from, what the tier can report afterwards, and what has to be given
+back.
 
 The interesting half is the contract around the process, most of which exists because v1 learned
 it the hard way:
@@ -211,8 +221,11 @@ it the hard way:
 
 The claims that are only meaningful from inside a container — capabilities, the read-only root, the
 memory cap, the absent sibling repository — are checked against a real daemon by `make docker-tests`
-rather than asserted about a command line. They are opt-in because they need Docker and a network,
-and the rest of the suite has neither.
+rather than asserted about a command line. The socket tier needs that even more, because each of
+its three constraints fails *silently* when it is wrong: a sibling container whose bind mount does
+not resolve gets an empty directory rather than an error, and a test that cannot find the host
+hangs rather than fails. They are opt-in because they need Docker and a network, and the rest of
+the suite has neither.
 
 ## Development
 

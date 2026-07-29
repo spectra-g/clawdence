@@ -26,19 +26,22 @@ where a repository's own code first executes — a ``postinstall`` script is
 arbitrary code from a lockfile, and running it outside the boundary while the
 agent runs inside it would put the weaker half first.
 
-**No docker socket, at any tier this class serves.** A process that can reach the
-host daemon can ``docker run --net=host -v /:/host``, which is host root by
-another spelling — it escapes the network namespace S7b is about to build and
-mounts the filesystem this tier just removed. ``IsolationTier`` has a separate
-value for that mode precisely so it cannot be arrived at by editing a flag, and
-this runner refuses it the same way it refuses ``host``.
+**No docker socket, in this class.** A process that can reach the host daemon can
+``docker run --net=host -v /:/host``, which is host root by another spelling — it
+escapes the network namespace S7b is about to build and mounts the filesystem
+this tier just removed. ``IsolationTier`` has a separate value for that mode
+precisely so it cannot be arrived at by editing a flag, and this runner refuses
+it the same way it refuses ``host``. S8's ``dockerd.DockerSocketRunner`` is the
+tier that does mount it; it *subclasses* this one, so everything below is
+inherited rather than reasserted, and what it adds is three lines in ``_spec``
+and two refusals of its own.
 
 **Path identity.** The worktree is mounted at the same absolute path it has on
 the host. That is not tidiness: testcontainers hands host paths to the daemon
 when it mounts volumes for sibling containers (§3.3), so a differing path breaks
-those mounts silently in S8. It also means ``_inspect`` needs no translation —
-the tree the control plane reads afterwards is the tree the agent wrote, with no
-copy step to lose a file in.
+those mounts silently on the socket tier. It also means ``_inspect`` needs no
+translation — the tree the control plane reads afterwards is the tree the agent
+wrote, with no copy step to lose a file in.
 
 **Not ``--rm``.** The container's exit state is read before it is removed,
 because ``OOMKilled`` is the one thing the daemon can tell us that a bare process
@@ -86,6 +89,7 @@ from clawdence.runners import worktree as wt
 from clawdence.runners.agent import (
     AgentCommand,
     AgentRunner,
+    Environment,
     Launch,
     Phase,
     PlanDelivery,
@@ -131,8 +135,9 @@ _TMPFS_OPTIONS: Final = "rw,nosuid,nodev,noexec,mode=1777,size={size}m"
 #: repository is implied.
 _CLIENT_FAILURE_STATUSES: Final = frozenset({125, 126, 127})
 
-#: Tiers this class serves. ``CONTAINER_DOCKER_SOCKET`` is deliberately not here
-#: and is not a flag away: see the module docstring.
+#: The tier this class serves. ``CONTAINER_DOCKER_SOCKET`` is deliberately not
+#: here and is not a flag away — it is a subclass in ``dockerd``, which overrides
+#: this and pays for it in two refusals. See the module docstring.
 _TIER: Final = IsolationTier.CONTAINER
 
 
@@ -242,12 +247,36 @@ class ContainerRunner(AgentRunner):
         self, request: RunnerRequest, worktree: Path, phase: Phase, argv: tuple[str, ...]
     ) -> Launch:
         environment = self._environment(request)
+        spec = self._spec(request, worktree, phase, argv, environment)
+        client = client_environment(self._environ)
+        # The credentials, in the client's environment rather than its argv. The
+        # engine reads them out by name; the process list never sees them.
+        client.update({name: environment.values[name] for name in environment.secret_names})
+        return Launch(argv=self._engine.run_argv(spec), env=client, cwd=worktree)
+
+    def _spec(
+        self,
+        request: RunnerRequest,
+        worktree: Path,
+        phase: Phase,
+        argv: tuple[str, ...],
+        environment: Environment,
+    ) -> ContainerSpec:
+        """The container this phase runs in, fully described.
+
+        Separate from ``_launch`` so a tier that differs from this one only in
+        what the container is *given* — S8's socket tier, which adds a mount, a
+        group and a hosts entry — says that in one override instead of restating
+        every restrictive default it agrees with. Restating them is how the
+        second tier ends up with the first tier's posture minus whichever flag
+        was added after it was copied.
+        """
         visible = {
             name: value
             for name, value in environment.values.items()
             if name not in environment.secret_names
         }
-        spec = ContainerSpec(
+        return ContainerSpec(
             name=container_name(request, phase),
             image=self._image_for(request),
             argv=argv,
@@ -270,11 +299,6 @@ class ContainerRunner(AgentRunner):
             # for credentials — until the wall clock ends the run.
             interactive=(phase is Phase.AGENT and self._command.delivery is PlanDelivery.STDIN),
         )
-        client = client_environment(self._environ)
-        # The credentials, in the client's environment rather than its argv. The
-        # engine reads them out by name; the process list never sees them.
-        client.update({name: environment.values[name] for name in environment.secret_names})
-        return Launch(argv=self._engine.run_argv(spec), env=client, cwd=worktree)
 
     async def _prepare(self, request: RunnerRequest, worktree: Path) -> Installed:
         """Clear a container this attempt's name already belongs to, then set up.

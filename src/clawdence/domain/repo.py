@@ -4,7 +4,7 @@ Replaces v1's hand-written ``repo-registry.json``. Most of it is derived by the
 probe (S9) and confirmed by a human; the fields exist here so the probe has a
 target and the runner has a contract.
 
-Two fields carry security weight and are worth reading twice:
+Three fields carry security weight and are worth reading twice:
 
 ``McpServer.bearer_token_env_var``
     The *name* of an environment variable, never a token. A profile is
@@ -15,13 +15,20 @@ Two fields carry security weight and are worth reading twice:
     The valuable half of the probe. The tier is inferred from evidence in the
     repo rather than guessed by a user who has no reason to know that mounting
     a docker socket is equivalent to handing out host root.
+
+``docker_socket_acknowledged``
+    And this is what stops the probe's inference from being obeyed silently.
+    ``needs_docker`` says the repository's tests want a daemon; it does not say
+    the operator agreed to hand one over. The socket tier is unusable without
+    this second field, so the decision is taken by a person writing a profile
+    rather than by a detector reading a lockfile.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from clawdence.domain._base import DomainModel
 from clawdence.domain.ids import RepoId
@@ -146,6 +153,14 @@ class RepoProfile(DomainModel):
     needs_docker: bool = False
     isolation_tier: IsolationTier = IsolationTier.CONTAINER
 
+    #: The opt-in that ``container+docker:socket`` requires, and the reason it is
+    #: a *field* rather than a paragraph in the docs: §3.2 asks for socket mode
+    #: to be "opt-in per repo, loudly documented, and never the default", and a
+    #: warning printed somewhere is one nobody has to read. This makes the
+    #: profile inexpressible without the acknowledgement — see the validator
+    #: below, whose message is the warning.
+    docker_socket_acknowledged: bool = False
+
     #: Base image for the container tiers, overriding the runner's own default
     #: (§3.8). Digest-pinned: a tag is a mutable pointer, and resolving one at
     #: dispatch means executing whatever was pushed over it since the last run.
@@ -178,3 +193,35 @@ class RepoProfile(DomainModel):
     #: Repo routing signal (S11). Matched against a work item's *raw* text.
     aliases: tuple[str, ...] = ()
     keywords: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _socket_mode_is_acknowledged(self) -> RepoProfile:
+        """Socket mode cannot be reached by editing one enum value.
+
+        The tier that mounts the host daemon's socket is not weaker isolation,
+        it is none with extra steps: the process inside can
+        ``docker run --net=host -v /:/host``, which escapes the network
+        namespace S7b builds and mounts the filesystem the container tier
+        removed. §3.2 asks for it to be opt-in per repository and loudly
+        documented, and the loud part is the problem — a warning in a README is
+        a warning nobody read.
+
+        So the acknowledgement is a second field, and a profile that names the
+        tier without it does not validate. That places the refusal at
+        *configuration* time, on the person writing the profile, rather than at
+        dispatch on whoever is watching the run — which is the only moment where
+        knowing costs nothing.
+        """
+        if self.isolation_tier is not IsolationTier.CONTAINER_DOCKER_SOCKET:
+            return self
+        if not self.docker_socket_acknowledged:
+            raise ValueError(
+                f"{self.name!r} asks for {IsolationTier.CONTAINER_DOCKER_SOCKET.value!r} "
+                f"isolation, which mounts the host's Docker socket into the runner. A process "
+                f"that can reach the host daemon can start a container with the host's network "
+                f"and the host's filesystem in it, so this tier defeats the plane split and the "
+                f"egress allowlist at once and is equivalent to giving the agent host root. Set "
+                f"docker_socket_acknowledged=true to say that is understood and intended, or use "
+                f"{IsolationTier.CONTAINER.value!r} and run the repository's tests without Docker"
+            )
+        return self

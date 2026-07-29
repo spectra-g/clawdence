@@ -230,6 +230,11 @@
           "title": "Default Branch",
           "type": "string"
         },
+        "docker_socket_acknowledged": {
+          "default": false,
+          "title": "Docker Socket Acknowledged",
+          "type": "boolean"
+        },
         "e2e_runner": {
           "$ref": "#/$defs/E2EPolicy",
           "default": "skip"
@@ -575,6 +580,11 @@
       "pattern": "^[a-z][a-z0-9_-]*$",
       "title": "Stage Id",
       "type": "string"
+    },
+    "trusted_provenance": {
+      "default": false,
+      "title": "Trusted Provenance",
+      "type": "boolean"
     },
     "work_item_id": {
       "maxLength": 128,

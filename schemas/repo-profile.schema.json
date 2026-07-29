@@ -250,6 +250,11 @@
       "title": "Default Branch",
       "type": "string"
     },
+    "docker_socket_acknowledged": {
+      "default": false,
+      "title": "Docker Socket Acknowledged",
+      "type": "boolean"
+    },
     "e2e_runner": {
       "$ref": "#/$defs/E2EPolicy",
       "default": "skip"

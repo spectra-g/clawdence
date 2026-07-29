@@ -12,17 +12,26 @@ The layering is one-directional, as elsewhere::
             └─ agent
                  ├─ host
                  └─ container ─ engine
+                      ├─ dockerd
                       ├─ handler
                       ├─ scheduler
                       └─ reaper
 
-``agent`` is the runner, and ``host`` and ``container`` are tiers of it. That is
-the S7 shape and it is deliberate: the two differ in what they spawn, what the
-agent's environment starts from, what the tier can say afterwards, and what has
-to be given back — four hooks — and in nothing else. A second runner class
-"for containers" is how two tiers acquire two different bugs in idempotent
+``agent`` is the runner, and ``host``, ``container`` and ``dockerd`` are tiers of
+it. That is the S7 shape and it is deliberate: they differ in what they spawn,
+what the agent's environment starts from, what the tier can say afterwards, and
+what has to be given back — four hooks — and in nothing else. A second runner
+class "for containers" is how two tiers acquire two different bugs in idempotent
 dispatch, which is the same mistake v1 made one layer up when each integration
 got its own test suite and only one of them turned out to be idempotent.
+
+S8's ``dockerd`` takes that one step further and subclasses ``container``
+outright, because the tier that mounts the host daemon's socket differs from the
+default one by a mount, a group, a hosts entry and four environment variables —
+and agrees with it about everything else, including every control the socket
+then defeats. It pays for the capability in refusals rather than in code: the
+repository has to acknowledge the tier in its profile, the work has to have come
+from a trusted submitter, and testcontainers' own reaper has to be left on.
 
 The other split worth explaining is between ``outcome`` and the tiers.
 Classification is a pure function over a record of observations, and gathering
@@ -114,6 +123,14 @@ from clawdence.runners.container import (
     ContainerRunner,
     container_name,
 )
+from clawdence.runners.dockerd import (
+    DOCKER_SOCKET,
+    HOST_ALIAS,
+    HOST_OVERRIDE_ENV,
+    RYUK_DISABLED_ENV,
+    SESSION_LABEL,
+    DockerSocketRunner,
+)
 from clawdence.runners.engine import (
     CLIENT_ENV,
     ContainerEngine,
@@ -163,8 +180,11 @@ __all__ = [
     "DEFAULT_IDENTITY",
     "DEFAULT_LIMIT",
     "DEFAULT_WORKTREE_RETENTION",
+    "DOCKER_SOCKET",
     "FORBIDDEN_ENV",
     "HOME_DIR",
+    "HOST_ALIAS",
+    "HOST_OVERRIDE_ENV",
     "INHERITED_ENV",
     "LABEL_NAMESPACE",
     "MAX_ERROR_CHARS",
@@ -172,6 +192,8 @@ __all__ = [
     "PLAN_PATH",
     "RETRYABLE",
     "RUN_ID_LABEL",
+    "RYUK_DISABLED_ENV",
+    "SESSION_LABEL",
     "STEERING_DIR",
     "VERDICT_PATH",
     "WORK_DIR",
@@ -187,6 +209,7 @@ __all__ = [
     "ContainerSpec",
     "ContainerState",
     "Dispatch",
+    "DockerSocketRunner",
     "EngineError",
     "Environment",
     "GitError",
