@@ -6,10 +6,12 @@ Workflow-driven orchestration for AI coding agents.
 setup, the domain model, a workflow engine that executes `script` steps, a state store that records
 runs so they survive the process, the ports every integration will sit behind — with an in-memory
 implementation of each — and a runner that executes a coding agent against a git worktree, either
-on this machine or inside an ephemeral container. There is no network policy and no agent step,
-nothing caches dependencies between runs, and nothing yet decides which repository a piece of work
-belongs to. It can run a coding agent; it cannot run a sprint. It is public early so the build is
-inspectable from the start, not because any of it is ready to use.
+on this machine or inside an ephemeral container, with the repository's dependencies installed
+first against a cache that outlives the worktree, a cap on how many runs happen at once, and a
+sweep that reclaims what a crashed control plane left behind. There is no network policy and no
+agent step, and nothing yet decides which repository a piece of work belongs to. It can run a
+coding agent; it cannot run a sprint. It is public early so the build is inspectable from the
+start, not because any of it is ready to use.
 
 ## Decisions taken so far
 

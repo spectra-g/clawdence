@@ -43,6 +43,7 @@ import pytest
 
 from clawdence.domain import (
     Budget,
+    BuildSystem,
     ContractKind,
     IsolationTier,
     RepoProfile,
@@ -58,8 +59,10 @@ from clawdence.runners import (
     STEERING_DIR,
     VERDICT_PATH,
     AgentCommand,
+    Cache,
     ContainerEngine,
     ContainerRunner,
+    Phase,
     PlanDelivery,
     container_name,
 )
@@ -489,3 +492,91 @@ def test_nothing_is_left_running_afterwards(workdir: Path) -> None:
     run(ContainerRunner(agent(f"true && {PASSED}"), image=IMAGE).dispatch(request))
 
     assert run(ContainerEngine().state(container_name(request))) is None
+
+
+# --------------------------------------------------------------------------- #
+# The warm cache, and the setup phase — the rest of S7
+# --------------------------------------------------------------------------- #
+
+
+def cached_request(worktree: Path, head: str, *, install: tuple[str, ...]) -> RunnerRequest:
+    """A request whose repository has an install command and a cacheable
+    toolchain. ``UV`` because its cache is one directory and one variable."""
+    base = request_for(worktree, head)
+    return base.model_copy(
+        update={
+            "profile": base.profile.model_copy(
+                update={"build_system": BuildSystem.UV, "install_command": install}
+            )
+        }
+    )
+
+
+def test_the_dependency_cache_is_writable_from_inside_the_container(workdir: Path) -> None:
+    """The claim a fake engine cannot make, and the one the obvious design gets
+    wrong.
+
+    A named volume is created owned by ``root``, and this tier runs the
+    container as the invoking user — so the first thing such a volume needs is a
+    privileged container to ``chown`` it. A host directory created by the
+    control plane before the mount is owned by the right user already, and this
+    is the assertion that it is: the install writes into its cache, from inside,
+    as us.
+    """
+    repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
+    cache = Cache(root=workdir / "cache")
+    runner = ContainerRunner(agent(f"echo x=2 > app.py; {PASSED}"), image=IMAGE, cache=cache)
+    request = cached_request(
+        repo.path, repo.head, install=("/bin/sh", "-c", 'echo downloaded > "$UV_CACHE_DIR/pkg"')
+    )
+
+    result = run(runner.dispatch(request))
+
+    artefact = cache.directory(request.profile) / "uv" / "pkg"
+    assert result.outcome is WORKED
+    assert artefact.read_text(encoding="utf-8") == "downloaded\n"
+    assert artefact.stat().st_uid == os.getuid()
+
+
+def test_the_second_run_finds_the_first_run_s_downloads(workdir: Path) -> None:
+    """ "Second run on the same repo is materially faster (cache works)", as the
+    mechanism rather than a stopwatch: what makes it faster is that the
+    artefacts are still there, across a fresh container and a fresh worktree."""
+    cache = Cache(root=workdir / "cache")
+    # Reports into the *worktree*, not into ``/``: the root filesystem is
+    # read-only, which is the tier working, and a script that assumed otherwise
+    # would fail here for a reason that has nothing to do with the cache.
+    report = '"$CLAWDENCE_WORKTREE/installs.txt"'
+    script = (
+        f'if [ -f "$UV_CACHE_DIR/pkg" ]; then echo warm > {report}; '
+        f"else echo cold > {report}; fi; "
+        'echo downloaded > "$UV_CACHE_DIR/pkg"'
+    )
+    outcomes = []
+    for attempt in (1, 2):
+        repo = build_repo(workdir / f"repo-{attempt}", extra_files={"app.py": "x = 1\n"})
+        runner = ContainerRunner(agent(f"echo x=2 > app.py; {PASSED}"), image=IMAGE, cache=cache)
+        request = cached_request(repo.path, repo.head, install=("/bin/sh", "-c", script))
+        key = f"run.live:code:{attempt}"
+        run(runner.dispatch(request.model_copy(update={"idempotency_key": key})))
+        outcomes.append(repo.read("installs.txt").split()[-1])
+
+    assert outcomes == ["cold", "warm"]
+
+
+def test_an_install_that_fails_blocks_the_run_and_leaves_no_container(workdir: Path) -> None:
+    """Both halves of the setup phase's failure, through a real daemon: the
+    outcome is the repository's rather than the agent's, and the container the
+    install ran in is gone even though the run never reached the agent."""
+    repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
+    runner = ContainerRunner(
+        agent(f"echo x=2 > app.py; {PASSED}"), image=IMAGE, cache=Cache(root=workdir / "cache")
+    )
+    request = cached_request(repo.path, repo.head, install=("/bin/sh", "-c", "exit 4"))
+
+    result = run(runner.dispatch(request))
+
+    assert result.outcome is RunnerOutcome.BLOCKED
+    assert repo.read("app.py") == "x = 1\n", "the agent ran anyway"
+    for phase in Phase:
+        assert run(ContainerEngine().state(container_name(request, phase))) is None

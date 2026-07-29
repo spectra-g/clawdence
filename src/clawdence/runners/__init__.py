@@ -6,13 +6,15 @@ the I/O contract from the plan's §3.9 that every one of them shares.
 
 The layering is one-directional, as elsewhere::
 
-    verdict ─ worktree ─ stream ─ process ─ turns ─ installed ─ steering
+    verdict ─ worktree ─ stream ─ process ─ turns ─ installed ─ steering ─ cache
        └─ plan
        └─ outcome
             └─ agent
                  ├─ host
                  └─ container ─ engine
-                      └─ handler
+                      ├─ handler
+                      ├─ scheduler
+                      └─ reaper
 
 ``agent`` is the runner, and ``host`` and ``container`` are tiers of it. That is
 the S7 shape and it is deliberate: the two differ in what they spawn, what the
@@ -38,6 +40,14 @@ the bytes the runner writes into the worktree, because "the tree is dirty" only
 means the agent left work behind if the dirt is not our own plan and conventions
 file, and because a repository that tracks a file at the path we install to gets
 our copy swept into its pull request otherwise (§3.9).
+
+The rest of S7 added the three modules that are about a *fleet* of runs rather
+than one, and none of them is inside ``agent`` for the same reason: how many runs
+may happen at once (``scheduler``), what a dead control plane left behind
+(``reaper``) and what survives between runs (``cache``) are all questions a
+single dispatch cannot answer about itself. ``scheduler`` decorates any
+``RunnerPort``, so the queue is exercised by tests that never start a process,
+and ``reaper`` is the only thing here that deletes something no run asked it to.
 
 S6c added ``steering``, which is the channel *into* a run (§3.11). It is a
 directory of files under the one the runner already owns, and it is a directory
@@ -92,11 +102,14 @@ from clawdence.runners.agent import (
     AgentRunner,
     Environment,
     Launch,
+    Phase,
     PlanDelivery,
     TokenPrice,
 )
+from clawdence.runners.cache import CACHE_HOME_ENV, Cache, CachePlan, cache_home
 from clawdence.runners.container import (
     LABEL_NAMESPACE,
+    RUN_ID_LABEL,
     WORK_ROOT,
     ContainerRunner,
     container_name,
@@ -114,6 +127,14 @@ from clawdence.runners.host import INHERITED_ENV, HostRunner
 from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
 from clawdence.runners.outcome import Completion, classify
 from clawdence.runners.plan import build as build_plan
+from clawdence.runners.reaper import (
+    DEFAULT_CACHE_RETENTION,
+    DEFAULT_GRACE,
+    DEFAULT_WORKTREE_RETENTION,
+    Reaper,
+    Reclaimed,
+)
+from clawdence.runners.scheduler import DEFAULT_LIMIT, Scheduler
 from clawdence.runners.steering import STEERING_DIR
 from clawdence.runners.stream import (
     Accumulation,
@@ -135,8 +156,13 @@ from clawdence.runners.verdict import (
 from clawdence.runners.worktree import DEFAULT_IDENTITY, GitError, GitIdentity
 
 __all__ = [
+    "CACHE_HOME_ENV",
     "CLIENT_ENV",
+    "DEFAULT_CACHE_RETENTION",
+    "DEFAULT_GRACE",
     "DEFAULT_IDENTITY",
+    "DEFAULT_LIMIT",
+    "DEFAULT_WORKTREE_RETENTION",
     "FORBIDDEN_ENV",
     "HOME_DIR",
     "INHERITED_ENV",
@@ -145,6 +171,7 @@ __all__ = [
     "MAX_VERDICT_BYTES",
     "PLAN_PATH",
     "RETRYABLE",
+    "RUN_ID_LABEL",
     "STEERING_DIR",
     "VERDICT_PATH",
     "WORK_DIR",
@@ -152,6 +179,8 @@ __all__ = [
     "Accumulation",
     "AgentCommand",
     "AgentRunner",
+    "Cache",
+    "CachePlan",
     "Completion",
     "ContainerEngine",
     "ContainerRunner",
@@ -168,9 +197,13 @@ __all__ = [
     "LogLine",
     "LogSink",
     "Mount",
+    "Phase",
     "PlanDelivery",
+    "Reaper",
+    "Reclaimed",
     "RunnerHandler",
     "RunnerVerdict",
+    "Scheduler",
     "Stream",
     "Tail",
     "TokenPrice",
@@ -179,6 +212,7 @@ __all__ = [
     "VerdictError",
     "VerdictStatus",
     "build_plan",
+    "cache_home",
     "classify",
     "container_name",
     "write_to",

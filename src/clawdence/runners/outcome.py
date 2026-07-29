@@ -24,6 +24,8 @@ once and only one outcome is reported. In five bands, most specific first:
    exceeding its budget also exits non-zero, and reporting ``non-zero-exit`` for
    it would send a retry after work that was stopped on purpose.
 2. **Things that happened to it** — denied egress, a full disk, an OOM kill.
+   Then, just below them, S7's: the repository's own dependency install failed,
+   so there was never an agent to have any of the opinions below.
 3. **What its event stream said** — §3.7a's band, added in S6b.
 4. **What the process said** — its exit status.
 5. **What it produced** — a verdict, a diff, a dirty tree.
@@ -97,6 +99,12 @@ class Completion:
     #: vanished, the toolchain wrapper is not installed. Distinct from a non-zero
     #: exit, because nothing ran and so nothing about the repository is implied.
     startup_error: str | None = None
+
+    #: Set when the repository's own ``install_command`` failed (S7). The
+    #: opposite implication to ``startup_error``: something *did* run, and what
+    #: it proved is that this repository cannot currently be prepared, which is
+    #: a fact about the repository and not about this machine.
+    setup_error: str | None = None
 
     #: We stopped it. Each is a decision the control plane made, and each ranks
     #: above anything the process itself reported.
@@ -189,6 +197,14 @@ def classify(completion: Completion) -> RunnerOutcome:
         return RunnerOutcome.DISK_FULL
     if completion.oom_killed or _looks_oom_killed(completion):
         return RunnerOutcome.OOM_KILLED
+
+    # Band 2b — the repository could not be prepared, so no agent ever ran
+    # (S7). Below band 2 on purpose: an install the kernel OOM-killed and an
+    # install that ran out of wall clock are those things first, and the fact
+    # that it happened during setup is diagnostic rather than the outcome. Above
+    # everything below, because nothing under here has a subject any more.
+    if completion.setup_error is not None:
+        return RunnerOutcome.BLOCKED
 
     # Band 3 — what its event stream said. Above the exit status, because the
     # failures this band names arrive with an exit status of zero.

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import ClassVar, Final
 
 from clawdence.domain import IsolationTier, RunnerRequest
-from clawdence.runners.agent import AgentRunner, Launch
+from clawdence.runners.agent import AgentRunner, Launch, Phase
 
 #: Passed through from the control plane's own environment. The engine's
 #: ``ScriptHandler`` allowlist, plus what a build needs to find its toolchain and
@@ -64,9 +64,16 @@ class HostRunner(AgentRunner):
     def _inherited(self, request: RunnerRequest) -> dict[str, str]:
         return {name: self._environ[name] for name in INHERITED_ENV if name in self._environ}
 
-    def _launch(self, request: RunnerRequest, worktree: Path, prompt: str) -> Launch:
-        return Launch(
-            argv=self._cli_argv(request, prompt),
-            env=self._environment(request).values,
-            cwd=worktree,
-        )
+    def _launch(
+        self, request: RunnerRequest, worktree: Path, phase: Phase, argv: tuple[str, ...]
+    ) -> Launch:
+        """The command, as itself. Both phases, and the phase is not consulted.
+
+        There is no intermediate process here, so there is nothing for the
+        distinction to change: the install command and the agent CLI are both
+        just children of the control plane, with the same environment and the
+        same working directory. The dependency cache needs no mount either —
+        the directory the environment names is a directory on this machine, and
+        this tier is already on it.
+        """
+        return Launch(argv=argv, env=self._environment(request).values, cwd=worktree)

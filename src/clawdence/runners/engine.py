@@ -41,9 +41,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -294,6 +296,47 @@ class ContainerEngine:
             error=str(parsed.get("Error") or ""),
         )
 
+    async def created(self, name: str) -> datetime | None:
+        """When the container was created, as the daemon recorded it.
+
+        ``{{.Created}}`` from ``inspect`` rather than ``{{.CreatedAt}}`` from
+        ``ps``: the first is RFC 3339 and identical on docker and podman, and the
+        second is a human-facing rendering with a timezone *name* on the end that
+        no ``strptime`` format reads back. The reaper compares this to a grace
+        period, so a format it parses wrongly is containers reaped early.
+        """
+        raw = await self._call("inspect", "--format", "{{.Created}}", name)
+        return None if raw is None else _timestamp(raw)
+
+    async def labelled(self, key: str) -> tuple[tuple[str, str], ...]:
+        """``(name, label value)`` for every container carrying ``key``.
+
+        Includes stopped containers — ``--all`` — because a container that
+        exited and was never removed is precisely what the reaper is looking
+        for. A running one is *also* returned, and deciding whether it should
+        still be running is the caller's business, not the engine's.
+        """
+        raw = await self._call(
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            f"label={key}",
+            # Tab-separated, and tabs are not legal in either field: a container
+            # name is restricted to `[a-zA-Z0-9][a-zA-Z0-9_.-]*` and the label
+            # holds an `Identifier`, whose alphabet is narrower still.
+            "--format",
+            '{{.Names}}\t{{.Label "' + key + '"}}',
+        )
+        if not raw:
+            return ()
+        found = []
+        for line in raw.splitlines():
+            name, _, value = line.partition("\t")
+            if name:
+                found.append((name.strip(), value.strip()))
+        return tuple(found)
+
     async def remove(self, name: str) -> None:
         """Kill and delete, whatever state it is in. Safe on a name that never
         existed, which is what makes it safe to call from a ``finally``."""
@@ -343,6 +386,37 @@ class ContainerEngine:
         if process.returncode != 0:
             return None
         return raw_out.decode("utf-8", errors="replace").strip()
+
+
+def _timestamp(raw: str) -> datetime | None:
+    """An engine's RFC 3339 instant, or ``None`` if it is not one.
+
+    Two adjustments before ``fromisoformat`` will take it. Docker reports
+    *nanoseconds*, and Python's parser accepts at most microseconds; and a
+    timestamp without an offset would come back naive, which compares to nothing
+    else in this codebase. Both are normalised rather than rejected, because a
+    daemon whose format drifts slightly should cost a reaper accuracy, not a
+    crash in a sweep.
+    """
+    text = raw.strip()
+    match = _RFC3339.match(text)
+    if match is None:
+        return None
+    fraction = (match["fraction"] or "")[:7].rstrip(".")
+    offset = match["offset"] or "+00:00"
+    try:
+        parsed = datetime.fromisoformat(f"{match['instant']}{fraction}{offset}")
+    except ValueError:  # pragma: no cover - the regex already rejected these
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+#: ``2026-07-29T11:00:00.123456789Z`` and the variants of it engines emit.
+_RFC3339: Final = re.compile(
+    r"^(?P<instant>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+    r"(?P<fraction>\.\d+)?"
+    r"(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
+)
 
 
 def _number(value: float) -> str:

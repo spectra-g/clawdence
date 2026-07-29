@@ -280,6 +280,12 @@
           "title": "Keywords",
           "type": "array"
         },
+        "max_concurrent_runs": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max Concurrent Runs",
+          "type": "integer"
+        },
         "mcp_servers": {
           "default": [],
           "items": {

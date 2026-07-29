@@ -3,17 +3,28 @@
 **This is the default tier**, and it is the first one where the trust boundary in
 §3.1 is enforced by something other than good intentions. The host tier's answer
 to "what stops the agent reading the control plane's database" is *nothing*; this
-tier's answer is that the database is not in the container's filesystem. One
-mount goes in — the worktree — and that is the whole of what the agent can see.
+tier's answer is that the database is not in the container's filesystem. The
+worktree goes in, and — where the repository has one — its dependency cache, and
+that is the whole of what the agent can see.
 
 What each control is actually for, since a list of flags reads as ceremony:
 
-**One mount, and it is the worktree.** §3.1's "all repos ✅ / one worktree ❌" is
-this line and no other. The other repositories in the registry are not protected
-by a permission check that could be wrong; they are absent from the filesystem
-the process runs on. The plan's verification asks for that to be asserted from
-*inside* a container rather than from the argv we built, which is what
-``tests/runners/test_container_live.py`` does.
+**One repository, and it is this one.** §3.1's "all repos ✅ / one worktree ❌"
+is this and no other line. The other repositories in the registry are not
+protected by a permission check that could be wrong; they are absent from the
+filesystem the process runs on. The plan's verification asks for that to be
+asserted from *inside* a container rather than from the argv we built, which is
+what ``tests/runners/test_container_live.py`` does. The second mount, added with
+S7's caching, is this repository's own package-manager cache — artefacts this
+system downloaded on its behalf, not another checkout — and it is the one thing
+in the container that outlives the run on purpose.
+
+**Two containers, not one.** A run installs the repository's dependencies before
+it runs an agent, and it does so in a container of its own: same image, same
+mounts, same caps, no stdin. Same tier, in other words, applied to the phase
+where a repository's own code first executes — a ``postinstall`` script is
+arbitrary code from a lockfile, and running it outside the boundary while the
+agent runs inside it would put the weaker half first.
 
 **No docker socket, at any tier this class serves.** A process that can reach the
 host daemon can ``docker run --net=host -v /:/host``, which is host root by
@@ -49,9 +60,11 @@ a CLI that needs no network at all.
 *The disk cap is usually absent.* ``ResourceCaps.disk_mb`` reaches the engine
 only where the storage driver supports a quota, which is not the common case (see
 ``ContainerEngine.supports_storage_quota``). What is capped everywhere is
-``/tmp``, which is a tmpfs with a size. The worktree is a host bind mount and no
-container flag bounds it; that is the rest of S7's problem, and it is written down
-here so nobody reads ``disk_mb`` as enforced.
+``/tmp``, which is a tmpfs with a size. The worktree and the cache are host bind
+mounts and no container flag bounds either, so ``disk_mb`` is not enforced on
+them and nothing here pretends otherwise. What bounds them instead is
+``reaper``, which is a retention policy rather than a quota: it reclaims after
+the fact and cannot stop a single run filling a disk.
 """
 
 from __future__ import annotations
@@ -74,8 +87,10 @@ from clawdence.runners.agent import (
     AgentCommand,
     AgentRunner,
     Launch,
+    Phase,
     PlanDelivery,
 )
+from clawdence.runners.cache import Cache
 from clawdence.runners.engine import (
     ContainerEngine,
     ContainerSpec,
@@ -97,6 +112,11 @@ WORK_ROOT: Final = "/clawdence/work"
 #: name for meaning.
 NAME_PREFIX: Final = "clawdence"
 LABEL_NAMESPACE: Final = "dev.clawdence"
+
+#: The label the reaper filters on. Every container this tier starts has it, and
+#: nothing else does — which is what makes "ours, and its run is gone" a question
+#: the engine can answer rather than one that needs a name parsed.
+RUN_ID_LABEL: Final = f"{LABEL_NAMESPACE}/run-id"
 
 #: Mount options for the container's ``/tmp``. ``nosuid``/``nodev`` because a
 #: writable directory that can hold a setuid binary or a device node is a
@@ -163,6 +183,7 @@ class ContainerRunner(AgentRunner):
         read_only_rootfs: bool = True,
         tmpfs_mb: int = 512,
         allow_unpinned_image: bool = False,
+        cache: Cache | None = None,
     ) -> None:
         super().__init__(
             command,
@@ -173,6 +194,7 @@ class ContainerRunner(AgentRunner):
             environ=environ,
             control=control,
             poll_seconds=poll_seconds,
+            cache=cache,
         )
         self._image = image
         self._images = dict(images or {})
@@ -216,7 +238,9 @@ class ContainerRunner(AgentRunner):
             "LC_ALL": "C.UTF-8",
         }
 
-    def _launch(self, request: RunnerRequest, worktree: Path, prompt: str) -> Launch:
+    def _launch(
+        self, request: RunnerRequest, worktree: Path, phase: Phase, argv: tuple[str, ...]
+    ) -> Launch:
         environment = self._environment(request)
         visible = {
             name: value
@@ -224,14 +248,14 @@ class ContainerRunner(AgentRunner):
             if name not in environment.secret_names
         }
         spec = ContainerSpec(
-            name=container_name(request),
+            name=container_name(request, phase),
             image=self._image_for(request),
-            argv=self._cli_argv(request, prompt),
+            argv=argv,
             workdir=request.worktree_path,
             env=visible,
             passthrough_env=tuple(sorted(environment.secret_names)),
-            mounts=(Mount(source=worktree),),
-            labels=self._labels(request),
+            mounts=self._mounts(request, worktree),
+            labels=self._labels(request, phase),
             caps=request.profile.caps,
             user=self._user,
             network=self._network,
@@ -240,7 +264,11 @@ class ContainerRunner(AgentRunner):
             # "insecure temporary directory" is about the host's /tmp, and this
             # tmpfs exists so the container never touches it.
             tmpfs={"/tmp": _TMPFS_OPTIONS.format(size=self._tmpfs_mb)},  # noqa: S108
-            interactive=self._command.delivery is PlanDelivery.STDIN,
+            # Only the agent is spoken to. The install command is handed no
+            # stdin at all, because an attached stdin nothing writes to is a
+            # package manager waiting on a prompt — a private registry asking
+            # for credentials — until the wall clock ends the run.
+            interactive=(phase is Phase.AGENT and self._command.delivery is PlanDelivery.STDIN),
         )
         client = client_environment(self._environ)
         # The credentials, in the client's environment rather than its argv. The
@@ -261,7 +289,9 @@ class ContainerRunner(AgentRunner):
         await self._teardown(request)
         return await super()._prepare(request, worktree)
 
-    async def _halt(self, request: RunnerRequest, process: asyncio.subprocess.Process) -> None:
+    async def _halt(
+        self, request: RunnerRequest, phase: Phase, process: asyncio.subprocess.Process
+    ) -> None:
         """Stop the container first, and only then the client that asked for it.
 
         This order is the whole point, and getting it backwards produced a bug
@@ -276,10 +306,12 @@ class ContainerRunner(AgentRunner):
         death follows from it, and the kill below is for the case where it
         somehow does not.
         """
-        await self._engine.remove(container_name(request))
-        await super()._halt(request, process)
+        await self._engine.remove(container_name(request, phase))
+        await super()._halt(request, phase, process)
 
-    async def _observe(self, request: RunnerRequest, completion: Completion) -> Completion:
+    async def _observe(
+        self, request: RunnerRequest, phase: Phase, completion: Completion
+    ) -> Completion:
         """Ask the daemon what it saw, before the container is removed.
 
         Two things it knows that the client's exit status does not: whether the
@@ -288,7 +320,7 @@ class ContainerRunner(AgentRunner):
         there" — same non-zero exit, opposite handling, and v1 conflated exactly
         this class of thing into "runner failed".
         """
-        state = await self._engine.state(container_name(request))
+        state = await self._engine.state(container_name(request, phase))
         if state is None:
             return self._never_started(completion)
         return replace(
@@ -298,9 +330,35 @@ class ContainerRunner(AgentRunner):
         )
 
     async def _teardown(self, request: RunnerRequest) -> None:
-        await self._engine.remove(container_name(request))
+        """Every phase's container, not the one that happened to run last.
+
+        An attempt that failed during setup never created an agent container and
+        an attempt that succeeded created both; removing only one of them means
+        the other survives whichever way the run went. ``remove`` is safe on a
+        name that never existed, which is what lets this be unconditional
+        instead of conditional on how far the run got.
+        """
+        for phase in Phase:
+            await self._engine.remove(container_name(request, phase))
 
     # -------------------------------------------------------------- plumbing
+
+    def _mounts(self, request: RunnerRequest, worktree: Path) -> tuple[Mount, ...]:
+        """The worktree, and the dependency cache if this repository has one.
+
+        Two mounts is still "one mount plus the cache" rather than a widening of
+        §3.1's boundary, and the difference is what is on the other end: the
+        cache directory holds artefacts this system downloaded on this
+        repository's behalf, it is not another repository, and it contains
+        nothing the control plane would mind the agent reading. What it *is* is
+        writable and shared between runs of the same repo, which is why
+        ``RepoProfile.max_concurrent_runs`` defaults to one.
+        """
+        mounts = [Mount(source=worktree)]
+        plan = self._cache_plan(request)
+        if plan is not None:
+            mounts.append(Mount(source=plan.directory))
+        return tuple(mounts)
 
     def _never_started(self, completion: Completion) -> Completion:
         """No container, so decide whether that means *nothing ran*.
@@ -333,21 +391,33 @@ class ContainerRunner(AgentRunner):
             return override
         return self._images.get(request.profile.build_system, self._image)
 
-    def _labels(self, request: RunnerRequest) -> dict[str, str]:
+    def _labels(self, request: RunnerRequest, phase: Phase) -> dict[str, str]:
+        """What the reaper reads. Every container this system starts carries
+        these, so one that outlived its run is identifiable as ours without
+        anybody parsing a name for meaning."""
         return {
-            f"{LABEL_NAMESPACE}/run-id": request.run_id,
+            RUN_ID_LABEL: request.run_id,
             f"{LABEL_NAMESPACE}/stage-id": request.stage_id,
             f"{LABEL_NAMESPACE}/work-item-id": request.work_item_id,
             f"{LABEL_NAMESPACE}/attempt": request.idempotency_key,
+            f"{LABEL_NAMESPACE}/phase": phase.value,
         }
 
 
-def container_name(request: RunnerRequest) -> str:
-    """A legal, stable, collision-free container name for one attempt.
+def container_name(request: RunnerRequest, phase: Phase = Phase.AGENT) -> str:
+    """A legal, stable, collision-free container name for one phase of one
+    attempt.
 
     Stable because ``_prepare`` uses it to clear a previous attempt's leftovers
     and ``_observe`` uses it to ask what happened; derived from the idempotency
     key because that is what "one attempt" already means everywhere else.
+
+    **Per phase, and not one name reused.** The setup container is inspected
+    after it exits — an install the kernel took is an ``OOM_KILLED`` this tier
+    can report honestly, exactly as for the agent — and it is still there,
+    holding its exit state, when the agent's container is created. One name for
+    both would mean the agent's creation collides with the evidence for the
+    phase before it.
 
     The stage id goes in unescaped, which is safe rather than lucky: ``StageId``
     is a ``Slug``, and a slug's alphabet is already a subset of what container
@@ -356,7 +426,7 @@ def container_name(request: RunnerRequest) -> str:
     directly and truncating it would collide across attempts.
     """
     digest = blake2s(request.idempotency_key.encode("utf-8"), digest_size=8).hexdigest()
-    return f"{NAME_PREFIX}-{request.stage_id}-{digest}"
+    return f"{NAME_PREFIX}-{request.stage_id}-{digest}-{phase.value}"
 
 
 def _check_mountable(worktree: Path) -> None:

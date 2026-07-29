@@ -34,6 +34,19 @@ class that reimplements idempotent dispatch, budget aborts and verdict handling
 feature, and v1's two integrations diverging on idempotency is the same shape of
 mistake one layer up.
 
+**A run is two phases, not one** (added with S7's caching). Before the agent
+starts, the repository's own ``install_command`` runs — v1's ``install_cmd`` /
+``pre_coding_cmd`` — against the warm cache in ``cache``. It is a *phase* rather
+than a special case because everything the agent phase needs, it needs too: the
+same environment, the same wall clock, the same stop button, and the same
+heartbeats. The last one is not decoration. §3.11's silence detector keys on the
+timestamp of the newest thing a run said, and a fifteen-minute ``mvn install``
+that nobody was streaming would look exactly like a wedged agent to it — so the
+attend loop runs across both phases and the detector sees an install as the busy
+thing it is. Consequently ``_launch``, ``_observe`` and ``_halt`` all take the
+phase: the tier is told *which* process it is being asked about, rather than
+assuming there is only one.
+
 The base class is deliberately not a ``RunnerPort`` implementation detail that
 tiers extend by overriding ``dispatch``. ``dispatch`` is final in spirit: it is
 where the port's obligations live (redelivery returns the first answer, an
@@ -53,6 +66,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic
 from typing import ClassVar, Final
 
 from clawdence.domain import (
@@ -81,6 +95,7 @@ from clawdence.runners import plan as plan_text
 from clawdence.runners import steering
 from clawdence.runners import verdict as verdict_file
 from clawdence.runners import worktree as wt
+from clawdence.runners.cache import Cache, CachePlan
 from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
 from clawdence.runners.outcome import Completion, classify
 from clawdence.runners.process import kill_and_reap
@@ -109,6 +124,20 @@ FORBIDDEN_ENV: Final[tuple[str, ...]] = (
     "GOOGLE_APPLICATION_CREDENTIALS",
     "CLAWDENCE_HOME",
 )
+
+
+class Phase(StrEnum):
+    """Which of a run's two processes a tier is being asked about.
+
+    ``SETUP`` is the repository's ``install_command``; ``AGENT`` is the CLI. The
+    hooks take this rather than the tiers keeping state about which one is
+    running, because a runner instance serves many dispatches at once under the
+    scheduler and per-instance "current phase" would be a field two concurrent
+    runs disagree about.
+    """
+
+    SETUP = "setup"
+    AGENT = "agent"
 
 
 class PlanDelivery(StrEnum):
@@ -193,6 +222,14 @@ class AgentCommand:
     #: somewhere shared.
     include_stderr_tail: bool = False
 
+    #: Ceiling on the repository's ``install_command``, on top of whatever the
+    #: run's own wall clock leaves. Generous, because a cold monorepo install is
+    #: the thing the cache exists to stop being slow and the *first* one still
+    #: pays for it — and finite, because an install that hangs on a private
+    #: registry prompt would otherwise consume the whole run before the agent
+    #: got a turn.
+    setup_timeout_seconds: float = 1800.0
+
 
 @dataclass(frozen=True, slots=True)
 class Environment:
@@ -237,6 +274,7 @@ class AgentRunner(ABC):
     tier: ClassVar[IsolationTier]
 
     __slots__ = (
+        "_cache",
         "_clock",
         "_command",
         "_control",
@@ -261,8 +299,16 @@ class AgentRunner(ABC):
         environ: Mapping[str, str] | None = None,
         control: ControlPort | None = None,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
+        cache: Cache | None = None,
     ) -> None:
         self._command = command
+        # ``Cache(enabled=False)`` rather than ``None`` for "no cache", so the
+        # code path is one shape. A runner given nothing gets the machine's
+        # default cache home, because a cache that has to be wired up is a cache
+        # that is off in every deployment nobody read the docs for — and the
+        # thing it protects against, a cold install per run, is the single
+        # largest cost in the tier.
+        self._cache = Cache.default(environ) if cache is None else cache
         self._secrets: SecretProvider = NullSecrets() if secrets is None else secrets
         self._sink = sink
         self._clock = clock
@@ -371,9 +417,17 @@ class AgentRunner(ABC):
             return self._result(request, blocked, started_at=started_at, tally=tally)
 
         installed = await self._prepare(request, worktree)
+        # One deadline for the whole attempt, not one per phase. A repository
+        # whose install eats twenty-nine minutes of a thirty-minute cap leaves
+        # the agent one minute and then times out, which is the honest report;
+        # giving each phase its own copy of the limit would let a run declared
+        # to take half an hour take an hour and report success.
+        deadline = _Deadline.of(request)
         try:
             try:
-                completion = await self._run_agent(request, worktree, tally)
+                completion = await self._run_setup(request, worktree, deadline)
+                if completion is None:
+                    completion = await self._run_agent(request, worktree, tally, deadline)
             except asyncio.CancelledError:
                 if request.idempotency_key not in self._stopping:
                     # The engine's own timeout, unwinding. One path out for "did
@@ -429,6 +483,13 @@ class AgentRunner(ABC):
         """
         installed = Installed(worktree=worktree)
         (worktree / HOME_DIR).mkdir(parents=True, exist_ok=True)
+        plan = self._cache_plan(request)
+        if plan is not None:
+            # As the invoking user, and before anything is mounted — see
+            # ``CachePlan.prepare``. A directory the daemon has to create is a
+            # directory the daemon owns, and a container running as somebody
+            # else then cannot write to its own cache.
+            plan.prepare()
         verdict_file.clear(worktree)
         # Empty, and before the agent starts: the plan tells it to look here
         # every turn, and an instruction about a path that does not exist is one
@@ -503,17 +564,100 @@ class AgentRunner(ABC):
             with contextlib.suppress(OSError):
                 (worktree / path).unlink(missing_ok=True)
 
+    async def _run_setup(
+        self,
+        request: RunnerRequest,
+        worktree: Path,
+        deadline: _Deadline,
+    ) -> Completion | None:
+        """Install the repository's dependencies. ``None`` when that went fine.
+
+        v1's ``install_cmd``, finally run by something. Returning ``None`` for
+        success is what keeps the caller readable — the only reason this phase
+        exists is to *not* be the thing that produced the result.
+
+        **A failing install is ``BLOCKED``, and that is a decision.** The two
+        near-misses are ``STARTUP_FAILED``, which is retryable and means the
+        environment was wrong rather than the repository, and ``NON_ZERO_EXIT``,
+        which belongs to the agent and implies an agent ran. A repository whose
+        own install command fails is a repository the agent cannot work in, and
+        three more attempts re-run the same failing install at full price —
+        which is the exact budget burn ``BLOCKED`` was added for. What still
+        outranks it, because ``classify`` puts them above, is every way the
+        install could have been stopped rather than failed: a cancel, the wall
+        clock, the money cap, an OOM kill.
+        """
+        argv = self._setup_argv(request)
+        if not argv:
+            return None
+
+        completion = await self._run_phase(
+            request,
+            worktree,
+            Phase.SETUP,
+            argv,
+            feed=None,
+            tally=TokenTally(accumulation=self._command.accumulation),
+            # No budget. The install spends time and disk, not tokens, and a
+            # tally run over `npm`'s output would be a regular expression
+            # written for an agent's event stream deciding a build's fate.
+            budget=Budget(),
+            limit=deadline.remaining(self._command.setup_timeout_seconds),
+            limit_is_budget=deadline.is_budget,
+        )
+        if completion.exit_code == 0 and completion.startup_error is None:
+            return None
+        return replace(
+            completion,
+            setup_error=(
+                f"{request.profile.name!r} could not be prepared: "
+                f"{' '.join(argv)} exited {completion.exit_code}"
+            ),
+        )
+
     async def _run_agent(
         self,
         request: RunnerRequest,
         worktree: Path,
         tally: TokenTally,
+        deadline: _Deadline,
     ) -> Completion:
         """Spawn whatever this tier spawns, stream it, and stop it when it runs
         out of something."""
         prompt = plan_text.build(request)
-        launch = self._launch(request, worktree, prompt)
-        feed = prompt if self._command.delivery is PlanDelivery.STDIN else None
+        return await self._run_phase(
+            request,
+            worktree,
+            Phase.AGENT,
+            self._cli_argv(request, prompt),
+            feed=prompt if self._command.delivery is PlanDelivery.STDIN else None,
+            tally=tally,
+            budget=request.budget,
+            limit=deadline.remaining(),
+            limit_is_budget=deadline.is_budget,
+        )
+
+    async def _run_phase(
+        self,
+        request: RunnerRequest,
+        worktree: Path,
+        phase: Phase,
+        argv: tuple[str, ...],
+        *,
+        feed: str | None,
+        tally: TokenTally,
+        budget: Budget,
+        limit: float | None,
+        limit_is_budget: bool,
+    ) -> Completion:
+        """Run one of the attempt's processes to a conclusion.
+
+        Both phases want the same six things — a spawn, two streams read at
+        once, a wall clock, a stop button, the control-plane exchange, and a
+        report of what the tier saw — so they are written once and the phase is
+        passed to the three hooks that care which process this is.
+        """
+        launch = self._launch(request, worktree, phase, argv)
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -543,16 +687,15 @@ class AgentRunner(ABC):
             # Called at most once: ``_Watcher`` latches ``overspent`` before it
             # gets here, so this does not need a guard of its own.
             nonlocal halting
-            halting = asyncio.create_task(self._halt(request, process))
+            halting = asyncio.create_task(self._halt(request, phase, process))
 
         watcher = _Watcher(
             tally=tally,
             sink=self._sink,
-            budget=request.budget,
+            budget=budget,
             prices=self._command.prices,
             stop=stop,
         )
-        limit, limit_is_budget = _wall_clock(request)
 
         # The channel *into* the run (§3.11), and the only thing in this method
         # that is not about the process itself. It runs beside the drive rather
@@ -561,16 +704,16 @@ class AgentRunner(ABC):
         # inbox has to be picked up by a run that is saying nothing, and a run
         # that is saying nothing is precisely the case the heartbeat exists to
         # make visible.
-        attending = asyncio.create_task(self._attend(request, worktree, process, watcher))
+        attending = asyncio.create_task(self._attend(request, worktree, phase, process, watcher))
 
         timed_out = False
         try:
             await asyncio.wait_for(self._drive(process, feed, watcher), timeout=limit)
         except TimeoutError:
             timed_out = True
-            await self._halt(request, process)
+            await self._halt(request, phase, process)
         except asyncio.CancelledError:
-            await self._halt(request, process)
+            await self._halt(request, phase, process)
             raise
         finally:
             attending.cancel()
@@ -597,21 +740,36 @@ class AgentRunner(ABC):
             # §3.7a: the two things the exit status cannot say. Both come off the
             # stream that was already being read for tokens — reading it twice
             # would be two chances to disagree about what arrived.
-            provider_error=watcher.turns.terminal_error,
-            model_turn_seen=watcher.turns.model_turn_seen,
+            #
+            # **Agent phase only.** These read the *agent's* event stream, and an
+            # install emitting structured output — npm and gradle both can —
+            # would prove "this process emits events" while never emitting a
+            # model turn, which is precisely the shape ``NO_MODEL_RESPONSE`` is
+            # keyed on. A build tool would then report the credential as
+            # rejected.
+            provider_error=watcher.turns.terminal_error if phase is Phase.AGENT else None,
+            model_turn_seen=watcher.turns.model_turn_seen if phase is Phase.AGENT else None,
         )
-        return await self._observe(request, completion)
+        return await self._observe(request, phase, completion)
 
     async def _attend(
         self,
         request: RunnerRequest,
         worktree: Path,
+        phase: Phase,
         process: asyncio.subprocess.Process,
         watcher: _Watcher,
     ) -> None:
         """Carry messages in and liveness out, while the agent works (§3.11).
 
-        Cancelled by ``_run_agent`` when the drive finishes, so this loops
+        Runs across **both** phases, and the setup phase is the one that makes it
+        matter rather than the one that gets it for free: a cold ``mvn install``
+        says plenty but says none of it to a control plane that is not listening,
+        and §3.11's silence detector cannot tell a run nobody is streaming from a
+        run that has wedged. A steer delivered during setup is simply waiting for
+        the agent when it starts, which is where it was going anyway.
+
+        Cancelled by ``_run_phase`` when the drive finishes, so this loops
         forever on purpose and has no exit condition of its own — except a stop,
         which is the one thing it is allowed to decide.
 
@@ -636,7 +794,7 @@ class AgentRunner(ABC):
                 # Latched on the watcher rather than returned, because the drive
                 # is what finishes the run and it needs to find this afterwards.
                 watcher.cancelled = signal.cancel
-                await self._halt(request, process)
+                await self._halt(request, phase, process)
                 return
 
     async def _exchange(self, request: RunnerRequest, watcher: _Watcher) -> Signal:
@@ -784,8 +942,16 @@ class AgentRunner(ABC):
         """What the agent's environment starts from, before the run's own."""
 
     @abstractmethod
-    def _launch(self, request: RunnerRequest, worktree: Path, prompt: str) -> Launch:
-        """argv, environment and cwd of the process to spawn."""
+    def _launch(
+        self, request: RunnerRequest, worktree: Path, phase: Phase, argv: tuple[str, ...]
+    ) -> Launch:
+        """argv, environment and cwd of the process to spawn.
+
+        ``argv`` is the *inner* command — the agent CLI, or the repository's
+        install command — already carrying ``exec_prefix``. The tier decides what
+        actually gets executed to make that happen, which on the host is the
+        command itself and in a container is an engine client with it on the end.
+        """
 
     # The three below are *optional* hooks, not abstract ones, and doing nothing
     # is a correct implementation of each: the host tier has no preflight of its
@@ -794,22 +960,33 @@ class AgentRunner(ABC):
     def _check(self, request: RunnerRequest) -> None:  # noqa: B027
         """Tier-specific preflight. Raises ``PermanentError``, or does nothing."""
 
-    async def _halt(self, request: RunnerRequest, process: asyncio.subprocess.Process) -> None:
+    async def _halt(
+        self, request: RunnerRequest, phase: Phase, process: asyncio.subprocess.Process
+    ) -> None:
         """Stop the work. Called for a timeout, a budget kill, and a cancel.
 
         The default — kill the child and reap it — is right only where the child
         *is* the work. A tier that spawns the agent somewhere else has to stop it
         there first, because the process we hold is a client and killing a client
-        does not stop what it asked for.
+        does not stop what it asked for. ``phase`` is how such a tier knows
+        *which* of the run's two processes it is being asked to end.
         """
         await kill_and_reap(process)
 
-    async def _observe(self, request: RunnerRequest, completion: Completion) -> Completion:
+    async def _observe(
+        self, request: RunnerRequest, phase: Phase, completion: Completion
+    ) -> Completion:
         """Anything the tier knows that the exit status does not say."""
         return completion
 
     async def _teardown(self, request: RunnerRequest) -> None:  # noqa: B027
-        """Release whatever the tier allocated. Must be safe to call twice."""
+        """Release whatever the tier allocated. Must be safe to call twice.
+
+        Called once per attempt, after both phases, so a tier that allocates per
+        phase gives back *every* phase's allocation here — the setup container
+        outlives its phase if nothing removes it, and a leaked container is a
+        leaked CPU whether or not an agent was in it.
+        """
 
     # -------------------------------------------------------------- plumbing
 
@@ -830,6 +1007,22 @@ class AgentRunner(ABC):
             return (*argv, PLAN_PATH)
         return argv
 
+    def _setup_argv(self, request: RunnerRequest) -> tuple[str, ...]:
+        """The repository's install command, under its toolchain wrapper.
+
+        argv, never a shell string, for the reason ``ScriptStage.command`` gives
+        and one more that is specific to this: the value comes from a profile the
+        probe (S9) proposes, and a profile that could carry a shell string is a
+        profile that could carry a pipeline into ``curl``.
+        """
+        install = request.profile.install_command
+        if not install:
+            return ()
+        return (*request.profile.exec_prefix, *install)
+
+    def _cache_plan(self, request: RunnerRequest) -> CachePlan | None:
+        return self._cache.plan(request.profile)
+
     def _environment(self, request: RunnerRequest) -> Environment:
         """The agent's whole environment. Built up, never filtered down.
 
@@ -840,6 +1033,13 @@ class AgentRunner(ABC):
         """
         env = self._inherited(request)
         secret_names: set[str] = set()
+
+        # Before everything else, so a repository that wants its own cache
+        # location can still say so through ``extra_env``. Absolute paths, and
+        # the same ones on both sides of a container boundary — see ``cache``.
+        plan = self._cache_plan(request)
+        if plan is not None:
+            env.update(plan.env)
 
         # The run's identity, so an agent — and anything a repository's own
         # tooling reads — can tell it is under an orchestrator, not a person.
@@ -941,6 +1141,11 @@ class AgentRunner(ABC):
         parts = [outcome.value]
         if completion.startup_error is not None:
             parts.append(completion.startup_error)
+        elif completion.setup_error is not None:
+            # Even when the outcome is not ``BLOCKED``. A setup killed by the
+            # wall clock reports ``timed-out``, and "which of the two processes
+            # ran out of time" is the first thing anybody reading it asks.
+            parts.append(completion.setup_error)
         elif completion.exit_code is not None:
             parts.append(f"exit {completion.exit_code}")
         if completion.cancelled_because is not None:
@@ -1050,6 +1255,48 @@ async def _feed(process: asyncio.subprocess.Process, text: str | None) -> None:
         await process.stdin.drain()
     with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
         process.stdin.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _Deadline:
+    """One wall clock, shared by both phases of an attempt.
+
+    Monotonic rather than the injected clock, because this measures elapsed time
+    against a limit and the injected clock exists so tests can make timestamps
+    predictable — a frozen clock would mean an attempt whose deadline never
+    arrives.
+    """
+
+    limit: float | None
+    is_budget: bool
+    started: float
+
+    @classmethod
+    def of(cls, request: RunnerRequest) -> _Deadline:
+        limit, is_budget = _wall_clock(request)
+        return cls(limit=limit, is_budget=is_budget, started=monotonic())
+
+    def remaining(self, ceiling: float | None = None) -> float | None:
+        """What is left, under an optional per-phase ceiling of its own.
+
+        Never zero or negative: a phase given a non-positive timeout would be
+        spawned and killed rather than reported as out of time, and the smallest
+        positive limit produces the timeout the caller is actually asking for.
+        """
+        limits = [value for value in (self._left(), ceiling) if value is not None]
+        return min(limits) if limits else None
+
+    def _left(self) -> float | None:
+        if self.limit is None:
+            return None
+        return max(self.limit - (monotonic() - self.started), _MINIMUM_LIMIT_SECONDS)
+
+
+#: Floor on a phase's timeout. Small enough that an attempt already out of time
+#: fails immediately, and positive because ``asyncio.wait_for`` treats zero as
+#: "already expired" and would report a timeout before the process existed —
+#: which is a timeout the tier could not have halted anything for.
+_MINIMUM_LIMIT_SECONDS: Final = 0.001
 
 
 def _wall_clock(request: RunnerRequest) -> tuple[float | None, bool]:

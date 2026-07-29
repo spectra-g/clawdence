@@ -153,6 +153,17 @@ class RepoProfile(DomainModel):
     #: mandated base image and no way to publish it anywhere this project reaches.
     runner_image: str | None = None
 
+    #: How many runs against this repository may be in flight at once (§3.4).
+    #: **One by default, and the default is the interesting part**: v1 had a
+    #: global single-story lock, and the natural replacement is not "no lock" but
+    #: a lock scoped to the thing that is actually shared. Two runs on one
+    #: repository share a warm dependency cache and, for most build systems, a
+    #: lock file inside it — gradle and maven both take one — so raising this is
+    #: a statement that the repository's toolchain tolerates concurrent installs.
+    #: Runs on *different* repositories are unaffected, which is the change from
+    #: v1: the cap is per repo, not global.
+    max_concurrent_runs: int = Field(default=1, gt=0)
+
     test_reporter: TestReporter = TestReporter.NONE
     e2e_runner: E2EPolicy = E2EPolicy.SKIP
     require_full_test_suite: bool = False

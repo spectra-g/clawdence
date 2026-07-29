@@ -91,7 +91,7 @@ worst realistic outcome, not the average one.
 | **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | **Built** (container tier) |
 | **T5** | Model-generated destructive command | **High** | A2, A3 | Partly accepted |
 | **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Designed + policy |
-| **T7** | Resource exhaustion of the host | **High** | A3 | Partly built — caps built, reaper designed |
+| **T7** | Resource exhaustion of the host | **High** | A3 | Partly built — caps, reaper and concurrency cap built; disk quota still absent |
 | **T8** | Financial exhaustion | **High** | A5 | Built (schema) + designed |
 | **T9** | Unauthorised submission | **High** | A5, A4 | Designed |
 | **T10** | Webhook forgery | Medium | A5, A4 | Designed |
@@ -253,13 +253,24 @@ network denied — because a retry policy that cannot tell an OOM kill from a fl
 them identically, which is how a resource problem becomes an infinite loop.
 
 **Built** for CPU, memory, process count and wall clock on the container tier, with live tests that
-exhaust memory and fork past the ceiling and check that the run is killed rather than the host. Two
-gaps are named rather than implied. **Disk is largely uncapped**: `ResourceCaps.disk_mb` reaches the
-engine only where the storage driver supports a quota, which is not the common case, and the
-worktree is a host bind mount that no container flag bounds — `/tmp` is a sized tmpfs and that is
-all. **There is no reaper**; containers are removed by the run that created them, including when it
-is cancelled, but nothing collects what a crashed control plane left behind. Both are the rest
-of S7.
+exhaust memory and fork past the ceiling and check that the run is killed rather than the host.
+**The reaper is built** (`runners/reaper.py`, `clawdence reap`): containers are still removed by the
+run that created them, and the sweep collects what a *crashed* control plane left behind —
+containers carrying our run-id label, stale worktrees, and dependency caches nothing has used. It
+is guarded on both sides, because the dangerous failure is deleting live work rather than missing
+dead work: nothing belonging to a run the state store says is running is touched, and nothing
+inside a grace period is either. It deliberately does not prune images — this system builds none,
+so the layers on the host belong to the operator's own registry pulls.
+
+**Concurrency is now bounded rather than accidental.** `runners/scheduler.py` caps runs in flight
+across the fleet and per repository (`RepoProfile.max_concurrent_runs`, default 1), which is what
+turns "N containers at once" from a resource risk into a configured number.
+
+One gap is named rather than implied. **Disk is largely uncapped**: `ResourceCaps.disk_mb` reaches
+the engine only where the storage driver supports a quota, which is not the common case, and the
+worktree and dependency cache are host bind mounts that no container flag bounds — `/tmp` is a
+sized tmpfs and that is all. The reaper is a retention policy, not a quota: it reclaims after the
+fact and cannot stop one run filling a disk.
 
 ### T8 · Financial exhaustion
 
@@ -606,8 +617,9 @@ The honest summary. Most of this is not built.
 | Resource caps — CPU, memory, pids, wall clock | T7 | **Built**; disk only where the storage driver supports a quota |
 | Credentials passed to the container by name, never through a command line | T3, T18 | **Built** |
 | Digest-pinned runner image, refused unless pinned | T12 | **Built** |
-| Disk reaper for crashed runs, stale worktrees, orphaned layers | T7 | Designed (rest of S7) |
-| Dependency caching between runs | — | Designed (rest of S7) |
+| Disk reaper for crashed runs, stale worktrees, cold caches | T7 | **Built**; guarded on the live-run set and a grace period. Images deliberately not pruned |
+| Bounded concurrency — fleet cap plus per-repository cap | T7 | **Built** |
+| Dependency caching between runs | T7 | **Built**; a host directory per repo, bind-mounted at path identity, so a partly-filled cache cannot become an unbounded one on the host's root filesystem |
 | Egress allowlist | **T1, T2, T3** | Designed (S7b) — **not enforced by the container tier today** |
 | Socket-mode provenance gating; rootless DinD | T6 | Designed |
 | Submitter authorization, rate limits, size caps | T9, T8 | Designed |

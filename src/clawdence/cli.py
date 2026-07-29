@@ -23,7 +23,7 @@ import os
 import secrets
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from clawdence import __version__
@@ -34,6 +34,15 @@ from clawdence.engine import (
     load_workflow,
     render_json,
     render_text,
+)
+from clawdence.runners import (
+    DEFAULT_CACHE_RETENTION,
+    DEFAULT_GRACE,
+    DEFAULT_WORKTREE_RETENTION,
+    WORK_ROOT,
+    Cache,
+    Reaper,
+    Reclaimed,
 )
 from clawdence.store import SqliteLedger, StateStore, detect, sweep
 
@@ -119,6 +128,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Report what is stalled without changing anything.",
+    )
+
+    reap = subcommands.add_parser(
+        "reap",
+        help="Reclaim containers, worktrees and caches that no live run owns.",
+    )
+    _add_state_argument(reap)
+    reap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be reclaimed without removing anything.",
+    )
+    reap.add_argument(
+        "--work-root",
+        type=Path,
+        metavar="DIR",
+        help=(
+            f"Directory holding per-run worktrees (§3.3's {WORK_ROOT}). "
+            f"Omitted means worktrees are not swept — there is no safe guess."
+        ),
+    )
+    reap.add_argument(
+        "--older-than",
+        type=float,
+        metavar="HOURS",
+        help="Override every retention with one age. Applies to all three sources.",
+    )
+    reap.add_argument(
+        "--no-caches",
+        action="store_true",
+        help="Leave dependency caches alone. Reclaiming one only costs a slow install.",
     )
 
     schema = subcommands.add_parser(
@@ -304,6 +344,63 @@ def _runs_recover(state: Path | None, *, dry_run: bool) -> int:
     return 0
 
 
+def _reap_command(
+    state: Path | None,
+    *,
+    dry_run: bool,
+    work_root: Path | None,
+    older_than: float | None,
+    no_caches: bool,
+) -> int:
+    """Reclaim what dead runs left behind, once, by hand.
+
+    The live set comes from the store rather than from the daemon, and that
+    ordering is the safety property: a container is only removed because
+    *nothing durable claims its run*, so a state database that cannot be opened
+    fails the command instead of producing an empty live set — which would be an
+    instruction to reap everything.
+
+    ``--older-than`` collapses three retentions into one because that is what an
+    operator with a full disk actually wants to say. It applies to the grace
+    period too: overriding the retentions but not the floor under them would
+    leave ``--older-than 0`` quietly meaning one hour.
+    """
+    override = None if older_than is None else timedelta(hours=older_than)
+    with StateStore.open(state or default_state_path()) as store:
+        live = tuple(run.id for run in store.list_runs(status=RunStatus.RUNNING, limit=1000))
+
+    reaper = Reaper(
+        work_root=work_root,
+        cache=None if no_caches else Cache.default(),
+        grace=DEFAULT_GRACE if override is None else override,
+        worktree_retention=DEFAULT_WORKTREE_RETENTION if override is None else override,
+        cache_retention=DEFAULT_CACHE_RETENTION if override is None else override,
+    )
+    reclaimed = await_sweep(reaper, live, dry_run=dry_run)
+
+    verb = "would reclaim" if dry_run else "reclaimed"
+    for name in reclaimed.containers:
+        print(f"{verb} container {name}")
+    for path in (*reclaimed.worktrees, *reclaimed.caches):
+        print(f"{verb} {path}")
+    for path in reclaimed.failed:
+        print(f"could not remove {path}")
+    if not reclaimed:
+        print(f"nothing to reclaim ({len(live)} run(s) still live)")
+    # Non-zero when something was found and could not be removed: a scheduled
+    # reap that cannot free space needs to be visible to whatever scheduled it.
+    return 1 if reclaimed.failed else 0
+
+
+def await_sweep(reaper: Reaper, live: Sequence[str], *, dry_run: bool) -> Reclaimed:
+    """``asyncio.run`` in one named place, because the reaper talks to a daemon.
+
+    The CLI is otherwise synchronous, and scattering ``asyncio.run`` through it
+    is how a second event loop eventually gets started inside the first.
+    """
+    return asyncio.run(reaper.sweep(live, dry_run=dry_run))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -327,6 +424,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _runs_recover(args.state, dry_run=args.dry_run)
         parser.parse_args(["runs", "--help"])
         return 0  # pragma: no cover - --help exits
+
+    if args.command == "reap":
+        return _reap_command(
+            args.state,
+            dry_run=args.dry_run,
+            work_root=args.work_root,
+            older_than=args.older_than,
+            no_caches=args.no_caches,
+        )
 
     if args.command == "schema":
         action: str = args.action

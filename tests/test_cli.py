@@ -11,6 +11,7 @@ home directory of whoever runs it is a test suite that has a side effect.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -230,3 +231,138 @@ def _abandon_a_step(state: Path) -> None:
                 started_at=_now() - timedelta(hours=4),
             )
         )
+
+
+class TestReapCommand:
+    """The reaper, from the operator's side.
+
+    Every test here points ``--work-root`` at a temporary directory and passes
+    ``--no-caches`` unless the cache is the subject. Both are deliberate: this
+    command deletes things, and a suite that let it fall back to the machine's
+    real cache home would be a suite that reclaims the developer's caches when
+    it runs.
+    """
+
+    def test_a_quiet_machine_says_so(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code = main(
+            [
+                "reap",
+                "--state",
+                str(tmp_path / "state.db"),
+                "--work-root",
+                str(tmp_path / "work"),
+                "--no-caches",
+            ]
+        )
+
+        assert code == 0
+        assert "nothing to reclaim" in capsys.readouterr().out
+
+    def test_a_stale_worktree_is_reclaimed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        stale = _stale_worktree(tmp_path / "work", "run.gone")
+
+        code = main(
+            [
+                "reap",
+                "--state",
+                str(tmp_path / "state.db"),
+                "--work-root",
+                str(tmp_path / "work"),
+                "--no-caches",
+                "--older-than",
+                "1",
+            ]
+        )
+
+        assert code == 0
+        assert "reclaimed" in capsys.readouterr().out
+        assert not stale.exists()
+
+    def test_a_worktree_belonging_to_a_running_run_is_protected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The safety property, through the command an operator actually types.
+
+        The live set comes from the store, so a run recorded as ``running``
+        keeps its worktree however old the directory looks — which is what
+        stops a scheduled reap eating the work of a long run.
+        """
+        state = tmp_path / "state.db"
+        with StateStore.open(state) as store:
+            store.create_run(
+                Run(
+                    id="run.busy",
+                    work_item_id="wi.busy",
+                    workflow="toy",
+                    workflow_version="1.0.0",
+                    status=RunStatus.RUNNING,
+                    created_at=_now(),
+                    updated_at=_now(),
+                )
+            )
+        live = _stale_worktree(tmp_path / "work", "run.busy")
+
+        code = main(
+            [
+                "reap",
+                "--state",
+                str(state),
+                "--work-root",
+                str(tmp_path / "work"),
+                "--no-caches",
+                "--older-than",
+                "0",
+            ]
+        )
+
+        assert code == 0
+        assert "1 run(s) still live" in capsys.readouterr().out
+        assert live.is_dir()
+
+    def test_a_dry_run_reports_without_removing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        stale = _stale_worktree(tmp_path / "work", "run.gone")
+
+        code = main(
+            [
+                "reap",
+                "--state",
+                str(tmp_path / "state.db"),
+                "--work-root",
+                str(tmp_path / "work"),
+                "--no-caches",
+                "--older-than",
+                "1",
+                "--dry-run",
+            ]
+        )
+
+        assert code == 0
+        assert "would reclaim" in capsys.readouterr().out
+        assert stale.is_dir()
+
+    def test_no_work_root_means_no_worktree_is_touched(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """There is no safe default for this: guessing at ``/clawdence/work``
+        on a machine that keeps its worktrees elsewhere deletes whatever *was*
+        at that path."""
+        stale = _stale_worktree(tmp_path / "work", "run.gone")
+
+        assert main(["reap", "--state", str(tmp_path / "state.db"), "--no-caches"]) == 0
+        assert "nothing to reclaim" in capsys.readouterr().out
+        assert stale.is_dir()
+
+
+def _stale_worktree(root: Path, name: str) -> Path:
+    directory = root / name
+    directory.mkdir(parents=True)
+    (directory / "app.py").write_text("x = 1\n", encoding="utf-8")
+    old = (datetime.now(UTC) - timedelta(days=30)).timestamp()
+    os.utime(directory, (old, old))
+    return directory

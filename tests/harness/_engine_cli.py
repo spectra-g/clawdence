@@ -28,6 +28,7 @@ import os
 import signal
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,10 +74,43 @@ def main(argv: list[str]) -> int:
         return _inspect(state_dir, rest)
     if command == "rm":
         return _remove(state_dir, rest)
+    if command == "ps":
+        return _ps(state_dir, rest)
     if command == "version":
         sys.stdout.write("0.0.0-fake\n")
         return 0
     return 125
+
+
+def _ps(state_dir: Path, argv: list[str]) -> int:
+    """``--filter label=<key>`` and ``--format {{.Names}}\\t{{.Label "<key>"}}``.
+
+    Only the one shape the reaper asks for, and it reads the labels back out of
+    the recorded ``run`` argv rather than keeping a second copy of them — which
+    is what makes "the reaper finds a container by the label the runner set" a
+    claim about the label the runner actually set.
+    """
+    wanted = (_value(argv, "--filter") or "label=").partition("=")[2]
+    lines = []
+    for name, labels in _containers(state_dir).items():
+        if wanted in labels:
+            lines.append(f"{name}\t{labels[wanted]}")
+    sys.stdout.write("".join(f"{line}\n" for line in sorted(lines)))
+    return 0
+
+
+def _containers(state_dir: Path) -> dict[str, dict[str, str]]:
+    """Every container that still exists, and the labels it was created with."""
+    found: dict[str, dict[str, str]] = {}
+    for call in _calls(state_dir):
+        if not call or call[0] != "run":
+            continue
+        flags, _, _ = _parse(call[1:])
+        name = _one(flags, "--name")
+        if name is None or not _state_path(state_dir, name).is_file():
+            continue
+        found[name] = dict(value.partition("=")[::2] for flag, value in flags if flag == "--label")
+    return found
 
 
 def _run(state_dir: Path, argv: list[str]) -> int:
@@ -127,6 +161,11 @@ def _run(state_dir: Path, argv: list[str]) -> int:
             "ExitCode": 137 if code < 0 else code,
             "OOMKilled": _scripted(state_dir, "oom") is not None,
             "Error": "",
+            # Not part of `.State`, and separated on the way out — the reaper
+            # asks for `{{.Created}}`, which is a field of the container rather
+            # than of its state. Scriptable, because the alternative way to test
+            # a seven-day retention is to wait a week.
+            "Created": _scripted(state_dir, "created") or _now(),
         },
     )
     return 137 if code < 0 else code
@@ -134,15 +173,23 @@ def _run(state_dir: Path, argv: list[str]) -> int:
 
 def _inspect(state_dir: Path, argv: list[str]) -> int:
     name = [value for value in argv if not value.startswith("-")][-1]
-    # `--format {{json .State}}` is the only form the runner asks for, and the
-    # format string arrives as a value of `--format`; skipping it is why the
+    # The format string arrives as a value of `--format`; skipping it is why the
     # name is taken from the end rather than the start.
     path = _state_path(state_dir, name)
     if not path.is_file():
         sys.stderr.write(f"Error: No such object: {name}\n")
         return 1
-    sys.stdout.write(path.read_text(encoding="utf-8"))
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if _value(argv, "--format") == "{{.Created}}":
+        sys.stdout.write(f"{state['Created']}\n")
+        return 0
+    # `--format {{json .State}}`, which is what the tier asks for after a run.
+    sys.stdout.write(json.dumps({key: value for key, value in state.items() if key != "Created"}))
     return 0
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _remove(state_dir: Path, argv: list[str]) -> int:
@@ -215,6 +262,22 @@ def _one(flags: list[tuple[str, str]], name: str) -> str | None:
         if flag == name:
             return value
     return None
+
+
+def _value(argv: list[str], flag: str) -> str | None:
+    """The value after ``flag`` in a raw argument list. For the sub-commands
+    that are flat enough not to need ``_parse``."""
+    for index, token in enumerate(argv):
+        if token == flag and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _calls(state_dir: Path) -> list[list[str]]:
+    log = state_dir / "calls.jsonl"
+    if not log.is_file():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _scripted(state_dir: Path, name: str) -> str | None:

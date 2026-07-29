@@ -249,8 +249,20 @@ def migrate(connection: sqlite3.Connection) -> int:
     Migrations are ordinary DDL against current-shaped rows. That is the payoff
     of ADR-0005: with the tables as the source of truth rather than a projection
     of a log, a schema change is a migration, not a rewrite of history.
+
+    **Two processes may bootstrap the same file at once**, and until S7 made
+    concurrency real that was rare enough to look impossible: ``clawdence run``
+    in two terminals against a fresh database, or a run and a ``runs recover``.
+    Both read ``user_version`` as 0, both decide to apply migration 0, and the
+    second one to reach the write lock finds the first one's tables already
+    there. The version is only readable *outside* the write lock — sqlite3's
+    ``executescript`` commits any open transaction before it runs, so there is
+    no way to hold the lock across the check and the DDL — so the check is
+    repeated after a failure instead: a version that has moved past the
+    migration we were attempting means somebody else applied it, which is the
+    outcome we wanted and not an error.
     """
-    current: int = connection.execute("PRAGMA user_version").fetchone()[0]
+    current = _version(connection)
     if current > SCHEMA_VERSION:
         raise UnsupportedDatabaseError(
             f"this database was written at schema version {current}; "
@@ -277,5 +289,16 @@ def migrate(connection: sqlite3.Connection) -> int:
             # covers a failure that already rolled itself back.
             with suppress(sqlite3.OperationalError):
                 connection.execute("ROLLBACK")
+            if _version(connection) > version:
+                # Somebody else applied it while we were queueing for the write
+                # lock. Their transaction moved the version and ours failed on
+                # tables they had already created, which is a race we lost and
+                # not a database we cannot open.
+                continue
             raise
     return SCHEMA_VERSION
+
+
+def _version(connection: sqlite3.Connection) -> int:
+    value: int = connection.execute("PRAGMA user_version").fetchone()[0]
+    return value

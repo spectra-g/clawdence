@@ -15,6 +15,7 @@ import os
 import stat
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from clawdence.runners.engine import ContainerEngine
@@ -84,6 +85,10 @@ class FakeEngine:
     def oom(self) -> FakeEngine:
         """Report the next container as OOM-killed by the kernel."""
         return self._script("oom", "1")
+
+    def created_at(self, when: datetime) -> FakeEngine:
+        """Backdate the next container. The alternative is waiting a week."""
+        return self._script("created", when.isoformat().replace("+00:00", "Z"))
 
     def refuse_to_start(self, code: int = 125) -> FakeEngine:
         """Fail the way a client fails when the image is not there.
