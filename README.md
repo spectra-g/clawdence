@@ -308,6 +308,38 @@ Rate limiting, submitter authorisation and webhook signatures are **not here** �
 ingress trust boundary, and the size caps in this package are resource bounds rather than that
 control.
 
+## The dev loop
+
+[`src/clawdence/devloop/`](src/clawdence/devloop/) is the tooling that makes every other step's
+verification quick: get back to a clean environment, read the log, and check that the log and the
+state agree.
+
+```sh
+clawdence reset --dry-run              # what would go
+clawdence reset --keep-inbox           # runs, steps, log and debris go; requests stay
+clawdence replay RUN_ID                # rebuild the run from its log and diff it
+clawdence audit --run RUN_ID           # the timeline
+clawdence audit --dead-letters         # records that could not join it
+clawdence runs show RUN_ID             # steps, durations, and why one failed
+```
+
+- **A partial reset is the bug, not a smaller reset.** v1's `reset-pipeline.sh` cleared the
+  `.jsonl` event files and left `sessions.json` behind, and messages sent to those stale sessions
+  were *silently dropped*. In v2 the same shape is an `acknowledged` request whose run has been
+  deleted — collected by nothing, re-queued by nothing. So the default clears it, and
+  `--keep-inbox` puts anything already picked up **back in the queue** rather than leaving it in a
+  state nothing can act on.
+- **`reset` is a reaper sweep with every protection switched off.** `reap` reclaims what is
+  unclaimed *and* not recent; reset passes an empty live set and zero retentions, which turns both
+  questions off. That is why it asks before it acts, refuses while anything is still running, and
+  refuses rather than prompts when nothing is on a terminal.
+- **Replay compares; it does not restore.** ADR-0005 keeps state out of the log's hands, so the
+  fold happens in memory and the deliverable is the diff. What it actually catches is a writer that
+  changes state without recording it — the first run it was pointed at found two gaps in the
+  ledger's own payloads. Half the step record is unobservable by design (S4 keeps output and
+  messages out of the log), and the report names those fields rather than quietly not comparing
+  them.
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). It manages the Python version too, so nothing else

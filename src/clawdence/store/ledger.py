@@ -187,6 +187,12 @@ class SqliteLedger:
                 payload={
                     "attempt": result.attempt,
                     "status": result.status.value,
+                    # Repeated from the start event, and not redundant: a stage
+                    # skipped by a false guard never starts, so this is the only
+                    # record of what kind of step did not run. S20's replay found
+                    # it — the reconstruction could not say what a skipped stage
+                    # was, and neither could anybody reading the timeline.
+                    "type": result.type.value,
                     # The kind, never the message. Messages carry stderr tails
                     # and this log cannot un-write a pasted key — see ``audit``.
                     "error_kind": result.error.kind if result.error is not None else None,
@@ -243,6 +249,7 @@ class SqliteLedger:
                 payload={
                     "attempt": stale.attempt,
                     "status": StepStatus.CANCELLED.value,
+                    "type": stale.type.value,
                     "error_kind": _INTERRUPTED.kind,
                 },
             )

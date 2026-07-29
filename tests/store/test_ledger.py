@@ -102,11 +102,41 @@ class TestRecording:
     def test_the_payload_carries_the_error_kind_and_not_its_message(
         self, state: StateStore
     ) -> None:
-        """Messages carry stderr tails, and this log cannot un-write a key."""
+        """Messages carry stderr tails, and this log cannot un-write a key.
+
+        Asserted as the whole payload rather than field by field: what is being
+        held is that nothing *else* got in, and a check that only looks at the
+        fields it expects cannot see the one it does not.
+        """
         wf = workflow(script("a"))
         go(state, wf, StubHandler(failure=StepFailure("script-exit", "sk-secret-leaked-here")))
         (finished,) = state.audit.read(run_id=RUN_ID, kinds=[EventKind.STEP_FINISHED])
-        assert finished.payload == {"attempt": 1, "status": "failed", "error_kind": "script-exit"}
+        assert finished.payload == {
+            "attempt": 1,
+            "status": "failed",
+            "type": "script",
+            "error_kind": "script-exit",
+        }
+
+    def test_a_skipped_stage_still_records_what_kind_of_step_it_was(
+        self, state: StateStore
+    ) -> None:
+        """The only place the type of a skipped stage appears.
+
+        A skipped stage never starts, so there is no ``step.started`` carrying
+        it. S20's replay is what found this: the reconstruction could not say
+        what a skipped stage was, and neither could anyone reading the timeline.
+        """
+        wf = workflow(script("a"), script("b", when='$a.json.size == "L"'))
+        go(state, wf, StubHandler(output={"size": "M"}))
+        skipped = [
+            event
+            for event in state.audit.read(run_id=RUN_ID, kinds=[EventKind.STEP_FINISHED])
+            if event.stage_id == "b"
+        ]
+        assert [event.payload for event in skipped] == [
+            {"attempt": 1, "status": "skipped", "type": "script", "error_kind": "skipped"}
+        ]
 
     def test_a_skipped_stage_is_still_written(self, state: StateStore) -> None:
         wf = workflow(script("a"), script("b", when='$a.json.size == "L"'))

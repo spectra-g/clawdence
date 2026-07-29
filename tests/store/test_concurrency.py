@@ -18,7 +18,7 @@ import pytest
 
 from clawdence.domain import Run, RunStatus, StepStatus
 from clawdence.store import ConcurrentUpdateError, DuplicateAttemptError, StateStore
-from tests.store.conftest import StoreFactory
+from tests.conftest import StoreFactory
 from tests.store.factories import RUN_ID, at, make_run, make_step, running_step
 
 

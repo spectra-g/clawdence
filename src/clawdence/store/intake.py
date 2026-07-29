@@ -392,6 +392,33 @@ class Intake:
                 acknowledged += cursor.rowcount
         return acknowledged
 
+    def unacknowledge(self, *, at: datetime | None = None) -> int:
+        """Put every acknowledged request back in the queue. Returns how many.
+
+        The inverse of ``acknowledge``, and it exists for one caller:
+        ``clawdence reset`` asked to keep the inbox. An acknowledged row means
+        "handed to the pipeline", and once the runs are gone there is no
+        pipeline holding it — so a request left in that state is one nobody will
+        ever work on and nothing will ever re-queue. That is v1's
+        ``sessions.json`` bug in different clothing, which is why this is a verb
+        rather than something the reset command open-codes.
+
+        ``acknowledged_revision`` is cleared with the state. Keeping it would
+        make every listing say "picked up at revision 1", implying something is
+        working from that version when nothing is running at all.
+
+        Deliberately not audited: the only caller is about to delete the log.
+        """
+        moment = at or self._clock()
+        with transaction(self._store.connection) as connection:
+            cursor = connection.execute(
+                "UPDATE intake SET state = ?, acknowledged_at = NULL, "
+                "acknowledged_revision = NULL, updated_at = ? WHERE state = ?",
+                (ArrivalState.PENDING.value, iso(moment), ArrivalState.ACKNOWLEDGED.value),
+            )
+        count: int = cursor.rowcount
+        return count
+
     # ---------------------------------------------------------------- reads
 
     def get(self, key: str) -> Admission | None:

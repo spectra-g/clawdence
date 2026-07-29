@@ -17,11 +17,21 @@ control that overstates itself is worse than none:
   allowlist's job (S7b) and it is a different mechanism for a different threat.
 - **Deliberately allowed**: AF_UNIX. Local IPC is not egress, and from S7 the
   Docker daemon socket is how a container gets started at all.
+
+The store openers live here rather than beside the store tests because two
+packages now need them (S20's dev loop reads the same database the store writes).
+They are factories rather than a single object because a few tests need two
+connections to the same file on purpose: concurrency has to be observed from
+outside one connection to be observed at all. And they are fixtures rather than
+helpers because this project runs with warnings as errors — an unclosed SQLite
+connection is a ``ResourceWarning`` and therefore a failing build, and closing
+by hand works right up until the test that raises before it gets there.
 """
 
 from __future__ import annotations
 
 import socket
+import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -29,6 +39,7 @@ from typing import Any
 import pytest
 
 from clawdence.domain import BuildSystem
+from clawdence.store import IN_MEMORY, Redactor, StateStore, connect, unscreened
 from tests.harness.cassette import Cassette, Mode
 from tests.harness.cleanup import Reaper
 from tests.harness.repos import FixtureRepo, build_repo, git_available
@@ -137,6 +148,53 @@ def workspace(tmp_path: Path, reaper: Reaper) -> Path:
 
     reaper.register(f"workspace {root}", release)
     return root
+
+
+ConnectionFactory = Callable[..., sqlite3.Connection]
+StoreFactory = Callable[..., StateStore]
+
+
+@pytest.fixture
+def connections() -> Iterator[ConnectionFactory]:
+    opened: list[sqlite3.Connection] = []
+
+    def open_connection(path: Path | str = IN_MEMORY) -> sqlite3.Connection:
+        connection = connect(path)
+        opened.append(connection)
+        return connection
+
+    yield open_connection
+    for connection in opened:
+        connection.close()
+
+
+@pytest.fixture
+def db(connections: ConnectionFactory) -> sqlite3.Connection:
+    return connections()
+
+
+@pytest.fixture
+def stores() -> Iterator[StoreFactory]:
+    opened: list[StateStore] = []
+
+    def open_store(
+        path: Path | str = IN_MEMORY,
+        *,
+        redactor: Redactor = unscreened,
+        conflict_window: Callable[[], None] = lambda: None,
+    ) -> StateStore:
+        store = StateStore.open(path, redactor=redactor, conflict_window=conflict_window)
+        opened.append(store)
+        return store
+
+    yield open_store
+    for store in opened:
+        store.close()
+
+
+@pytest.fixture
+def state(stores: StoreFactory) -> StateStore:
+    return stores()
 
 
 RepoFactory = Callable[..., FixtureRepo]

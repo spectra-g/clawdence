@@ -146,7 +146,7 @@ class TestRunsCommands:
         assert main(["runs", "show", run_id, "--state", str(state)]) == 0
         out = capsys.readouterr().out
         assert "classify" in out
-        assert "audit records" in out
+        assert "audit record(s)" in out
 
     def test_show_of_an_unknown_run_is_refused(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -654,6 +654,270 @@ class TestSubmit:
     ) -> None:
         assert main(["inbox", "list", "--state", self.db(tmp_path)]) == 0
         assert "nothing submitted" in capsys.readouterr().out
+
+
+class TestDevLoop:
+    """Reset, replay and the audit view, from the command line.
+
+    Every test points ``--state`` at a temporary database and never passes
+    ``--caches``: ``reset`` deletes things, and a suite that let it fall back to
+    the machine's real cache home would reclaim the developer's caches when it
+    runs. ``--yes`` throughout, because stdin under pytest is not a terminal and
+    the confirmation is one of the things being tested.
+    """
+
+    def state(self, tmp_path: Path) -> Path:
+        path = tmp_path / "state.db"
+        main(["run", "examples/toy.yaml", "--state", str(path)])
+        return path
+
+    # -------------------------------------------------------------- reset
+
+    def test_reset_returns_a_dirty_database_to_clean(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """S20's acceptance criterion: one command, dirty to clean."""
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state), "--yes"]) == 0
+        assert "removed" in capsys.readouterr().out
+
+        assert main(["runs", "list", "--state", str(state)]) == 0
+        assert "no runs recorded" in capsys.readouterr().out
+
+    def test_reset_without_a_terminal_refuses_rather_than_prompting(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Unattended is exactly where a destructive command should not guess.
+
+        pytest's stdin is not a tty, which makes this the default path here —
+        and the reason ``--yes`` is on every other test in the class.
+        """
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state)]) == 2
+        captured = capsys.readouterr()
+        assert "--yes" in captured.err
+        # And it still showed the list, so the refusal is informative rather
+        # than merely obstructive.
+        assert "would remove" in captured.out
+        assert main(["runs", "list", "--state", str(state)]) == 0
+        assert "toy@1.0.0" in capsys.readouterr().out
+
+    def test_reset_confirms_at_a_terminal(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        state = self.state(tmp_path)
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state)]) == 2
+        assert "nothing was removed" in capsys.readouterr().out
+
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        assert main(["reset", "--state", str(state)]) == 0
+        assert "removed" in capsys.readouterr().out
+
+    def test_a_dry_reset_changes_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state), "--dry-run"]) == 0
+        assert "would remove" in capsys.readouterr().out
+
+        assert main(["runs", "list", "--state", str(state)]) == 0
+        assert "toy@1.0.0" in capsys.readouterr().out
+
+    def test_reset_refuses_while_a_run_is_running(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = tmp_path / "state.db"
+        _abandon_a_step(state)
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state), "--yes"]) == 2
+        assert "--force" in capsys.readouterr().err
+
+        assert main(["reset", "--state", str(state), "--yes", "--force"]) == 0
+        assert "abandoned" in capsys.readouterr().out
+
+    def test_reset_keeps_the_inbox_when_asked(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        main(["submit", "--state", str(state), "--ref", "REQ-1", "--text", "do a thing"])
+        capsys.readouterr()
+
+        assert main(["reset", "--state", str(state), "--yes", "--keep-inbox"]) == 0
+        assert "kept the inbox" in capsys.readouterr().out
+
+        assert main(["inbox", "list", "--state", str(state)]) == 0
+        assert "REQ-1" in capsys.readouterr().out
+
+    def test_reset_removes_a_worktree_the_reaper_would_spare(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The difference between the two commands, at the surface.
+
+        A directory made a moment ago is inside the reaper's grace period, so
+        ``reap`` leaves it. ``reset`` is the operator saying no run owns it.
+        """
+        work = tmp_path / "work"
+        fresh = work / "run.recent"
+        fresh.mkdir(parents=True)
+
+        assert (
+            main(
+                ["reap", "--state", str(tmp_path / "s.db"), "--work-root", str(work), "--no-caches"]
+            )
+            == 0
+        )
+        assert fresh.exists()
+
+        assert (
+            main(["reset", "--state", str(tmp_path / "s.db"), "--work-root", str(work), "--yes"])
+            == 0
+        )
+        assert not fresh.exists()
+
+    # ------------------------------------------------------------- replay
+
+    def test_replay_agrees_with_the_run_it_describes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        run_id = _only_run_id(state)
+        capsys.readouterr()
+
+        assert main(["replay", run_id, "--state", str(state)]) == 0
+        out = capsys.readouterr().out
+        assert "the log and the stored state agree" in out
+        assert "not carried by the log" in out
+
+    def test_replay_exits_non_zero_on_a_divergence(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A script wrapping this needs to branch on the answer, and the answer
+        is that something wrote state without recording it."""
+        state = self.state(tmp_path)
+        run_id = _only_run_id(state)
+        with StateStore.open(state) as store:
+            (step, *_) = store.steps_for(run_id)
+            store.finish_step(step.model_copy(update={"status": StepStatus.FAILED}))
+        capsys.readouterr()
+
+        assert main(["replay", run_id, "--state", str(state)]) == 1
+        assert "divergence" in capsys.readouterr().out
+
+    def test_a_truncated_replay_says_it_did_not_compare(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["replay", _only_run_id(state), "--state", str(state), "--through", "3"]) == 0
+        assert "not compared" in capsys.readouterr().out
+
+    def test_replay_emits_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["replay", _only_run_id(state), "--state", str(state), "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["agrees"] is True
+
+    def test_replaying_a_run_that_never_existed_is_refused(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["replay", "run.x", "--state", str(tmp_path / "state.db")]) == 2
+        assert "run.x" in capsys.readouterr().err
+
+    # -------------------------------------------------------------- audit
+
+    def test_audit_shows_the_timeline(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["audit", "--state", str(state), "--run", _only_run_id(state)]) == 0
+        out = capsys.readouterr().out
+        assert "run.started" in out
+        assert "step.finished" in out
+
+    def test_audit_filters_by_kind_and_takes_the_newest(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["audit", "--state", str(state), "--kind", "run.finished", "--limit", "1"]) == 0
+        out = capsys.readouterr().out
+        assert "run.finished" in out
+        assert "most recent" in out
+
+    def test_audit_refuses_a_naive_instant(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Naive means "my timezone" to a person and "UTC" to the database, and
+        picking one silently makes the filter wrong by however many hours the
+        reader is from Greenwich."""
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["audit", "--state", str(state), "--since", "2026-01-01T00:00:00"]) == 2
+        assert "no timezone" in capsys.readouterr().err
+
+        assert main(["audit", "--state", str(state), "--since", "not-a-time"]) == 2
+        assert "ISO-8601" in capsys.readouterr().err
+
+    def test_audit_shows_parked_records(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = tmp_path / "state.db"
+        with StateStore.open(state) as store:
+            store.audit.submit({"not": "an event"}, at=datetime.now(UTC))
+        capsys.readouterr()
+
+        assert main(["audit", "--state", str(state), "--dead-letters"]) == 0
+        assert "from submit" in capsys.readouterr().out
+
+    def test_audit_emits_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["audit", "--state", str(state), "--json", "--limit", "2"]) == 0
+        assert len(json.loads(capsys.readouterr().out)) == 2
+
+    # ----------------------------------------------------------- runs show
+
+    def test_runs_show_carries_durations_and_the_error_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The message is here and not in the log, which is the point of both."""
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["runs", "show", _only_run_id(state), "--state", str(state)]) == 0
+        out = capsys.readouterr().out
+        assert "script-exit:" in out
+        assert "audit record(s)" in out
+
+    def test_runs_show_emits_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        state = self.state(tmp_path)
+        capsys.readouterr()
+
+        assert main(["runs", "show", _only_run_id(state), "--state", str(state), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["run"]["workflow"] == "toy"
+        assert payload["events"] > 0
 
 
 def _python_repo(root: Path) -> Path:

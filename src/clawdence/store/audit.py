@@ -176,27 +176,48 @@ class AuditLog:
         self,
         *,
         run_id: str | None = None,
+        work_item_id: str | None = None,
         kinds: Iterable[EventKind] | None = None,
+        since: datetime | None = None,
         limit: int | None = None,
+        tail: bool = False,
     ) -> tuple[Event, ...]:
-        """Records in ``seq`` order — the order they were written."""
+        """Records in ``seq`` order — the order they were written.
+
+        ``tail`` takes the *last* ``limit`` records rather than the first, and
+        still returns them oldest-first. It is not a nicety: a log viewer asked
+        for twenty lines wants the twenty most recent, and a ``LIMIT`` without
+        it silently answers a different question the longer the log gets — which
+        is the shape of bug that only shows up once there is enough history for
+        anybody to care.
+        """
         sql = "SELECT * FROM audit"
         clauses: list[str] = []
         params: list[Any] = []
         if run_id is not None:
             clauses.append("run_id = ?")
             params.append(run_id)
+        if work_item_id is not None:
+            clauses.append("work_item_id = ?")
+            params.append(work_item_id)
         if kinds is not None:
             wanted = [kind.value for kind in kinds]
             clauses.append(f"kind IN ({', '.join('?' for _ in wanted)})")
             params.extend(wanted)
+        if since is not None:
+            # A string comparison, and correct because ``iso`` writes UTC at
+            # fixed precision — which is the property ``schema`` keeps it for.
+            clauses.append("at >= ?")
+            params.append(iso(since))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY seq"
+        sql += " ORDER BY seq DESC" if tail else " ORDER BY seq"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         rows = self._connection.execute(sql, params).fetchall()
+        if tail:
+            rows.reverse()
         return tuple(codec.row_to_event(row) for row in rows)
 
     def dead_letters(self) -> tuple[DeadLetter, ...]:

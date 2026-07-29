@@ -7,7 +7,7 @@ from pydantic import JsonValue
 from clawdence.domain import EVENT_SCHEMA_VERSION, Actor, ActorKind, EventKind
 from clawdence.store import StateStore
 from clawdence.store.schema import iso
-from tests.store.conftest import StoreFactory
+from tests.conftest import StoreFactory
 from tests.store.factories import RUN_ID, at
 
 
@@ -39,6 +39,40 @@ class TestAppending:
         assert len(state.audit.read(run_id=RUN_ID)) == 2
         assert len(state.audit.read(kinds=[EventKind.RUN_STARTED])) == 2
         assert len(state.audit.read(limit=1)) == 1
+
+    def test_reading_filters_by_work_item_and_by_instant(self, state: StateStore) -> None:
+        """The two filters a person debugging actually has.
+
+        ``since`` is a string comparison against the stored column, which is
+        only correct because ``iso`` writes UTC at fixed precision — so this is
+        as much a test of that property as of the filter.
+        """
+        state.audit.record(EventKind.WORK_ITEM_RECEIVED, at=at(0), work_item_id="wi.one")
+        state.audit.record(EventKind.WORK_ITEM_RECEIVED, at=at(60), work_item_id="wi.two")
+        state.audit.record(EventKind.WORK_ITEM_ROUTED, at=at(120), work_item_id="wi.one")
+
+        assert len(state.audit.read(work_item_id="wi.one")) == 2
+        assert len(state.audit.read(since=at(60))) == 2
+        assert len(state.audit.read(work_item_id="wi.one", since=at(60))) == 1
+
+    def test_a_tail_takes_the_newest_and_still_reads_oldest_first(self, state: StateStore) -> None:
+        """The bug this exists to stop: ``LIMIT`` alone answers a different
+        question the longer the log gets, and looks identical on screen."""
+        for index in range(5):
+            state.audit.record(EventKind.STEP_STARTED, at=at(index), stage_id=f"s{index}")
+
+        assert [event.stage_id for event in state.audit.read(limit=2)] == ["s0", "s1"]
+        assert [event.stage_id for event in state.audit.read(limit=2, tail=True)] == ["s3", "s4"]
+
+    def test_a_tail_shorter_than_the_log_returns_everything_in_order(
+        self, state: StateStore
+    ) -> None:
+        state.audit.record(EventKind.RUN_STARTED, at=at(0), run_id=RUN_ID)
+        state.audit.record(EventKind.RUN_FINISHED, at=at(1), run_id=RUN_ID)
+        assert [event.kind for event in state.audit.read(limit=10, tail=True)] == [
+            EventKind.RUN_STARTED,
+            EventKind.RUN_FINISHED,
+        ]
 
     def test_the_actor_survives(self, state: StateStore) -> None:
         """Who decided is the question an audit trail is read to answer."""

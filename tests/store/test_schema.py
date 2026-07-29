@@ -9,7 +9,7 @@ import pytest
 
 from clawdence.store import SCHEMA_VERSION, UnsupportedDatabaseError, connect, migrate, transaction
 from clawdence.store.schema import IN_MEMORY, iso, parse_iso
-from tests.store.conftest import ConnectionFactory
+from tests.conftest import ConnectionFactory
 from tests.store.factories import at
 
 PARK = "INSERT INTO dead_letters (at, origin, reason, body) VALUES (?, ?, ?, ?)"

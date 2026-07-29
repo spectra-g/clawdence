@@ -26,8 +26,8 @@ from clawdence.store import (
     StoreControl,
     UnknownRunError,
 )
+from tests.conftest import StoreFactory
 from tests.ports.factories import run as await_
-from tests.store.conftest import StoreFactory
 from tests.store.factories import RUN_ID, at, make_run
 
 

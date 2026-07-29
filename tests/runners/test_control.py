@@ -59,7 +59,7 @@ TESTS_PASSED = {"reporter": "pytest-json-report", "total": 4, "passed": 4}
 def state_with_run() -> Iterator[StateStore]:
     """A store that already knows about ``run.test`` — the id every request uses.
 
-    Opened here rather than borrowed from ``tests/store/conftest``: that one is
+    Opened here rather than borrowed from ``tests/conftest``: that one is
     scoped to the store's own suite, and the project runs with warnings as
     errors, so an unclosed connection fails the build.
     """

@@ -20,6 +20,12 @@ the first one, and the only one whose arrival and whose consumption are
 guaranteed to be different processes. Everything Slack and GitHub will need —
 deduplication that survives a restart, edits, withdrawal, conversation
 threading — has to work here before there is a socket to hide it behind.
+
+``reset``, ``replay`` and ``audit`` arrive with the dev loop (S20). They are the
+commands that make every *other* step's verification quick, which is why the
+plan kept recommending they be pulled forward — and they are the reason the
+entry-point rule above holds under pressure: the alternative to a subcommand is
+a shell script in the repository root that opens the database itself.
 """
 
 from __future__ import annotations
@@ -36,7 +42,21 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from clawdence import __version__
-from clawdence.domain import RunStatus, WorkItemType, jsonschema
+from clawdence.devloop import (
+    ResetRefused,
+    render_dead_letters,
+    render_events,
+    render_events_json,
+    render_replay,
+    render_replay_json,
+    render_reset,
+    render_run,
+    render_run_json,
+    replay,
+    reset,
+)
+from clawdence.devloop import refusal as reset_refusal
+from clawdence.domain import EventKind, RunStatus, WorkItemType, jsonschema
 from clawdence.engine import (
     WorkflowLoadError,
     execute,
@@ -141,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show = runs_actions.add_parser("show", help="One run, step by step.")
     runs_show.add_argument("run_id", metavar="RUN_ID")
     _add_state_argument(runs_show)
+    runs_show.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the run and every step as JSON instead of a trace.",
+    )
 
     runs_recover = runs_actions.add_parser(
         "recover",
@@ -182,6 +208,105 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-caches",
         action="store_true",
         help="Leave dependency caches alone. Reclaiming one only costs a slow install.",
+    )
+
+    reset_parser = subcommands.add_parser(
+        "reset",
+        help="Empty the state database and remove what runs left on this machine.",
+    )
+    _add_state_argument(reset_parser)
+    reset_parser.add_argument(
+        "--work-root",
+        type=Path,
+        metavar="DIR",
+        help=(
+            f"Directory holding per-run worktrees (§3.3's {WORK_ROOT}). "
+            f"Omitted means worktrees are left alone — there is no safe guess."
+        ),
+    )
+    reset_parser.add_argument(
+        "--caches",
+        action="store_true",
+        help="Clear dependency caches too. Costs a slow install and makes nothing cleaner.",
+    )
+    reset_parser.add_argument(
+        "--keep-inbox",
+        action="store_true",
+        help="Keep submitted requests. Anything already picked up goes back in the queue.",
+    )
+    reset_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would go without removing anything.",
+    )
+    reset_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reset even while runs are still running, abandoning them.",
+    )
+    reset_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation. Required when nothing is on a terminal to ask.",
+    )
+
+    replay_parser = subcommands.add_parser(
+        "replay",
+        help="Rebuild a run from its audit log and compare it with what is stored.",
+    )
+    replay_parser.add_argument("run_id", metavar="RUN_ID")
+    _add_state_argument(replay_parser)
+    replay_parser.add_argument(
+        "--through",
+        type=int,
+        metavar="N",
+        help=(
+            "Fold only this run's first N events — what did it look like before "
+            "the stage that went wrong. Skips the comparison; see `replay`."
+        ),
+    )
+    replay_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the reconstruction and the divergences as JSON.",
+    )
+
+    audit = subcommands.add_parser("audit", help="Read the audit log.")
+    _add_state_argument(audit)
+    audit.add_argument("--run", metavar="RUN_ID", help="Only records for this run.")
+    audit.add_argument("--work-item", metavar="ID", help="Only records for this work item.")
+    audit.add_argument(
+        "--kind",
+        action="append",
+        default=[],
+        dest="kinds",
+        choices=tuple(kind.value for kind in EventKind),
+        metavar="KIND",
+        help="Only records of this kind. Repeatable.",
+    )
+    audit.add_argument(
+        "--since",
+        metavar="WHEN",
+        help="Only records at or after this ISO-8601 instant.",
+    )
+    audit.add_argument("--limit", type=int, default=50, metavar="N")
+    audit.add_argument(
+        "--all",
+        action="store_true",
+        dest="oldest_first",
+        help="Take the oldest N rather than the newest N.",
+    )
+    audit.add_argument(
+        "--dead-letters",
+        action="store_true",
+        help="Show records that could not join the log instead of the log itself.",
+    )
+    audit.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the records as JSON.",
     )
 
     submit = subcommands.add_parser(
@@ -617,24 +742,20 @@ def _runs_list(state: Path | None, *, status: str | None, limit: int) -> int:
     return 0
 
 
-def _runs_show(run_id: str, state: Path | None) -> int:
+def _runs_show(run_id: str, state: Path | None, *, as_json: bool = False) -> int:
     with StateStore.open(state or default_state_path()) as store:
         run = store.get_run(run_id)
         if run is None:
             print(f"no run with id {run_id!r} in this state database", file=sys.stderr)
             return 2
         steps = store.steps_for(run_id)
-        events = store.audit.read(run_id=run_id)
+        events = len(store.audit.read(run_id=run_id))
 
-    print(f"run {run.id}  workflow {run.workflow}@{run.workflow_version}")
-    print(f"work item {run.work_item_id}  status {run.status.value}")
-    print("")
-    for step in steps:
-        detail = f"  {step.error.kind}: {step.error.message}" if step.error else ""
-        attempt = f" (attempt {step.attempt})" if step.attempt > 1 else ""
-        print(f"  {step.status.value:<10} {step.stage_id} [{step.type.value}]{attempt}{detail}")
-    print("")
-    print(f"{len(events)} audit records")
+    print(
+        render_run_json(run, steps, events=events)
+        if as_json
+        else render_run(run, steps, events=events)
+    )
     return 0
 
 
@@ -711,6 +832,158 @@ def _reap_command(
     return 1 if reclaimed.failed else 0
 
 
+def _reset_command(
+    state: Path | None,
+    *,
+    work_root: Path | None,
+    caches: bool,
+    keep_inbox: bool,
+    dry_run: bool,
+    force: bool,
+    yes: bool,
+) -> int:
+    """Back to clean, with the list shown before anything goes.
+
+    The plan is computed with a dry sweep, printed, and only then confirmed —
+    so what is being agreed to is the actual list rather than a sentence about
+    it. It is deliberately computed twice: the second sweep is what removes
+    things, and having it re-decide means a container that started between the
+    question and the answer is not removed on the strength of a stale list.
+
+    A non-terminal stdin refuses instead of prompting. The command is destructive
+    and unattended is exactly where it should not be guessing, so a CI job or a
+    pipe has to say ``--yes`` — which is a thing somebody typed once, on purpose.
+    """
+    now = datetime.now(UTC)
+    path = state or default_state_path()
+    cache = Cache.default() if caches else None
+
+    with StateStore.open(path) as store:
+        plan = asyncio.run(
+            reset(
+                store,
+                at=now,
+                work_root=work_root,
+                cache=cache,
+                keep_inbox=keep_inbox,
+                force=True,
+                dry_run=True,
+            )
+        )
+        if plan.abandoned and not force and not dry_run:
+            print(reset_refusal(plan.abandoned), file=sys.stderr)
+            return 2
+        if dry_run:
+            print(render_reset(plan))
+            return 0
+
+        if not yes:
+            print(render_reset(plan))
+            if not sys.stdin.isatty():
+                print(
+                    "\nreset removes all of the above and cannot be undone; "
+                    "pass --yes to confirm without a terminal",
+                    file=sys.stderr,
+                )
+                return 2
+            answer = input(f"\nremove all of this from {path}? [y/N] ")
+            if answer.strip().lower() not in {"y", "yes"}:
+                print("nothing was removed")
+                return 2
+
+        try:
+            done = asyncio.run(
+                reset(
+                    store,
+                    at=now,
+                    work_root=work_root,
+                    cache=cache,
+                    keep_inbox=keep_inbox,
+                    force=force,
+                )
+            )
+        except ResetRefused as exc:
+            print(exc, file=sys.stderr)
+            return 2
+
+    print(render_reset(done))
+    return 1 if done.debris.failed else 0
+
+
+def _replay_command(
+    run_id: str,
+    state: Path | None,
+    *,
+    through: int | None,
+    as_json: bool,
+) -> int:
+    """Fold the log, diff it, and exit on whether the two agree.
+
+    Non-zero for a divergence, because that is the finding: something changed
+    state without recording it, or recorded something it did not do. A truncated
+    replay exits 0 — it made no claim, and failing there would train whoever
+    scripted it to ignore the status.
+    """
+    with StateStore.open(state or default_state_path()) as store:
+        if store.get_run(run_id) is None and not store.audit.read(run_id=run_id):
+            print(
+                f"no run with id {run_id!r} in this state database, and nothing "
+                f"in the log for it either",
+                file=sys.stderr,
+            )
+            return 2
+        result = replay(store, run_id, through=through)
+
+    print(render_replay_json(result) if as_json else render_replay(result))
+    return 1 if result.divergences else 0
+
+
+def _audit_command(
+    state: Path | None,
+    *,
+    run_id: str | None,
+    work_item_id: str | None,
+    kinds: Sequence[str],
+    since: str | None,
+    limit: int,
+    oldest_first: bool,
+    dead_letters: bool,
+    as_json: bool,
+) -> int:
+    moment: datetime | None = None
+    if since is not None:
+        try:
+            moment = datetime.fromisoformat(since)
+        except ValueError:
+            print(f"{since!r} is not an ISO-8601 instant", file=sys.stderr)
+            return 2
+        if moment.tzinfo is None:
+            # Naive means "in my timezone" to a person and "in UTC" to the
+            # database, and picking one silently makes the filter wrong by
+            # however many hours the reader happens to be from Greenwich.
+            print(
+                f"{since!r} has no timezone — say +00:00, or Z, or your own offset",
+                file=sys.stderr,
+            )
+            return 2
+
+    with StateStore.open(state or default_state_path()) as store:
+        if dead_letters:
+            print(render_dead_letters(store.audit.dead_letters()))
+            return 0
+        events = store.audit.read(
+            run_id=run_id,
+            work_item_id=work_item_id,
+            kinds=[EventKind(kind) for kind in kinds] if kinds else None,
+            since=moment,
+            limit=limit,
+            tail=not oldest_first,
+        )
+
+    print(render_events_json(events) if as_json else render_events(events, tail=not oldest_first))
+    return 0
+
+
 def await_sweep(reaper: Reaper, live: Sequence[str], *, dry_run: bool) -> Reclaimed:
     """``asyncio.run`` in one named place, because the reaper talks to a daemon.
 
@@ -738,7 +1011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.runs_command == "list":
             return _runs_list(args.state, status=args.status, limit=args.limit)
         if args.runs_command == "show":
-            return _runs_show(args.run_id, args.state)
+            return _runs_show(args.run_id, args.state, as_json=args.as_json)
         if args.runs_command == "recover":
             return _runs_recover(args.state, dry_run=args.dry_run)
         parser.parse_args(["runs", "--help"])
@@ -751,6 +1024,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             work_root=args.work_root,
             older_than=args.older_than,
             no_caches=args.no_caches,
+        )
+
+    if args.command == "reset":
+        return _reset_command(
+            args.state,
+            work_root=args.work_root,
+            caches=args.caches,
+            keep_inbox=args.keep_inbox,
+            dry_run=args.dry_run,
+            force=args.force,
+            yes=args.yes,
+        )
+
+    if args.command == "replay":
+        return _replay_command(
+            args.run_id,
+            args.state,
+            through=args.through,
+            as_json=args.as_json,
+        )
+
+    if args.command == "audit":
+        return _audit_command(
+            args.state,
+            run_id=args.run,
+            work_item_id=args.work_item,
+            kinds=args.kinds,
+            since=args.since,
+            limit=args.limit,
+            oldest_first=args.oldest_first,
+            dead_letters=args.dead_letters,
+            as_json=args.as_json,
         )
 
     if args.command == "submit":
