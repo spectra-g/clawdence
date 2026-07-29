@@ -44,6 +44,7 @@ import pytest
 from clawdence.domain import RunnerRequest, WorkItem
 from clawdence.ports import (
     ContextPort,
+    ControlPort,
     IngestPort,
     KnowledgeKind,
     NotifyPort,
@@ -667,6 +668,70 @@ class ContextContract:
         assert run(context.retrieve("nothing here matches")) == ()
 
 
+class ControlContract:
+    """A claim is a delivery, the order is the claim rule, and nothing repeats.
+
+    Worth a shared contract rather than two suites for the reason the module
+    docstring gives, and with one specific to this port: the in-memory
+    implementation is what runner tests are written against, so a fake that
+    redelivers or that sorts differently would hide precisely the bugs the
+    durable one exists to prevent. Both are held to the same sentences here.
+    """
+
+    pytestmark = pytest.mark.contract
+
+    @pytest.fixture
+    def control(self) -> ControlPort:
+        raise NotImplementedError
+
+    def send(self, control: ControlPort, body: str, *, priority: int = 0) -> None:
+        """Queue a message. The two adapters spell this differently — one takes
+        an instant, the other has a clock — so the contract asks for a verb
+        rather than for a signature."""
+        raise NotImplementedError
+
+    def test_an_empty_inbox_is_an_empty_signal(self, control: ControlPort) -> None:
+        signal = run(control.poll(make.RUN_ID))
+        assert signal.messages == ()
+        assert signal.cancel is None
+
+    def test_a_message_comes_back_on_the_next_poll(self, control: ControlPort) -> None:
+        self.send(control, "use the existing parser")
+        (message,) = run(control.poll(make.RUN_ID)).messages
+        assert message.body == "use the existing parser"
+
+    def test_a_claimed_message_is_never_claimed_again(self, control: ControlPort) -> None:
+        """Delivering an instruction twice is following it twice."""
+        self.send(control, "revert that")
+        assert len(run(control.poll(make.RUN_ID)).messages) == 1
+        assert run(control.poll(make.RUN_ID)).messages == ()
+
+    def test_priority_outranks_arrival(self, control: ControlPort) -> None:
+        self.send(control, "queued")
+        self.send(control, "urgent", priority=10)
+        assert [m.body for m in run(control.poll(make.RUN_ID)).messages] == ["urgent", "queued"]
+
+    def test_arrival_orders_within_a_priority_class(self, control: ControlPort) -> None:
+        self.send(control, "first")
+        self.send(control, "second")
+        assert [m.body for m in run(control.poll(make.RUN_ID)).messages] == ["first", "second"]
+
+    def test_ordinals_are_the_claim_order_and_start_at_one(self, control: ControlPort) -> None:
+        """They name the file the agent reads, so they have to be the delivery
+        order and not the arrival order."""
+        self.send(control, "queued")
+        self.send(control, "urgent", priority=1)
+        assert [m.ordinal for m in run(control.poll(make.RUN_ID)).messages] == [1, 2]
+
+    def test_polling_a_run_nobody_has_heard_of_is_empty(self, control: ControlPort) -> None:
+        """A runner asking about an unknown run must not have its work killed
+        over it."""
+        assert run(control.poll("run.never-existed")).messages == ()
+
+    def test_a_heartbeat_is_accepted(self, control: ControlPort) -> None:
+        run(control.heartbeat(make.RUN_ID, at=make.at(1)))
+
+
 # --------------------------------------------------------------------------- #
 # Null adapters
 # --------------------------------------------------------------------------- #
@@ -722,6 +787,7 @@ class NullAdapterContract:
 __all__ = [
     "Call",
     "ContextContract",
+    "ControlContract",
     "IngestContract",
     "NotifyContract",
     "NullAdapterContract",

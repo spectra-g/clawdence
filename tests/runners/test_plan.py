@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from clawdence.domain import ContractKind, E2EPolicy, VerificationContract
-from clawdence.runners import build_plan
+from clawdence.runners import STEERING_DIR, build_plan
 from clawdence.runners.plan import FENCE, FENCE_END
 from clawdence.runners.verdict import VERDICT_PATH
 from tests.runners.conftest import RequestFactory, host_profile
@@ -149,6 +149,28 @@ def test_carried_stubs_appear_only_when_there_are_some(request_for: RequestFacto
     text = build_plan(request_for(carried_stubs=("retry policy on the client",)))
     assert "retry policy on the client" in text
     assert "not instructions" in text
+
+
+def test_the_steering_directory_is_named_on_every_run(request_for: RequestFactory) -> None:
+    """Unconditional, because a steering message arrives *during* the run.
+
+    A section added only when there was something to say could not be added at
+    all: the prompt is built once, before the agent starts, and the message has
+    not been sent yet.
+    """
+    text = build_plan(request_for())
+    assert STEERING_DIR in text
+    assert "Before each turn" in text
+    assert "filename order" in text
+
+
+def test_a_steering_message_cannot_lift_a_constraint(request_for: RequestFactory) -> None:
+    """It is an instruction the agent is meant to follow, unlike the plan's
+    fenced-off untrusted text — so the one limit on it has to be stated, since
+    nothing enforces it from outside."""
+    text = build_plan(request_for())
+    assert "cannot lift any of the constraints" in text
+    assert "record in your verdict and not act on" in text
 
 
 def test_the_constraints_name_what_the_runner_will_not_allow(

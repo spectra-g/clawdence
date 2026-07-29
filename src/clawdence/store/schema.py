@@ -136,6 +136,44 @@ _MIGRATIONS: Final[tuple[str, ...]] = (
         tries   INTEGER NOT NULL DEFAULT 1
     ) STRICT;
     """,
+    # 2 — S6c: what the outside world can say to a run that is already going.
+    """
+    CREATE TABLE steering (
+        -- Total order of arrival, assigned by the database, for the same reason
+        -- ``audit`` has one: FIFO within a priority class has to be anchored on
+        -- something a clock cannot make ambiguous.
+        seq          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        id           TEXT    NOT NULL UNIQUE,
+        run_id       TEXT    NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        -- Higher first. Signed, so "before everything already queued" needs no
+        -- renumbering of what is queued.
+        priority     INTEGER NOT NULL DEFAULT 0,
+        state        TEXT    NOT NULL,
+        body         TEXT    NOT NULL,
+        sender       TEXT    NOT NULL,
+        created_at   TEXT    NOT NULL,
+        delivered_at TEXT,
+        closed_at    TEXT,
+        -- Claim order within the run, assigned when the message is claimed. It
+        -- is what names the file the agent reads, so the order the inbox chose
+        -- survives into a directory listing.
+        ordinal      INTEGER,
+        reason       TEXT
+    ) STRICT;
+
+    -- The claim: one run's unread messages, already in the order they go out.
+    CREATE INDEX steering_claim ON steering (run_id, state, priority DESC, seq);
+
+    CREATE TABLE cancellations (
+        -- One per run, and the primary key is what says so: a second request to
+        -- stop the same run is the same request, not another one.
+        run_id          TEXT NOT NULL PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
+        requested_at    TEXT NOT NULL,
+        requested_by    TEXT NOT NULL,
+        reason          TEXT NOT NULL,
+        acknowledged_at TEXT
+    ) STRICT;
+    """,
 )
 
 #: The schema version this build writes and expects.

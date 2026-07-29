@@ -6,7 +6,7 @@ the I/O contract from the plan's §3.9 that every one of them shares.
 
 The layering is one-directional, as elsewhere::
 
-    verdict ─ worktree ─ stream ─ process ─ turns ─ installed
+    verdict ─ worktree ─ stream ─ process ─ turns ─ installed ─ steering
        └─ plan
        └─ outcome
             └─ agent
@@ -38,6 +38,15 @@ the bytes the runner writes into the worktree, because "the tree is dirty" only
 means the agent left work behind if the dirt is not our own plan and conventions
 file, and because a repository that tracks a file at the path we install to gets
 our copy swept into its pull request otherwise (§3.9).
+
+S6c added ``steering``, which is the channel *into* a run (§3.11). It is a
+directory of files under the one the runner already owns, and it is a directory
+of files because the container tier's isolation claim is that the worktree bind
+mount is the only thing the agent can see — a second transport would be a second
+hole in the boundary S7 spent a step closing. What polls for those messages,
+what carries the run's liveness back out, and what stops a run somebody
+cancelled from outside are all one loop in ``agent``, because all three are
+periodic and none of them is triggered by the agent saying anything.
 
 Wiring one to a real CLI is configuration rather than code, because the runner
 CLIs move faster than this system will and hardcoding somebody else's flag names
@@ -105,6 +114,7 @@ from clawdence.runners.host import INHERITED_ENV, HostRunner
 from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
 from clawdence.runners.outcome import Completion, classify
 from clawdence.runners.plan import build as build_plan
+from clawdence.runners.steering import STEERING_DIR
 from clawdence.runners.stream import (
     Accumulation,
     LogLine,
@@ -135,6 +145,7 @@ __all__ = [
     "MAX_VERDICT_BYTES",
     "PLAN_PATH",
     "RETRYABLE",
+    "STEERING_DIR",
     "VERDICT_PATH",
     "WORK_DIR",
     "WORK_ROOT",

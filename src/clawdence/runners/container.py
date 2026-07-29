@@ -66,6 +66,7 @@ from typing import ClassVar, Final
 
 from clawdence.domain import BuildSystem, IsolationTier, RunnerRequest
 from clawdence.ports._common import Clock, utc_now
+from clawdence.ports.control import DEFAULT_POLL_SECONDS, ControlPort
 from clawdence.ports.errors import PermanentError
 from clawdence.ports.secrets import SecretProvider
 from clawdence.runners import worktree as wt
@@ -155,6 +156,8 @@ class ContainerRunner(AgentRunner):
         clock: Clock = utc_now,
         identity: wt.GitIdentity = wt.DEFAULT_IDENTITY,
         environ: Mapping[str, str] | None = None,
+        control: ControlPort | None = None,
+        poll_seconds: float = DEFAULT_POLL_SECONDS,
         user: str | None = None,
         network: str = "bridge",
         read_only_rootfs: bool = True,
@@ -168,6 +171,8 @@ class ContainerRunner(AgentRunner):
             clock=clock,
             identity=identity,
             environ=environ,
+            control=control,
+            poll_seconds=poll_seconds,
         )
         self._image = image
         self._images = dict(images or {})

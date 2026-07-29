@@ -1,6 +1,6 @@
 """The edges of the system — every interface that talks to something else.
 
-Seven ports, and the rule they exist to enforce is one sentence: **nothing above
+Eight ports, and the rule they exist to enforce is one sentence: **nothing above
 this package knows what service it is talking to.** The pipeline opens a pull
 request; whether that is GitHub, a local git remote or a dictionary is decided
 once, at startup, in ``Ports``. v1 had GitHub's API shape, Slack's message
@@ -8,11 +8,18 @@ format and Jira's transition ids spread through a 5,107-line orchestrator, which
 is why it could not be tested without credentials and could not be run without
 all three services.
 
+``control`` (S6c) is the one that points inwards rather than outwards: the thing
+on the other side of it is the control plane's own store, and the caller is the
+runner. It is a port for the same reason as the rest — the runner must not know
+how a steering message is persisted — and it is the only one whose absence has a
+default that quietly does nothing, because a run nobody can steer is a real
+configuration rather than a broken one.
+
 The layering is one-directional, as in ``domain``, ``engine`` and ``store``::
 
     errors ─ _common
       └─ secrets
-      └─ ingest · notify · tracker · vcs · runner · context
+      └─ ingest · notify · tracker · vcs · runner · context · control
                        └─ outbox
                             └─ __init__ (the ``Ports`` bundle)
 
@@ -51,6 +58,16 @@ from clawdence.ports.context import (
     KnowledgeKind,
     NullContext,
     Retrieval,
+)
+from clawdence.ports.control import (
+    DEFAULT_POLL_SECONDS,
+    MAX_STEERING_CHARS,
+    Cancellation,
+    ControlPort,
+    InMemoryControl,
+    NoControl,
+    Signal,
+    Steer,
 )
 from clawdence.ports.errors import (
     OutboxFullError,
@@ -125,6 +142,7 @@ class Ports:
     tracker: TrackerPort = field(default_factory=NullTracker)
     context: ContextPort = field(default_factory=NullContext)
     secrets: SecretProvider = field(default_factory=NullSecrets)
+    control: ControlPort = field(default_factory=NoControl)
 
     @classmethod
     def fakes(cls) -> Ports:
@@ -147,17 +165,23 @@ class Ports:
             tracker=InMemoryTracker(),
             context=InMemoryContext(),
             secrets=StaticSecrets(),
+            control=InMemoryControl(),
         )
 
 
 __all__ = [
+    "DEFAULT_POLL_SECONDS",
+    "MAX_STEERING_CHARS",
     "REDACTED",
     "Branch",
+    "Cancellation",
     "ContextPort",
+    "ControlPort",
     "EnvSecrets",
     "FakeRunner",
     "FlushReport",
     "InMemoryContext",
+    "InMemoryControl",
     "InMemoryIngest",
     "InMemoryTracker",
     "InMemoryVcs",
@@ -165,6 +189,7 @@ __all__ = [
     "KnowledgeItem",
     "KnowledgeKind",
     "MergeMethod",
+    "NoControl",
     "Notification",
     "NotificationKind",
     "NotifyPort",
@@ -187,8 +212,10 @@ __all__ = [
     "Secret",
     "SecretNotFoundError",
     "SecretProvider",
+    "Signal",
     "StaleMergeError",
     "StaticSecrets",
+    "Steer",
     "Ticket",
     "TicketState",
     "TrackerPort",

@@ -37,7 +37,38 @@ class TestMigrations:
         names = {
             row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert {"runs", "steps", "audit", "dead_letters"} <= names
+        assert {
+            "runs",
+            "steps",
+            "audit",
+            "dead_letters",
+            "steering",
+            "cancellations",
+        } <= names
+
+    def test_a_database_from_an_older_build_is_migrated_forward(
+        self, connections: ConnectionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """S6c's tables arrive on a database that already has runs in it.
+
+        Written as a real downgrade-then-upgrade rather than a hand-carved v1
+        file: what a migration has to survive is a database that was *written*
+        by the earlier build, and a fixture typed out by hand is a guess about
+        what that looked like.
+        """
+        path = tmp_path / "state.db"
+        first = connections(path)
+        park(first)
+        first.execute("DROP TABLE steering")
+        first.execute("DROP TABLE cancellations")
+        first.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+        first.close()
+
+        second = connections(path)
+
+        assert user_version(second) == SCHEMA_VERSION
+        assert parked(second) == 1
+        assert second.execute("SELECT count(*) FROM steering").fetchone()[0] == 0
 
     def test_migrating_again_changes_nothing(self, db: sqlite3.Connection) -> None:
         park(db)

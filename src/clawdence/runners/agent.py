@@ -67,10 +67,18 @@ from clawdence.domain import (
     TokenUsage,
 )
 from clawdence.ports._common import Clock, utc_now
+from clawdence.ports.control import (
+    DEFAULT_POLL_SECONDS,
+    Cancellation,
+    ControlPort,
+    NoControl,
+    Signal,
+)
 from clawdence.ports.errors import PermanentError
 from clawdence.ports.runner import validate_result
 from clawdence.ports.secrets import NullSecrets, SecretProvider
 from clawdence.runners import plan as plan_text
+from clawdence.runners import steering
 from clawdence.runners import verdict as verdict_file
 from clawdence.runners import worktree as wt
 from clawdence.runners.installed import HOME_DIR, PLAN_PATH, WORK_DIR, Installed
@@ -231,9 +239,11 @@ class AgentRunner(ABC):
     __slots__ = (
         "_clock",
         "_command",
+        "_control",
         "_environ",
         "_identity",
         "_inflight",
+        "_poll_seconds",
         "_secrets",
         "_settled",
         "_sink",
@@ -249,6 +259,8 @@ class AgentRunner(ABC):
         clock: Clock = utc_now,
         identity: wt.GitIdentity = wt.DEFAULT_IDENTITY,
         environ: Mapping[str, str] | None = None,
+        control: ControlPort | None = None,
+        poll_seconds: float = DEFAULT_POLL_SECONDS,
     ) -> None:
         self._command = command
         self._secrets: SecretProvider = NullSecrets() if secrets is None else secrets
@@ -259,6 +271,11 @@ class AgentRunner(ABC):
         self._settled: dict[str, RunnerResult] = {}
         self._inflight: dict[str, asyncio.Task[RunnerResult]] = {}
         self._stopping: set[str] = set()
+        # ``NoControl`` rather than ``None`` so the poll loop has one shape: a
+        # runner nobody wired a control plane to still runs it, still learns
+        # nothing, and does not grow a branch that only the wired case exercises.
+        self._control: ControlPort = NoControl() if control is None else control
+        self._poll_seconds = poll_seconds
 
     # ------------------------------------------------------------------ port
 
@@ -413,6 +430,10 @@ class AgentRunner(ABC):
         installed = Installed(worktree=worktree)
         (worktree / HOME_DIR).mkdir(parents=True, exist_ok=True)
         verdict_file.clear(worktree)
+        # Empty, and before the agent starts: the plan tells it to look here
+        # every turn, and an instruction about a path that does not exist is one
+        # the agent spends a turn interpreting.
+        steering.prepare(worktree)
 
         conventions = self._install_conventions(request, installed)
         excluded = [f"/{WORK_DIR}/"] + ([f"/{conventions}"] if conventions else [])
@@ -533,6 +554,15 @@ class AgentRunner(ABC):
         )
         limit, limit_is_budget = _wall_clock(request)
 
+        # The channel *into* the run (§3.11), and the only thing in this method
+        # that is not about the process itself. It runs beside the drive rather
+        # than inside it because both halves of what it does are periodic and
+        # neither is triggered by output arriving: a message waiting in the
+        # inbox has to be picked up by a run that is saying nothing, and a run
+        # that is saying nothing is precisely the case the heartbeat exists to
+        # make visible.
+        attending = asyncio.create_task(self._attend(request, worktree, process, watcher))
+
         timed_out = False
         try:
             await asyncio.wait_for(self._drive(process, feed, watcher), timeout=limit)
@@ -543,15 +573,26 @@ class AgentRunner(ABC):
             await self._halt(request, process)
             raise
         finally:
+            attending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await attending
             if halting is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await halting
 
+        stopped = watcher.cancelled
         completion = Completion(
             exit_code=process.returncode,
+            # A stop from outside outranks everything the process did on its way
+            # down. It also outranks the timeout: a run cancelled at 29 minutes
+            # of a 30-minute limit exits killed, and reporting that as a timeout
+            # would send it back through a retry policy written for a run nobody
+            # stopped.
+            cancelled=stopped is not None,
+            cancelled_because=None if stopped is None else stopped.reason,
             timed_out=timed_out and not limit_is_budget,
             budget_exceeded=watcher.overspent or (timed_out and limit_is_budget),
-            killed_by_us=timed_out or watcher.overspent,
+            killed_by_us=timed_out or watcher.overspent or stopped is not None,
             stderr_tail=watcher.stderr.last(),
             # §3.7a: the two things the exit status cannot say. Both come off the
             # stream that was already being read for tokens — reading it twice
@@ -560,6 +601,63 @@ class AgentRunner(ABC):
             model_turn_seen=watcher.turns.model_turn_seen,
         )
         return await self._observe(request, completion)
+
+    async def _attend(
+        self,
+        request: RunnerRequest,
+        worktree: Path,
+        process: asyncio.subprocess.Process,
+        watcher: _Watcher,
+    ) -> None:
+        """Carry messages in and liveness out, while the agent works (§3.11).
+
+        Cancelled by ``_run_agent`` when the drive finishes, so this loops
+        forever on purpose and has no exit condition of its own — except a stop,
+        which is the one thing it is allowed to decide.
+
+        **A heartbeat only when something was actually heard.** The instant
+        reported is the arrival time of the newest line, not now, and a poll that
+        has heard nothing new since the last one reports nothing at all. A timer
+        that beat regardless would make a wedged run look healthy for as long as
+        it stayed wedged, which is the exact reporting Warren's incident had and
+        the reason §3.11 asks for a second detector rather than a second budget.
+
+        **A control plane that cannot be reached does not fail a run.** Steering
+        is an improvement on a run that is otherwise working; killing work in
+        progress because the database was busy would make the feature more
+        dangerous than its absence.
+        """
+        while True:
+            await asyncio.sleep(self._poll_seconds)
+            signal = await self._exchange(request, watcher)
+            if signal.messages:
+                steering.deliver(worktree, signal.messages)
+            if signal.cancel is not None:
+                # Latched on the watcher rather than returned, because the drive
+                # is what finishes the run and it needs to find this afterwards.
+                watcher.cancelled = signal.cancel
+                await self._halt(request, process)
+                return
+
+    async def _exchange(self, request: RunnerRequest, watcher: _Watcher) -> Signal:
+        """One round trip to the control plane, or nothing if it did not answer.
+
+        The swallowed exception is the point of the separation: a control plane
+        that is unreachable, busy or misconfigured must not take a working run
+        down with it, and an empty ``Signal`` is exactly what "nothing was said
+        to this run" already means everywhere else in the loop. The cost is that
+        a persistently broken control source is silent, and the thing that
+        surfaces it is the *absence* of heartbeats — which the silence detector
+        is already watching for.
+        """
+        try:
+            heard = watcher.heard_at
+            if heard is not None and heard != watcher.reported_at:
+                await self._control.heartbeat(request.run_id, at=heard)
+                watcher.reported_at = heard
+            return await self._control.poll(request.run_id)
+        except Exception:
+            return Signal()
 
     async def _drive(
         self,
@@ -845,6 +943,8 @@ class AgentRunner(ABC):
             parts.append(completion.startup_error)
         elif completion.exit_code is not None:
             parts.append(f"exit {completion.exit_code}")
+        if completion.cancelled_because is not None:
+            parts.append(completion.cancelled_because)
         # Not gated on `include_stderr_tail`, and the difference is the point: a
         # `provider-error` that does not say which provider error is a value
         # nobody can act on, and this is a bounded field from a structured event
@@ -892,7 +992,23 @@ class _Watcher:
     turns: TurnTracker = field(default_factory=TurnTracker)
     overspent: bool = False
 
+    #: When the newest line arrived, on either stream. The liveness signal
+    #: §3.11's detector keys on — a run that is thinking, compiling or waiting
+    #: on a provider is still saying something, and one that has stopped saying
+    #: anything is the case a declared timeout cannot see.
+    heard_at: datetime | None = None
+
+    #: The instant last reported to the control plane, so an unchanged heartbeat
+    #: is not written again. Kept beside ``heard_at`` rather than in ``_attend``
+    #: because the two are one fact and splitting them across the loop's local
+    #: state is how they drift.
+    reported_at: datetime | None = None
+
+    #: Set when a stop arrives from outside, and read after the drive ends.
+    cancelled: Cancellation | None = None
+
     def line(self, line: LogLine) -> None:
+        self.heard_at = line.at
         if line.stream is Stream.STDERR:
             self.stderr.add(line.text)
         if self.sink is not None:

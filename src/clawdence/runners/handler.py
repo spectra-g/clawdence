@@ -4,7 +4,7 @@ The engine owns control flow and knows nothing about step types; this is the
 other half of that split, and it is the piece S3 left a hole for. What it adds
 over "call the port and unwrap the answer" is the mapping from
 ``RunnerOutcome`` to what the engine does next, and that mapping is the whole
-reason the taxonomy has fourteen values.
+reason the taxonomy has fifteen values.
 
 **Which failures are worth a second attempt.** Failing tests are — that is the
 loop the whole system is built around. A timeout might be. A budget cap is not:

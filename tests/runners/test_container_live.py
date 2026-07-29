@@ -30,12 +30,14 @@ have their own mirror.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 
@@ -45,18 +47,23 @@ from clawdence.domain import (
     IsolationTier,
     RepoProfile,
     ResourceCaps,
+    Run,
     RunnerOutcome,
     RunnerRequest,
+    RunStatus,
     VerificationContract,
 )
 from clawdence.ports import StaticSecrets
 from clawdence.runners import (
+    STEERING_DIR,
     VERDICT_PATH,
     AgentCommand,
     ContainerEngine,
     ContainerRunner,
     PlanDelivery,
+    container_name,
 )
+from clawdence.store import IN_MEMORY, StateStore, StoreControl
 from tests.harness.repos import build_repo
 from tests.ports.factories import run
 
@@ -357,6 +364,119 @@ def test_a_fork_bomb_hits_the_pid_ceiling(workdir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# §3.11: the channel into a run, through a real mount and a real daemon
+# --------------------------------------------------------------------------- #
+
+
+async def _while_running(
+    dispatch_coroutine: Coroutine[Any, Any, Any],
+    action: Callable[[], object],
+    *,
+    when: Callable[[], bool],
+) -> Any:
+    """Do something to a container run that is already going."""
+
+    async def meanwhile() -> None:
+        deadline = time.monotonic() + TIMEOUT
+        while not when():
+            assert time.monotonic() < deadline, "the container never got going"
+            await asyncio.sleep(0.1)
+        action()
+
+    result, _ = await asyncio.gather(dispatch_coroutine, meanwhile())
+    return result
+
+
+@pytest.fixture
+def live_control() -> Iterator[StoreControl]:
+    with StateStore.open(IN_MEMORY) as store:
+        store.create_run(
+            Run(
+                id="run.live",
+                work_item_id="wi.live",
+                workflow="live",
+                workflow_version="1.0.0",
+                status=RunStatus.RUNNING,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        yield StoreControl(store)
+
+
+def test_a_steering_message_crosses_the_mount_into_the_container(
+    workdir: Path, live_control: StoreControl
+) -> None:
+    """The design premise, proven rather than argued.
+
+    The whole reason steering is a directory of files is that the bind mount is
+    the only channel into this tier — no socket, no shared database, nothing the
+    isolation claim would have to be weakened for. So the message has to survive
+    a host process writing it and a containerised process reading it, and that
+    is only observable with a real mount.
+    """
+    repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
+    script = (
+        f"touch running.txt; "
+        f"i=0; while [ $i -lt {int(TIMEOUT * 2)} ]; do "
+        f"  cat {STEERING_DIR}/*.md > steer-seen.txt 2>/dev/null && break; "
+        f"  sleep 0.5; i=$((i+1)); done; "
+        f"echo x=2 > app.py; {PASSED}"
+    )
+    runner = ContainerRunner(agent(script), image=IMAGE, control=live_control, poll_seconds=0.2)
+
+    result = run(
+        _while_running(
+            runner.dispatch(request_for(repo.path, repo.head)),
+            lambda: live_control.inbox.send(
+                "run.live", "use the existing parser", at=datetime.now(UTC)
+            ),
+            when=lambda: (repo.path / "running.txt").exists(),
+        )
+    )
+
+    assert result.outcome is WORKED
+    assert "use the existing parser" in repo.read("steer-seen.txt")
+
+
+def test_a_cancel_from_outside_stops_a_real_container(
+    workdir: Path, live_control: StoreControl
+) -> None:
+    """The other tier's half of "a cancel stops a run on both tiers".
+
+    Only a daemon can prove this one. ``_halt`` removes the container *before*
+    killing the client, because the client is not the container's parent — kill
+    it first and the agent keeps working, keeps the run's stdout open, and the
+    reap blocks until it feels like finishing. Against a fake engine that
+    ordering is argv; here it is the difference between a run that stops and one
+    that runs for another hour.
+    """
+    repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
+    # Commits nothing — the image has no git — but leaves work on the tree, so
+    # what survives the stop is observable.
+    script = f"echo x=2 > app.py; {PASSED}; touch running.txt; sleep {int(TIMEOUT * 2)}"
+    runner = ContainerRunner(agent(script), image=IMAGE, control=live_control, poll_seconds=0.2)
+    request = request_for(repo.path, repo.head)
+
+    started = time.monotonic()
+    result = run(
+        _while_running(
+            runner.dispatch(request),
+            lambda: live_control.cancellations.request(
+                "run.live", at=datetime.now(UTC), reason="wrong branch"
+            ),
+            when=lambda: (repo.path / "running.txt").exists(),
+        )
+    )
+
+    assert result.outcome is RunnerOutcome.CANCELLED
+    assert time.monotonic() - started < TIMEOUT, "the cancel did not stop the container"
+    # §3.11: through the normal collection path, so the partial work is kept.
+    assert repo.read("app.py") == "x=2\n"
+    assert run(ContainerEngine().state(container_name(request))) is None
+
+
+# --------------------------------------------------------------------------- #
 # Lifecycle
 # --------------------------------------------------------------------------- #
 
@@ -367,7 +487,5 @@ def test_nothing_is_left_running_afterwards(workdir: Path) -> None:
     repo = build_repo(workdir / "repo", extra_files={"app.py": "x = 1\n"})
     request = request_for(repo.path, repo.head)
     run(ContainerRunner(agent(f"true && {PASSED}"), image=IMAGE).dispatch(request))
-
-    from clawdence.runners import container_name
 
     assert run(ContainerEngine().state(container_name(request))) is None

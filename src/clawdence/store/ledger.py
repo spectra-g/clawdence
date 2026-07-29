@@ -38,6 +38,7 @@ from clawdence.domain import (
     StepResult,
     StepStatus,
 )
+from clawdence.store.control import Cancellations, Inbox
 from clawdence.store.schema import transaction
 from clawdence.store.state import StateStore
 
@@ -139,6 +140,14 @@ class SqliteLedger:
                     update={"status": status, "updated_at": at, "finished_at": at}
                 ),
             )
+            # Nothing will read this inbox again, so anything still open in it
+            # is closed out as failed rather than left claiming to be in flight.
+            # In the same transaction as the run's own end, because a message
+            # that outlived its run by a rollback is a message somebody would
+            # eventually try to deliver.
+            Inbox(self._store).close(
+                self._run_id, at=at, reason=f"the run finished as {status.value}"
+            )
             self._audit(EventKind.RUN_FINISHED, at=at, payload={"status": status.value})
         return run
 
@@ -196,7 +205,27 @@ class SqliteLedger:
         return self._attempts
 
     def _reconcile(self, *, at: datetime) -> None:
-        """Close out steps whose process is gone. See the module docstring."""
+        """Close out steps whose process is gone. See the module docstring.
+
+        And the messages that went to it. A steering message recorded as
+        delivered was handed to the process that has just been found dead, so
+        nobody read it and nobody will — it becomes ``failed``, visibly, rather
+        than being put back in the queue. **It is not redelivered**, and that is
+        the rule §3.11's lifecycle exists to state: an instruction the agent may
+        already have acted on before the crash must not arrive a second time.
+        Messages still ``unread`` are untouched, because nobody has seen those
+        and this resumed run is the reader they were waiting for.
+        """
+        Inbox(self._store).abandon(
+            self._run_id,
+            at=at,
+            reason="the process this was delivered to did not survive to act on it",
+        )
+        # And any stop that belonged to the incarnation that died. Resuming is a
+        # new decision to run this; leaving the old request in place means the
+        # resumed run polls once, sees it, and stops — which reads as the resume
+        # being broken rather than as a row being obeyed twice.
+        Cancellations(self._store).clear(self._run_id)
         for stale in self._store.running_steps(run_id=self._run_id):
             self._store.finish_step(
                 stale.model_copy(

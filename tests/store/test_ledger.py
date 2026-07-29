@@ -22,10 +22,18 @@ from clawdence.engine import (
     StubHandler,
     execute,
 )
-from clawdence.store import DuplicateAttemptError, SqliteLedger, StateStore
+from clawdence.store import (
+    Cancellations,
+    DuplicateAttemptError,
+    Inbox,
+    MessageState,
+    SqliteLedger,
+    StateStore,
+)
 from tests.engine.factories import run as drive
 from tests.engine.factories import script, ticking_clock, workflow
-from tests.store.factories import WORK_ITEM_ID, make_run, running_step
+from tests.store.factories import WORK_ITEM_ID, at, make_run, running_step
+from tests.store.test_control import bodies
 
 RUN_ID = "run.ledger"
 
@@ -180,6 +188,73 @@ class TestResume:
         go(state, workflow(script("a")), handler)
         assert handler.calls == ["a"]
         assert state.require_run(RUN_ID).status is RunStatus.DONE
+
+    def test_a_message_handed_to_the_dead_process_is_not_redelivered(
+        self, state: StateStore
+    ) -> None:
+        """The same reconciliation as the stale step, one row over (§3.11).
+
+        The process that was holding this message is gone, so it becomes
+        ``failed`` and visible rather than going back in the queue — the agent
+        may already have acted on it before the crash, and an instruction
+        followed twice is the failure mode the lifecycle is built to avoid.
+        """
+        state.create_run(make_run(RUN_ID))
+        inbox = Inbox(state)
+        handed_over = inbox.send(RUN_ID, "use the existing parser", at=at(0))
+        still_queued = inbox.send(RUN_ID, "and add a test for it", at=at(1))
+        inbox.claim(RUN_ID, at=at(2), limit=1)
+        state.start_step(running_step("a", run_id=RUN_ID, started=0))
+
+        go(state, workflow(script("a")), StubHandler())
+
+        after = {message.id: message for message in inbox.messages_for(RUN_ID)}
+        assert after[handed_over.id].state is MessageState.FAILED
+        assert "did not survive" in (after[handed_over.id].reason or "")
+        # And the one nobody saw is still waiting for the run that resumed.
+        assert after[still_queued.id].state is MessageState.FAILED
+        assert "finished" in (after[still_queued.id].reason or "")
+
+    def test_a_message_nobody_saw_survives_to_the_resumed_run(self, state: StateStore) -> None:
+        """The other half: ``unread`` is not closed out by a resume, only by the
+        run actually ending. Asserted at the moment of the resume rather than
+        after it, because the run in these tests finishes in the same call."""
+        state.create_run(make_run(RUN_ID))
+        inbox = Inbox(state)
+        inbox.send(RUN_ID, "still worth saying", at=at(0))
+        state.start_step(running_step("a", run_id=RUN_ID, started=0))
+
+        SqliteLedger(state, run_id=RUN_ID).open_run(make_run(RUN_ID))
+
+        assert bodies(inbox.pending(RUN_ID)) == ["still worth saying"]
+
+    def test_a_resumed_run_is_not_stopped_by_the_cancel_that_stopped_the_last_one(
+        self, state: StateStore
+    ) -> None:
+        """Otherwise a resume polls once, sees an old row, and dies — which
+        reads as the resume being broken rather than as a stop being obeyed
+        twice. Resuming is a new decision to run this."""
+        state.create_run(make_run(RUN_ID))
+        cancels = Cancellations(state)
+        cancels.request(RUN_ID, at=at(0), reason="the watchdog heard nothing")
+        state.start_step(running_step("a", run_id=RUN_ID, started=0))
+
+        go(state, workflow(script("a")), StubHandler())
+
+        assert cancels.pending(RUN_ID) is None
+        assert state.require_run(RUN_ID).status is RunStatus.DONE
+
+    def test_a_finished_run_closes_its_inbox(self, state: StateStore) -> None:
+        """Nothing will read it again, so nothing in it stays 'in flight'."""
+        state.create_run(make_run(RUN_ID))
+        inbox = Inbox(state)
+        inbox.send(RUN_ID, "never read", at=at(0))
+
+        go(state, workflow(script("a")), StubHandler())
+
+        (message,) = inbox.messages_for(RUN_ID)
+        assert message.state is MessageState.FAILED
+        assert message.reason == "the run finished as done"
 
 
 class TestAtomicity:

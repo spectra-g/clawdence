@@ -1,6 +1,6 @@
-"""Deciding which of the fourteen things that can happen, happened.
+"""Deciding which of the fifteen things that can happen, happened.
 
-``RunnerOutcome`` has fourteen values because v1 had one: "runner failed". With
+``RunnerOutcome`` has fifteen values because v1 had one: "runner failed". With
 one value the retry policy cannot tell a flaky integration test from an OOM kill
 from a budget cap, so it treats them the same — and treating them the same means
 either retrying things that will never work, or refusing to retry things that
@@ -103,6 +103,12 @@ class Completion:
     cancelled: bool = False
     timed_out: bool = False
     budget_exceeded: bool = False
+
+    #: Why, when the stop came from outside the process (§3.11). Diagnostic
+    #: only — ``cancelled`` is what the classifier reads — but a ``cancelled``
+    #: result that cannot say whether a person or the silence detector stopped
+    #: it is one somebody has to go and correlate timestamps to understand.
+    cancelled_because: str | None = None
 
     #: Whether the kill was ours. Without this, a process we killed for a timeout
     #: is indistinguishable from one the kernel's OOM killer took.

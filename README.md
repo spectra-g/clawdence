@@ -153,7 +153,7 @@ it the hard way:
 
 - **Output streams while it runs.** v1 captured it all and delivered it at the end, so forty
   minutes of an agent going nowhere looked exactly like forty minutes of progress.
-- **Fourteen outcomes, not "failed".** Timeout, OOM kill, disk full, non-zero exit, empty diff,
+- **Fifteen outcomes, not "failed".** Timeout, OOM kill, disk full, non-zero exit, empty diff,
   failing tests, budget exceeded, network denied, blocked, cancelled, startup failure. They are
   handled differently — failing tests are worth another attempt, an agent blocked on a missing
   dependency is worth a human — and a taxonomy with one value cannot express that.
@@ -173,6 +173,22 @@ it the hard way:
   agent's mess from the runner's own is why the files the runner installs are recorded byte for
   byte: a repository that keeps its own `AGENTS.md` gets it back untouched, and an agent that
   deliberately edited that file keeps its edit.
+- **A run is not write-only.** Output streaming fixed half the problem; the other half is that
+  there was no way to say anything to a run in flight, and no way to stop one from outside the
+  process that started it. Both now go through a per-run inbox in the state store, which the runner
+  polls: a message becomes a file the agent reads on its next turn, and a cancel stops the work on
+  either tier. Messages go out priority-first and are delivered **at most once** — an instruction
+  followed twice is worse than one that visibly never arrived, so a message the crashed process was
+  holding is recorded as failed rather than requeued, while one nobody has seen yet waits for the
+  resumed run. The channel into a container is the bind mount and nothing else, because a socket
+  would be a second hole in the boundary the tier exists to draw.
+- **A run that goes quiet is a different failure from a run that is late.** The watchdog finds work
+  whose process is gone; it cannot see a run that is alive, well inside its declared timeout, and
+  has emitted nothing for forty-five minutes — which is what a stuck tool call looks like from
+  outside, reporting healthy the whole time. A second detector keys on the timestamp of the newest
+  thing the run *said*, and its recovery is to ask the run to stop rather than to mark the row
+  dead: the process holding the worktree is the only thing that can collect what the agent
+  committed before it hung, so the silent run leaves through the same door a cancel does.
 - **Budgets abort mid-run.** Tokens are counted off the stream as they are reported and the
   process is killed when the cap is passed. A dollar cap with no configured prices is refused at
   dispatch rather than accepted and ignored.

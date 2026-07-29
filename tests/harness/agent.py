@@ -134,6 +134,30 @@ class FakeAgent:
             body["tests"] = tests
         return self._add("verdict", json.dumps(body))
 
+    def await_steering(self, path: str, *, timeout: float = 10.0) -> Self:
+        """Wait for a steering message, then write what arrived to ``path``.
+
+        The agent-side half of §3.11's claim path, and it is a *wait* rather
+        than a read because that is what makes the test honest: the message is
+        sent by another task after this process has already started, so a fake
+        that read the directory once at launch would pass whether or not the
+        runner ever delivered anything.
+
+        Every file is concatenated in listing order, which is how the ordinal
+        in the filename gets asserted on: a test reads this file and sees the
+        order the inbox chose.
+        """
+        return self._add("await-steering", [path, timeout])
+
+    def count_steering(self, path: str) -> Self:
+        """Append the number of messages currently waiting to ``path``.
+
+        How "exactly once" is checked from the agent's side rather than from
+        the store's: a redelivered message is a second file, and a rewritten one
+        is not.
+        """
+        return self._add("count-steering", path)
+
     def dump_env(self, path: str) -> Self:
         """Write the child's whole environment to a file, sorted.
 

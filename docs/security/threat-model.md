@@ -107,6 +107,7 @@ worst realistic outcome, not the average one.
 | **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
 | **T21** | Credentials recorded into committed test fixtures | Medium | A1, A6 | **Built** |
 | **T22** | Agent output alters the standard it is measured against | **High** | **A7**, A4 | **Accepted, unmitigated** |
+| **T23** | Mid-run steering as an unauthenticated instruction channel | Medium | A2, A4 | Partly built — bounded and recorded; authorisation designed |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -504,6 +505,40 @@ nothing produces a diff, so nothing can propose a change to anything — the ris
 theoretical because the capability is absent, not because a control is present. Stated rather than
 scored as low, because the day the capability arrives the disposition has to change with it.
 
+### T23 · Mid-run steering as an unauthenticated instruction channel
+
+§3.11 opened a channel *into* a run that is already going: a message lands in a per-run inbox, the
+runner claims it, and it becomes a file the agent reads on its next turn. That is a new path by
+which text reaches an agent's context **after** the plan was assembled and reviewed, and a new verb
+— cancel — that stops work from outside the process doing it.
+
+It is a smaller version of T2 rather than a new shape. The differences that matter:
+
+- **The plan is built once; a steering message arrives later.** Anything that inspected the prompt
+  before the run started did not see it. That is inherent to the feature and is the reason the
+  message is delimited and labelled with its sender and time, and the reason the plan text states
+  the one limit on it: a steering message may narrow or redirect the task, and **may not lift a
+  constraint**. An agent asked to lift one is told to record it in the verdict rather than act.
+- **It is an instruction, not data.** Unlike T2's request text and unlike carried stubs, the agent
+  is *meant* to comply — so the framing that holds for those ("this is data") is not available here.
+  What holds instead is everything downstream of the prompt, unchanged: the runner still has no
+  push credentials, still has one worktree, and still cannot reach another repository. A steering
+  message can misdirect the work; it cannot widen the blast radius of the work.
+- **There is no authorisation on it today.** `Inbox.send` and `Cancellations.request` make no
+  decision about who may call them, exactly as T19 describes for the control surface. The
+  operator-facing verbs and their authorisation are S17b's, and the same rule applies: the
+  authorisation ships in the change that exposes the verb, not after it.
+
+**What is built:** the message is length-capped (refused rather than truncated, because half an
+instruction can invert it), stripped of its own delimiter so it cannot append to the constraints,
+recorded durably with sender and timestamp, and delivered at most once — so "what was this run
+told, by whom, and when" is answerable from the `steering` table after the fact. Delivery is
+per-run, so one run cannot read another's inbox.
+
+**Residual:** anybody who can call the store can redirect a run in flight, until S17b. On a
+single-tenant machine that is the same set of people who can already start one (R7), which is why
+this is Medium rather than High — and it stops being true the moment a remote surface reaches it.
+
 ---
 
 ## 5. Isolation tiers, traced to threats
@@ -581,6 +616,8 @@ The honest summary. Most of this is not built.
 | Backup and restore of the state store | T20 | Designed |
 | CI-scanned base images | T12 | Designed — nothing is published yet, so there is nothing to scan |
 | Untrusted-output handling for runner paths | T13 | **Partially built** — the worktree path is refused as a mount if it is a filesystem root or a top-level directory, and refused outright if it contains a character the engine's mount parser reads as structure |
+| Bounded, delimited, at-most-once steering messages, recorded with sender and time | T23 | **Built** |
+| Authorisation on who may steer or cancel a run | T23, T19 | Designed (S17b) |
 | Injection discipline for retrieved context | T14 | Designed |
 | Authentication on the control surface | T19 | Designed |
 | A named, non-skippable security regression suite | all | Designed |

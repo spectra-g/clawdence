@@ -35,6 +35,16 @@ class DuplicateAttemptError(StoreError):
     """
 
 
+class MessageRejectedError(StoreError):
+    """A steering message the inbox will not take (§3.11).
+
+    Refused rather than trimmed. The message is pasted whole into the agent's
+    context, and half of "do not touch the migration, only the model" is an
+    instruction to do the opposite of what was meant — so the operator, who is
+    at an interactive surface and can retype it, is told.
+    """
+
+
 class ConcurrentUpdateError(StoreError):
     """A run was modified by someone else and the retries ran out.
 

@@ -27,6 +27,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+#: Where the runner leaves mid-run messages. Spelled out rather than imported,
+#: because this script runs as a subprocess with only the standard library on
+#: its path — the same reason it is invoked through ``sys.executable``.
+STEERING_DIR = ".clawdence/steering"
+
+
+def _steering() -> list[Path]:
+    """Messages waiting, in filename order — which is claim order."""
+    directory = Path(STEERING_DIR)
+    return sorted(directory.glob("*.md")) if directory.is_dir() else []
+
 
 def _git(*args: str) -> None:
     """Git as the agent runs it — off ``PATH``, with whatever the runner's own
@@ -64,6 +75,23 @@ def main(argv: list[str]) -> int:
             path = Path(os.environ.get("CLAWDENCE_VERDICT_PATH", ".clawdence/verdict.json"))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(value, encoding="utf-8")
+        elif action == "await-steering":
+            target, deadline = Path(value[0]), time.monotonic() + float(value[1])
+            while not _steering() and time.monotonic() < deadline:
+                # Short, because the runner's poll interval in these tests is
+                # shorter still and a long sleep here would be the thing the
+                # test was measuring.
+                time.sleep(0.02)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "\n".join(path.read_text(encoding="utf-8") for path in _steering()),
+                encoding="utf-8",
+            )
+        elif action == "count-steering":
+            target = Path(value)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(f"{len(_steering())}\n")
         elif action == "dump-env":
             Path(value).write_text(
                 "\n".join(f"{name}={os.environ[name]}" for name in sorted(os.environ)),
