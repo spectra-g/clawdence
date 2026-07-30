@@ -36,31 +36,26 @@ from typing import Protocol
 
 from pydantic import AwareDatetime
 
-from clawdence.domain import DomainModel
+from clawdence.domain import DomainModel, MergeMethod, PullRequestPolicy
 from clawdence.domain.ids import RepoId, TreeHash, WorkItemId
 from clawdence.ports._common import Clock, utc_now
 from clawdence.ports.errors import PermanentError
+
+__all__ = [
+    "Branch",
+    "InMemoryVcs",
+    "MergeMethod",
+    "PullRequest",
+    "PullRequestState",
+    "StaleMergeError",
+    "VcsPort",
+]
 
 
 class PullRequestState(StrEnum):
     OPEN = "open"
     MERGED = "merged"
     CLOSED = "closed"
-
-
-class MergeMethod(StrEnum):
-    """How a merge is performed.
-
-    ``SQUASH`` is the default everywhere it is offered, because a squashed merge
-    produces one commit whose tree is the tree that was verified. A merge commit
-    produces a tree that is the *result* of combining two, which no test ran
-    against — the same invalidation the ``expect_*`` arguments exist to catch,
-    arriving one step later.
-    """
-
-    SQUASH = "squash"
-    MERGE = "merge"
-    REBASE = "rebase"
 
 
 class StaleMergeError(PermanentError):
@@ -100,6 +95,11 @@ class PullRequest(DomainModel):
 
     title: str
     state: PullRequestState = PullRequestState.OPEN
+
+    #: A draft is *open* and unmergeable, which no other combination of the
+    #: fields above can express. Without it a merge attempt fails at the forge
+    #: with a message about review state, which is not the reason.
+    draft: bool = False
 
     head_branch: str
     base_branch: str
@@ -160,8 +160,15 @@ class VcsPort(Protocol):
         head_branch: str,
         base_branch: str,
         work_item_id: WorkItemId | None = None,
+        policy: PullRequestPolicy | None = None,
     ) -> PullRequest:
-        """Open a PR, or return the one already open for this branch."""
+        """Open a PR, or return the one already open for this branch.
+
+        ``policy`` carries the repository's reviewers, labels and draft
+        preference (``RepoProfile.pull_request``). It is applied on *creation*
+        only: a second call finding an existing PR returns it untouched, because
+        the caller is a retry and the human who removed a label meant it.
+        """
         ...
 
     async def get_pull_request(self, repo_id: RepoId, number: int) -> PullRequest | None:
@@ -198,12 +205,13 @@ class InMemoryVcs:
     the test harness's job — this is for testing the pipeline, not git.
     """
 
-    __slots__ = ("_branches", "_clock", "_commits", "_fail_with", "_pulls")
+    __slots__ = ("_branches", "_clock", "_commits", "_fail_with", "_pulls", "_requested")
 
     def __init__(self, clock: Clock = utc_now) -> None:
         self._clock = clock
         self._branches: dict[tuple[str, str], str] = {}
         self._pulls: dict[tuple[str, int], PullRequest] = {}
+        self._requested: dict[tuple[str, int], PullRequestPolicy] = {}
         self._commits = 0
         self._fail_with: BaseException | None = None
 
@@ -300,6 +308,7 @@ class InMemoryVcs:
         head_branch: str,
         base_branch: str,
         work_item_id: WorkItemId | None = None,
+        policy: PullRequestPolicy | None = None,
     ) -> PullRequest:
         self._check()
         for pull in self._pulls.values():
@@ -318,6 +327,7 @@ class InMemoryVcs:
             repo_id=repo_id,
             number=number,
             title=title,
+            draft=policy is not None and policy.draft,
             head_branch=head_branch,
             base_branch=base_branch,
             head_commit=head_commit,
@@ -328,7 +338,15 @@ class InMemoryVcs:
             updated_at=now,
         )
         self._pulls[(repo_id, number)] = pull
+        # Recorded rather than applied: the fake has no notion of a label, and a
+        # test asserting the pipeline asked for the right ones should not have to
+        # model GitHub to do it.
+        self._requested[(repo_id, number)] = policy or PullRequestPolicy()
         return pull
+
+    def policy_for(self, repo_id: RepoId, number: int) -> PullRequestPolicy | None:
+        """What was asked for when this PR was opened. A test-side reader."""
+        return self._requested.get((repo_id, number))
 
     async def get_pull_request(self, repo_id: RepoId, number: int) -> PullRequest | None:
         self._check()
@@ -377,6 +395,12 @@ class InMemoryVcs:
             )
         if pull.state is PullRequestState.CLOSED:
             raise PermanentError("pull-request-closed", f"pull request {number} was closed")
+        if pull.draft:
+            raise PermanentError(
+                "pull-request-draft",
+                f"pull request {number} is a draft, which is the repository asking for a human "
+                f"to mark it ready; merging one is not something a retry can reach",
+            )
 
         merge_commit = self.commit()
         self._branches[(repo_id, pull.base_branch)] = merge_commit

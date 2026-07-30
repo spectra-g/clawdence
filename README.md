@@ -9,8 +9,10 @@ an in-memory implementation of each and one real adapter for a model provider �
 executes a coding agent against a git worktree, either on this machine or inside an ephemeral
 container, with the repository's dependencies installed first against a cache that outlives the
 worktree, a cap on how many runs happen at once, and a sweep that reclaims what a crashed control
-plane left behind. There is no network policy, and nothing yet decides which repository a piece of
-work belongs to. It can consult a model and it can run a coding agent; it cannot run a sprint. It is
+plane left behind, plus the version-control layer that gives a run its checkout and turns what comes
+back into a pull request. There is no network policy, and nothing yet decides which repository a
+piece of work belongs to. It can consult a model, run a coding agent, and open and merge a pull
+request for the result; it cannot run a sprint, because nothing yet joins those three up. It is
 public early so the build is inspectable from the start, not because any of it is ready to use.
 
 ## Decisions taken so far
@@ -286,6 +288,50 @@ its three constraints fails *silently* when it is wrong: a sibling container who
 not resolve gets an empty directory rather than an error, and a test that cannot find the host
 hangs rather than fails. They are opt-in because they need Docker and a network, and the rest of
 the suite has neither.
+
+## Version control
+
+[`src/clawdence/vcs/`](src/clawdence/vcs/) is where a run gets somewhere to work and where its
+output becomes a pull request. One bare mirror per repository holds the objects; a worktree per run
+hangs off it.
+
+```
+<mirrors>/<repo>-<digest>.git      objects, refs, one lock
+<work>/<run-id>/<repo>             a checkout per run
+```
+
+- **Partial, never shallow.** `--depth=1` is the usual way to make a large clone fast and it is
+  unusable here: a shallow repository has no merge base, so nothing can rebase, ask whether a branch
+  is behind, or bind evidence to a tree. `--filter=blob:none` gets the same first-clone win — the
+  bytes are in file contents, not in commits — and git fetches what it needs on demand.
+- **The remote's refs stay out of `refs/heads`.** A `--mirror` refspec is `+refs/*:refs/*`, so a
+  pruning fetch deletes local branches the remote has not seen — which is exactly the state a run is
+  in between creating its branch and pushing it.
+- **One lock per repository, held by the kernel.** `flock`, not a pid file: the case that matters is
+  the control plane being killed, and a flock is released on exit, on crash and on `kill -9`, so
+  there is no stale state to reason about. Three concurrent runs on one repository is a test.
+- **A branch is a function of the work item.** So a retried run continues its own branch instead of
+  opening a second pull request beside it, and editing an issue's title does not split one piece of
+  work into two. The name is *built* from a closed `[a-z0-9-]` alphabet rather than sanitised, which
+  is the same decision `script` steps make by being argv: remove the grammar and nothing has to be
+  escaped.
+- **Release deletes a branch only if it never moved.** "A cancelled run leaves no orphaned worktree
+  or branch" is the goal, and the naive reading destroys work: between the agent committing and the
+  push succeeding, the local branch is the only copy.
+- **One diff audit, at the boundary.** v1 defended against the `node_modules` cascade with four
+  layers. This has one, and it runs on the diff about to be published: symlinks, submodule pointers,
+  vendored directories and oversized files. It reports; the caller refuses.
+- **Merging states what was verified.** `merge` requires the head and base hashes the evidence was
+  produced against. The base is re-read from the remote every time rather than taken from the pull
+  request's own record of it, and the head match is handed to the forge as well, where it is atomic
+  with the merge.
+- **The credential never enters a command line or a remote URL.** `ps` is public and a cloned URL is
+  persistent. The token reaches git through a 0600 config file removed on the way out, scoped to one
+  parsed origin. See [the threat model](docs/security/threat-model.md#t24--the-forge-credential--built).
+
+Repositories that require signed commits are refused at configuration time, with the reason: the
+runner commits with `--no-gpg-sign` on purpose, and a signing key here would let the process every
+model's output passes through mark commits as verified.
 
 ## The project probe
 

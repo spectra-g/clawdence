@@ -68,6 +68,7 @@
   "profile": {
     "agents_md_path": null,
     "aliases": [],
+    "branch_prefix": "clawdence/",
     "build_command": [
       "./gradlew",
       "--no-daemon",
@@ -80,6 +81,11 @@
       "memory_mb": null,
       "pid_limit": null,
       "wall_clock_seconds": null
+    },
+    "checkout": {
+      "fetch_lfs": false,
+      "partial": true,
+      "sparse_paths": []
     },
     "default_branch": "main",
     "docker_socket_acknowledged": false,
@@ -105,6 +111,14 @@
     "mcp_servers": [],
     "name": "acme-ledger",
     "needs_docker": false,
+    "pull_request": {
+      "body_template_path": null,
+      "draft": false,
+      "labels": [],
+      "merge_method": "squash",
+      "reviewers": [],
+      "team_reviewers": []
+    },
     "remote_url": "",
     "require_full_test_suite": false,
     "runner_image": null,

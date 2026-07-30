@@ -23,8 +23,13 @@ and that is precisely what v1 did.
 work belongs to, and which branch it is on. Those are triage's and the pipeline's
 (S11, S15): this takes a ``Dispatch`` describing them, because a handler that
 invented them would be quietly making decisions that belong to steps that have
-not been built. That is also why ``default_registry`` still refuses ``runner``
-steps — the runner exists now; nothing yet chooses what to point it at.
+not been built.
+
+S15 has since built three of the four. ``Dispatch.for_worktree`` turns a checkout
+``clawdence.vcs`` handed out into the record this handler wants, so the worktree
+path, the branch and the base commit now have a real source. What is still
+missing — and why ``default_registry`` still refuses ``runner`` steps out of the
+box — is *which repository* a work item belongs to, which is S11's.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from clawdence.engine import HandlerOutcome, StepContext, StepFailure, idempoten
 from clawdence.engine.errors import InterpolationError
 from clawdence.engine.interpolation import expand
 from clawdence.ports import PortError, RunnerPort
+from clawdence.vcs.worktrees import Worktree
 
 #: Outcomes a second attempt could plausibly change. Everything absent from this
 #: set halts the run to a human, which is what ``on_exhausted`` means one step
@@ -99,6 +105,44 @@ class Dispatch:
     #: computed at this layer would be this step deciding a question ingestion
     #: owns. Only the socket tier reads it, and only to refuse.
     trusted_provenance: bool = False
+
+    @classmethod
+    def for_worktree(
+        cls,
+        worktree: Worktree,
+        profile: RepoProfile,
+        *,
+        work_item_id: str,
+        contract: VerificationContract,
+        budget: Budget | None = None,
+        carried_stubs: tuple[str, ...] = (),
+        trusted_provenance: bool = False,
+    ) -> Dispatch:
+        """Build a dispatch from a checkout ``clawdence.vcs`` handed out.
+
+        Three of this record's fields — the worktree path, the branch and the
+        base commit — were taken as data at S6 precisely because inventing them
+        would have been the runner deciding a question a later step owned. S15 is
+        that step, and this is the one line where its answer meets S6's. What is
+        still not derived here is *which repository*, which is S11's: the profile
+        arrives as an argument for the same reason the other three used to.
+
+        The direction of the import is worth noting. ``runners`` depends on
+        ``vcs`` and not the reverse — ``vcs.git`` is the shared plumbing, and
+        ``vcs`` knowing what a runner dispatch is would put a cycle between two
+        packages that currently read top to bottom.
+        """
+        return cls(
+            profile=profile,
+            work_item_id=work_item_id,
+            branch=worktree.branch,
+            base_commit=worktree.base_commit,
+            worktree_path=str(worktree.path),
+            contract=contract,
+            budget=budget or Budget(),
+            carried_stubs=carried_stubs,
+            trusted_provenance=trusted_provenance,
+        )
 
 
 @dataclass(slots=True)

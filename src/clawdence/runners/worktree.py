@@ -7,11 +7,11 @@ That framing is not decoration; it changes three things about how git is called:
 can set ``core.fsmonitor`` to a command, and git runs it — so a plain
 ``git status`` in a worktree an agent just edited is arbitrary code execution in
 whatever process runs it. On the ``container`` tier (S7) that process is inside
-the container; on ``host`` it is the control plane itself. Every invocation here
-therefore pins the knobs that execute things (``_HARDENING``) and ignores the
-operator's own global and system config (``_ENV``), for the same reason the
-fixture builder does: a maintainer with ``commit.gpgsign = true`` should not get
-a runner that blocks forever on a passphrase nobody is watching for.
+the container; on ``host`` it is the control plane itself. That hardening now
+lives in ``clawdence.vcs.git``, because at S15 the control plane runs git too and
+two copies of a security control is how one copy drifts. ``git``, ``head``,
+``exclude``, ``GitError`` and the identity types are re-exported here, so this
+module's callers did not have to move with it.
 
 What that does **not** close: ``.gitattributes`` clean/smudge filters and
 textconv drivers still run, because disabling them would silently misreport
@@ -26,95 +26,44 @@ not write it is a lie in the one place a repository keeps permanently.
 **Nothing here trusts the diff to be small.** ``diff_stat`` asks for numbers, not
 content: the diff can be megabytes and the control plane needs to know whether
 there is one and roughly how big, which is exactly what ``DiffStat`` holds.
+
+**Nothing here authenticates.** ``EgressPolicy.allow_git_remote`` is false by
+default: the control plane pushes, the runner does not, so no function in this
+module has any business holding a credential. ``clawdence.vcs.git.authenticated``
+is the other side of that line.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
 
 from clawdence.domain import DiffStat
-
-
-@dataclass(frozen=True, slots=True)
-class GitIdentity:
-    """Who the runner's commits are attributed to."""
-
-    name: str
-    email: str
-
-
-#: Deliberately not a person, and deliberately ``.invalid`` (RFC 2606), so a
-#: commit made by the runner is unambiguous in ``git log`` and any mail sent to
-#: the address bounces rather than reaching somebody unrelated.
-DEFAULT_IDENTITY: Final = GitIdentity(name="Clawdence runner", email="runner@clawdence.invalid")
-
-#: Config overrides passed to every invocation. Each one names a mechanism by
-#: which repository-local configuration gets git to execute something:
-#: ``core.fsmonitor`` and ``core.hooksPath`` run programs outright, and
-#: ``protocol.ext`` lets a URL name a command to speak the transport.
-_HARDENING: Final[tuple[str, ...]] = (
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "protocol.ext.allow=never",
+from clawdence.vcs.git import (
+    DEFAULT_IDENTITY,
+    GitError,
+    GitIdentity,
+    exclude,
+    git,
+    head,
 )
 
-#: Environment for every invocation. Replaced, not extended — a ``GIT_DIR`` or a
-#: credential helper leaking in from the operator's shell is how a runner ends up
-#: committing somewhere nobody asked it to.
-_ENV: Final[dict[str, str]] = {
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_SYSTEM": "/dev/null",
-    # A prompt inside a run is a hang, not a failure.
-    "GIT_TERMINAL_PROMPT": "0",
-    # Read-only inspection should not take the index lock; a runner that leaves a
-    # stale lock behind breaks the *next* run, which is the worst kind of leak.
-    "GIT_OPTIONAL_LOCKS": "0",
-}
-
-
-class GitError(RuntimeError):
-    """A git invocation failed. Carries the command and git's own complaint."""
-
-    def __init__(self, argv: tuple[str, ...], stderr: str) -> None:
-        self.argv = argv
-        self.stderr = stderr
-        super().__init__(f"git {' '.join(argv)} failed: {stderr.strip() or '(no output)'}")
-
-
-async def git(worktree: Path, *args: str, path: str | None = None, strip: bool = True) -> str:
-    """Run one git command in ``worktree`` and return its stdout.
-
-    ``strip`` is on because almost every caller wants a single hash. It is a
-    parameter rather than a rule because ``git status`` puts a *space* in the
-    first column, and stripping it silently removes the first character of the
-    first filename — a bug that only shows up when the first changed file is
-    modified rather than added.
-
-    ``path`` pins the git executable for a caller that would rather not inherit
-    a ``PATH`` lookup. It defaults to a lookup because the common case is a
-    developer machine, where pinning it is friction with no reader.
-    """
-    argv = (path or "git", *_HARDENING, *args)
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=worktree,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=dict(_ENV),
-    )
-    raw_out, raw_err = await process.communicate()
-    if process.returncode != 0:
-        raise GitError(args, raw_err.decode("utf-8", errors="replace"))
-    decoded = raw_out.decode("utf-8", errors="replace")
-    return decoded.strip() if strip else decoded
+__all__ = [
+    "DEFAULT_IDENTITY",
+    "GitError",
+    "GitIdentity",
+    "commit_all",
+    "commits_ahead",
+    "diff_stat",
+    "exclude",
+    "exists_at",
+    "git",
+    "has_commit",
+    "head",
+    "is_repository",
+    "pending_changes",
+    "revert_to",
+]
 
 
 async def is_repository(worktree: Path) -> bool:
@@ -123,10 +72,6 @@ async def is_repository(worktree: Path) -> bool:
         return await git(worktree, "rev-parse", "--is-inside-work-tree") == "true"
     except (GitError, OSError):
         return False
-
-
-async def head(worktree: Path) -> str:
-    return await git(worktree, "rev-parse", "HEAD")
 
 
 async def has_commit(worktree: Path, commit: str) -> bool:
@@ -302,29 +247,3 @@ async def diff_stat(worktree: Path, base: str, target: str = "HEAD") -> DiffStat
         if parts[1] != "-":
             deletions += int(parts[1])
     return DiffStat(files_changed=files, insertions=insertions, deletions=deletions)
-
-
-async def exclude(worktree: Path, *patterns: str) -> None:
-    """Hide paths from git without touching a tracked file.
-
-    The runner installs files into the worktree — a conventions file, a plan, a
-    verdict — and every one of them would otherwise land in ``git add --all``
-    and then in somebody's pull request. ``.gitignore`` is tracked content and
-    editing it *is* a change to the repository; ``$GIT_DIR/info/exclude`` is
-    local, untracked, and exactly what this is for.
-
-    The path is resolved with ``rev-parse --git-path`` rather than assembled,
-    because in a linked worktree ``.git`` is a file and the real directory is
-    somewhere under the main repository.
-    """
-    target = Path(await git(worktree, "rev-parse", "--git-path", "info/exclude"))
-    if not target.is_absolute():
-        target = worktree / target
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    missing = [pattern for pattern in patterns if pattern not in existing.splitlines()]
-    if not missing:
-        return
-    prefix = "" if existing.endswith("\n") or not existing else "\n"
-    target.write_text(existing + prefix + "\n".join(missing) + "\n", encoding="utf-8")

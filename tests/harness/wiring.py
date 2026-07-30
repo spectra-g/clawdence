@@ -25,9 +25,17 @@ here is gone entirely — a recording is a *transport* concern, and the real han
 reaches its provider through a seam a cassette can wrap, so the harness no longer
 has to model what an agent step is in order to record one.
 
-What stays here is the part that is genuinely a test's business — which repository,
-worktree and branch — because the real answer comes from triage (S11) and inventing
-one in the product would be S6 deciding a later step's question.
+**S15 took two of the three remaining invented values away.** A worktree path, a
+branch and a base commit now come from ``clawdence.vcs.WorktreeManager`` and turn
+into a ``Dispatch`` through ``Dispatch.for_worktree`` — ``tests/vcs/test_pipeline``
+is the sequence written out. They are still passed in here as plain values,
+because a workflow test about branching or retry has no business building a bare
+mirror and a checkout to get one; what a fixture may reasonably fake is a value
+some other tested component would have computed.
+
+What stays genuinely invented is *which repository* — the real answer comes from
+triage (S11), and inventing one in the product would be S6 or S15 deciding a
+later step's question.
 """
 
 from __future__ import annotations

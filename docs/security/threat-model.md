@@ -116,13 +116,14 @@ worst realistic outcome, not the average one.
 | **T14** | Memory poisoning via discovery notes | Medium | A2, A4 | Designed |
 | **T15** | Approval bypass or self-approval | Medium | A4 | Built (schema) + designed |
 | **T16** | Command injection via workflow arguments | Medium | A2, A3 | **Built** |
-| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema + port) |
+| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema + port + adapter) |
 | **T18** | MCP credential over-exposure | Medium | scoped | Partly accepted |
 | **T19** | Unauthenticated control surface | Medium | A4, A5 | Designed |
 | **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
 | **T21** | Credentials recorded into committed test fixtures | Medium | A1, A6 | **Built** |
 | **T22** | Agent output alters the standard it is measured against | **High** | **A7**, A4 | **Accepted, unmitigated** |
 | **T23** | Mid-run steering as an unauthenticated instruction channel | Medium | A2, A4 | Partly built — bounded and recorded; authorisation designed |
+| **T24** | The forge credential — leaked from the control plane, or sent to a host nobody chose | Medium | **A1**, A4 | **Built** |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -412,6 +413,40 @@ raised on a cassette miss prints part of the request to identify it, and redacts
 
 Commit-time and full-history gitleaks scanning is the second layer, as for T11.
 
+### T24 · The forge credential — **built**
+
+New at S15 and the first credential the control plane uses to *write* somewhere outside itself. A
+push token is not like the model provider's key: the worst a leaked model key does is bill someone,
+and the worst a leaked push token does is put a commit on a repository under a name people trust.
+Three specific paths, and all three are ways a token escapes without anybody making a mistake:
+
+- **A command line is public.** `ps` is readable by every user on the box, so
+  `git -c http.extraHeader=Authorization: Basic …` publishes the credential to anyone logged in.
+- **A remote URL is persistent.** `https://x-access-token:TOKEN@github.com/…` is the well-known
+  recipe, and `git clone` writes the remote URL into the clone's own `.git/config` — so the token
+  outlives the process that used it and is sitting in a file when the next person looks.
+- **A header goes wherever git goes.** An unscoped `http.extraHeader` is attached to *every*
+  request, and git makes requests to hosts the repository names: a submodule URL is content
+  somebody else wrote, so an unscoped credential plus an attacker-authored `.gitmodules` is our
+  token, sent to their server.
+
+**Mitigations:** the token reaches git through a config file this process writes at mode 0600 and
+removes on the way out — including when the operation raised — named by `GIT_CONFIG_GLOBAL`, which
+was already pointed at `/dev/null`, so the operator's own configuration stays as ignored as it was.
+It never enters an argv and never enters a URL. The header is scoped to one origin, parsed rather
+than prefix-matched (`https://github.com` without a trailing slash also matches
+`https://github.com.evil.example`). Submodules are never fetched. `credential.helper` is cleared so
+nothing consults a keychain on our behalf and nothing can prompt. `gh` gets a built environment
+with a fixed allowlist and at most one credential in it, for the same reason script steps do.
+
+The credential is addressed by *name* everywhere above this line — `RepoStore.token_name` is a
+`SecretProvider` key, resolved at the moment an operation starts, never held on the object — so a
+traceback that prints a frame's locals prints a name.
+
+**Residual:** a token in a file for the length of one git invocation is still a token in a file. On
+a single-tenant machine the set of people who can read `/tmp` as this user is the set who can
+already read the process's memory (R7).
+
 ### T12 · Poisoned runner base image
 
 Base images per language are shipped to other people and contain the toolchain the runner executes.
@@ -658,7 +693,7 @@ what it does.
 | **R6** | Single-machine, single-tenant only | Multi-tenant and multi-machine are stated non-goals. There is no tenant isolation because there are no tenants. | A hosted mode, which is not planned. |
 | **R7** | The operator's own machine is trusted | The control plane, the state store, and the runners share a host. A compromised host is a total compromise. | Nothing. This is the deployment model. |
 | **R8** | Denial of service against the system itself | Rate limits and budgets bound the damage; they do not prevent a determined submitter from making the system unavailable to its operator. | Nothing planned. Availability is not a security goal here. |
-| **R9** | The system's own output changing the standard it is judged by (T22) | Partially mitigated as of S12: an agent step is structurally incapable of writing anything, because the handler is given no store, no loader and no VCS. Still accepted for the rest — nothing produces a diff (no `runner` step is wired) and no approval gate exists to refuse self-approval. | S15 shipping, which is what makes a diff possible. The self-approval refusal has to exist in the same change as the gate (S17). |
+| **R9** | The system's own output changing the standard it is judged by (T22) | Partially mitigated as of S12: an agent step is structurally incapable of writing anything, because the handler is given no store, no loader and no VCS. **S15 has since made a diff possible** — a checkout, a branch, a push and a pull request all exist — so the remaining gap is now real rather than theoretical: nothing refuses a pull request that edits this system's own workflow definitions or verification contracts, because there is no approval gate yet to refuse it. What S15 does add is that the output is a *proposal* in the literal sense: it lands on a branch, in a pull request, and no code path merges one without a caller supplying evidence hashes. | The self-approval refusal, which has to exist in the same change as the gate (S17). |
 
 ---
 
@@ -671,7 +706,13 @@ The honest summary. Most of this is not built.
 | Argv-only script commands; single-pass expansion; uninterpolatable `command[0]` | T16 | **Built** |
 | Declared-environment-plus-allowlist for script subprocesses | T3, T16 | **Built** |
 | Evidence bound to a tree hash | T17 | **Built** (schema) |
-| `merge` requires the verified head and base, and refuses when either moved | T17 | **Built** (port); the caller that supplies them is S15 |
+| `merge` requires the verified head and base, and refuses when either moved | T17 | **Built** (port and `gh` adapter); the base is re-read from the remote on every fetch, never taken from the pull request's own `baseRefOid`, and the head match is handed to the forge as well so the compare-and-swap is atomic |
+| Forge token never in an argv, never in a remote URL; 0600 config file, removed on exit | **T24**, T3 | **Built** |
+| Credential header scoped to one parsed origin; submodules never fetched; credential helpers cleared | **T24** | **Built** |
+| Pre-publish diff audit — symlinks, submodule pointers, vendored directories, oversized files | T5, T13 | **Built**; reports, and the caller refuses |
+| No force-push, ever; a branch that cannot fast-forward is a conflict | A4 | **Built** |
+| Signed-commit repositories refused at configuration time rather than at merge | **T24**, T15 | **Built**; a signing key in the control plane would let the process every model's output passes through mark commits as verified |
+| Branch names built from a closed alphabet rather than sanitised | T16 | **Built**; issue titles reach a ref name and an argv, and `[a-z0-9-]` has nothing to escape |
 | `Secret` wrapper — no credential becomes a `str` without `.reveal()` | T3, T18 | **Built** |
 | Name-allowlisted environment secrets; nothing-holding default provider | T3, T18 | **Built** |
 | Redaction on write for recorded test fixtures | T21 | **Built** |

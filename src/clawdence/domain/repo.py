@@ -27,12 +27,17 @@ Three fields carry security weight and are worth reading twice:
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated, Final
 
-from pydantic import Field, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from clawdence.domain._base import DomainModel
 from clawdence.domain.ids import RepoId
 from clawdence.domain.verification import TestReporter
+
+#: Namespace every branch this system creates goes under, so a repository owner
+#: can protect, filter or bulk-delete them with one pattern.
+DEFAULT_BRANCH_PREFIX: Final = "clawdence/"
 
 
 class BuildSystem(StrEnum):
@@ -114,6 +119,80 @@ class EgressPolicy(DomainModel):
     unrestricted: bool = False
 
 
+class MergeMethod(StrEnum):
+    """How a merge is performed.
+
+    ``SQUASH`` is the default everywhere it is offered, because a squashed merge
+    produces one commit whose tree is the tree that was verified. A merge commit
+    produces a tree that is the *result* of combining two, which no test ran
+    against — the same invalidation ``VcsPort.merge``'s ``expect_*`` arguments
+    exist to catch, arriving one step later.
+    """
+
+    SQUASH = "squash"
+    MERGE = "merge"
+    REBASE = "rebase"
+
+
+class CheckoutPolicy(DomainModel):
+    """How much of the repository is fetched, and how much of it lands on disk.
+
+    **Partial, not shallow, and the distinction is the whole field.** ``--depth``
+    is the obvious way to make a large clone fast and it is the wrong one here:
+    a shallow repository has no merge base, so "is this branch behind" cannot be
+    answered, a rebase cannot be computed, and S13's evidence-to-tree binding has
+    nothing to compare against. ``--filter=blob:none`` keeps every commit and
+    every tree and defers only file *contents*, which is the part a first clone
+    actually spends its time on, and git fetches what it needs on demand.
+
+    **Sparse checkout is per worktree, not per clone.** The object store is
+    shared between concurrent runs (``RepoStore``); the set of paths one run
+    wants is not. Declaring it here and applying it at checkout keeps that
+    straight.
+    """
+
+    #: ``--filter=blob:none``. Off means a full clone, which is right for a small
+    #: repository on a fast link and for an air-gapped mirror that cannot serve
+    #: the lazy fetches a partial clone depends on.
+    partial: bool = True
+
+    #: Cone-mode sparse-checkout patterns. Empty checks out the whole tree.
+    sparse_paths: tuple[str, ...] = ()
+
+    #: Off by default: LFS content is large, binary, and almost never what an
+    #: agent is editing. A repository whose build needs the real files says so,
+    #: and pays for them.
+    fetch_lfs: bool = False
+
+
+class PullRequestPolicy(DomainModel):
+    """What a pull request from this system looks like in someone else's repo.
+
+    Cheap to implement and disproportionately important: the difference between
+    output that looks like it belongs in a project and output that looks like bot
+    spam is reviewers, labels, and a body that follows the repository's template.
+    """
+
+    draft: bool = False
+
+    #: Forge usernames and team slugs. Requested, never enforced — a reviewer who
+    #: no longer has access makes the request fail, and failing a run over a
+    #: stale username would be the tail wagging the dog (``GhVcs`` treats an
+    #: unassignable reviewer as a warning on an opened PR, not an error).
+    reviewers: tuple[str, ...] = ()
+    team_reviewers: tuple[str, ...] = ()
+
+    labels: tuple[str, ...] = ()
+
+    #: Repository-relative path to the PR body template, e.g.
+    #: ``.github/pull_request_template.md``. Read from the *base* commit, never
+    #: from the worktree: the worktree is output from a model, and a template
+    #: read from there is text an agent could have written for us to sign.
+    body_template_path: str | None = None
+
+    merge_method: MergeMethod = MergeMethod.SQUASH
+
+
 class ResourceCaps(DomainModel):
     """Caps per run. A container without these is a DoS surface against the
     host the control plane is running on."""
@@ -185,6 +264,18 @@ class RepoProfile(DomainModel):
 
     #: Repo conventions file installed into the worktree — v1's ``agentsMd``.
     agents_md_path: str | None = None
+
+    #: Namespace for every branch this system pushes here. Constrained to end in
+    #: ``/`` so it is a namespace rather than a concatenation: without the slash
+    #: ``clawdence`` + ``wi-1`` is ``clawdencewi-1``, which reads as a typo and
+    #: cannot be matched by a branch-protection pattern. Empty is permitted and
+    #: means "no namespace", which is a real if unfriendly choice.
+    branch_prefix: Annotated[
+        str, StringConstraints(pattern=r"^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)*/$")
+    ] = DEFAULT_BRANCH_PREFIX
+
+    checkout: CheckoutPolicy = CheckoutPolicy()
+    pull_request: PullRequestPolicy = PullRequestPolicy()
 
     egress: EgressPolicy = EgressPolicy()
     caps: ResourceCaps = ResourceCaps()
