@@ -97,6 +97,7 @@ async def execute(
     work_item_id: str,
     registry: HandlerRegistry | None = None,
     ledger: Ledger | None = None,
+    request: JsonValue = None,
     clock: Clock = _utc_now,
     sleep: Sleeper = asyncio.sleep,
 ) -> RunReport:
@@ -106,6 +107,12 @@ async def execute(
     a syntax error costs nothing rather than surfacing after the stages ahead of
     it have already spent the budget. ``sleep`` is injected so a test can assert
     retry backoff was honoured without spending the wall-clock time on it.
+
+    ``request`` is the work item this run is for, readable by every stage as
+    ``${request.json.…}`` (see ``refs``). It is passed rather than stored,
+    because a run's request is fixed for the life of the run — an amendment
+    arriving mid-flight re-queues the item (``store.intake``) rather than
+    changing what the stage running right now was asked to do.
 
     Pass a durable ``ledger`` holding results for ``run_id`` and this resumes:
     **a stage is re-run unless it previously succeeded.** That rule is narrower
@@ -137,7 +144,7 @@ async def execute(
             updated_at=started_at,
         )
     )
-    resolver = Resolver(book.final)
+    resolver = Resolver(book.final, request=request)
     stopped = False
 
     for stage in workflow.stages:

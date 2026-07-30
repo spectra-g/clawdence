@@ -150,10 +150,16 @@ class RunnerHandler:
     """Runs a ``runner`` stage through a ``RunnerPort``.
 
     ``plan_template`` is expanded with the engine's own interpolation, so a
-    workflow feeds a prior agent stage's output in as ``${plan.json.text}``. A
-    template rather than a field on ``RunnerStage``, because what the plan *is*
-    is S12's question — an agent step's output shape — and adding a domain field
-    now would pin an answer to it from the outside.
+    workflow feeds a prior agent stage's output in as ``${plan.json.text}``.
+
+    **``RunnerStage.plan`` wins over it**, and that reversal is S11's. S6 kept
+    the template here on the grounds that what a plan *is* was S12's question and
+    a domain field would have answered it from the outside. S12 answered it, and
+    then triage produced the case this shape could not serve: one pipeline wires
+    one handler, and ``sprint`` feeds the runner an architect's output while
+    ``quick-fix`` feeds it the request itself. Two workflows, one composition
+    root, one template — so the template had to move into the file that differs.
+    What is left here is the fallback for a stage that declares none.
     """
 
     runner: RunnerPort
@@ -219,7 +225,7 @@ class RunnerHandler:
             profile=target.profile,
             contract=target.contract,
             budget=stage.budget or target.budget,
-            plan=self._plan(ctx),
+            plan=self._plan(ctx, stage),
             carried_stubs=target.carried_stubs,
             trusted_provenance=target.trusted_provenance,
             # The derivation the ledger uses, so a redelivered dispatch collides
@@ -229,9 +235,10 @@ class RunnerHandler:
             created_at=self.clock(),
         )
 
-    def _plan(self, ctx: StepContext) -> str:
+    def _plan(self, ctx: StepContext, stage: RunnerStage) -> str:
+        template = stage.plan if stage.plan is not None else self.plan_template
         try:
-            return expand(self.plan_template, ctx.resolver)
+            return expand(template, ctx.resolver)
         except InterpolationError as exc:
             # Permanent: the template names a stage that did not produce what it
             # promised, and running the agent with a half-expanded plan would

@@ -124,6 +124,7 @@ worst realistic outcome, not the average one.
 | **T22** | Agent output alters the standard it is measured against | **High** | **A7**, A4 | **Accepted, unmitigated** |
 | **T23** | Mid-run steering as an unauthenticated instruction channel | Medium | A2, A4 | Partly built — bounded and recorded; authorisation designed |
 | **T24** | The forge credential — leaked from the control plane, or sent to a host nobody chose | Medium | **A1**, A4 | **Built** |
+| **T25** | Request text steering triage — a stranger's issue choosing the repository work lands in | Medium | A2, A4 | **Built** (closed set + refuse-on-ambiguity) |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -447,6 +448,50 @@ traceback that prints a frame's locals prints a name.
 a single-tenant machine the set of people who can read `/tmp` as this user is the set who can
 already read the process's memory (R7).
 
+### T25 · Request text steering triage — **built**
+
+New at S11, and it exists because that step made two statements that read as contradicting each
+other. `domain.work_item` says `raw_text` "never selects the workflow, the repo, or the isolation
+tier". S11's brief says repository routing must read the **raw request text** — the
+`slackMessageRaw` lesson, because v1 routed off a paraphrased title and the paraphrase dropped
+product names. Both stand, and the reconciliation is what the text is allowed to *be*:
+
+**a selector over a closed set the operator configured, never a source of new options.** The
+candidates are the repository profiles named in the configuration file. A request can raise one
+configured repository above another; it cannot name one that is not there, cannot introduce a
+workflow, and cannot touch an isolation tier — the tier comes from the profile, which a person
+wrote and which `RepoProfile` will not even validate for the socket tiers without a second field
+acknowledging what they cost.
+
+The threat that survives that framing is narrower and real: a GitHub issue on a public repository
+is a stranger's text, and a stranger who knows which repositories an installation is configured for
+can write an issue that mentions one of them. What they get is work *proposed* against a repository
+the operator had already trusted this system with, arriving as a pull request a human reviews.
+
+**Mitigations.**
+
+- **The candidate set is closed and comes from configuration**, so the blast radius is bounded by
+  what the operator listed. Nothing a submitter writes adds a row.
+- **Ambiguity refuses rather than guessing.** A winner has to score above zero *and* beat the
+  runner-up outright; a tie is reported with both scores and routed nowhere. Guessing between two
+  plausible repositories is the failure mode that would make a mention-stuffing issue effective.
+- **Overrides are envelope fields, never parsed out of the body.** `workflow_override` and `repos`
+  are set by an ingestion adapter from what it was handed — `clawdence submit --workflow`, a CLI
+  flag — and no code reads the request text looking for directives. An adapter for an untrusted
+  source simply does not set them.
+- **A workflow name is validated as one path component.** It is the one routed string that reaches
+  a filesystem, and the closed-set argument does not cover it: `../../etc/passwd` as a
+  `workflow_override` would be a request choosing which file the control plane executes.
+- **Every decision is recorded** as `WORK_ITEM_ROUTED` with the candidates, their scores and the
+  terms that matched — metadata only, never `raw_text` — so a routing that looks wrong is
+  diagnosable and correctable by editing a profile.
+
+**Residual:** an attacker who can submit *and* knows the configured aliases can direct their
+request at a specific one of the operator's repositories. This is mitigated at the other end rather
+than here — the work arrives as a pull request against a branch under `clawdence/`, and S10b is
+where "may this person submit at all" is decided for public sources. Until S10b exists, public
+ingestion is not enabled (§4's first rule).
+
 ### T12 · Poisoned runner base image
 
 Base images per language are shipped to other people and contain the toolchain the runner executes.
@@ -713,6 +758,8 @@ The honest summary. Most of this is not built.
 | No force-push, ever; a branch that cannot fast-forward is a conflict | A4 | **Built** |
 | Signed-commit repositories refused at configuration time rather than at merge | **T24**, T15 | **Built**; a signing key in the control plane would let the process every model's output passes through mark commits as verified |
 | Branch names built from a closed alphabet rather than sanitised | T16 | **Built**; issue titles reach a ref name and an argv, and `[a-z0-9-]` has nothing to escape |
+| Repository routing selects from a configured set; ambiguity refuses; overrides come from the envelope | **T25**, T1 | **Built**; request text can reorder the operator's repositories and can never extend them |
+| A routed workflow name is one path component, checked | **T25**, T16 | **Built**; it is the one routed string that reaches a filesystem |
 | `Secret` wrapper — no credential becomes a `str` without `.reveal()` | T3, T18 | **Built** |
 | Name-allowlisted environment secrets; nothing-holding default provider | T3, T18 | **Built** |
 | Redaction on write for recorded test fixtures | T21 | **Built** |

@@ -26,12 +26,23 @@ commands that make every *other* step's verification quick, which is why the
 plan kept recommending they be pulled forward — and they are the reason the
 entry-point rule above holds under pressure: the alternative to a subcommand is
 a shell script in the repository root that opens the database itself.
+
+``repos``, ``triage`` and ``work`` arrive with S11, and they are the three
+different questions a composition root creates. ``repos`` is *what is
+configured* — including the ``check`` verb S15 could not write, because "fail at
+configuration time" needed a file saying which repositories exist. ``triage`` is
+*what would happen*, and it acts on nothing: routing is the one decision this
+system makes on a request's behalf, so being able to interrogate it without
+spending anything is not a convenience. ``work`` is the one that does it, and it
+is the command M1's goal is written in — a request goes in at ``submit`` and a
+pull request comes out here.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import secrets
 import sys
@@ -41,7 +52,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from clawdence import __version__
+from clawdence import __version__, triage
 from clawdence.agent import AgentHandler, AnthropicModels, PromptRegistry
 from clawdence.devloop import (
     ResetRefused,
@@ -57,9 +68,11 @@ from clawdence.devloop import (
     reset,
 )
 from clawdence.devloop import refusal as reset_refusal
-from clawdence.domain import EventKind, RunStatus, WorkItemType, jsonschema
+from clawdence.domain import EventKind, RunStatus, StepType, WorkItemType, jsonschema
 from clawdence.engine import (
     HandlerRegistry,
+    StepHandler,
+    UnimplementedHandler,
     WorkflowLoadError,
     default_registry,
     execute,
@@ -71,6 +84,7 @@ from clawdence.ingest import DEFAULT_TYPE, NormaliseError
 from clawdence.ingest import cli as ingest_cli
 from clawdence.ingest import report as ingest_report
 from clawdence.ports import EnvSecrets
+from clawdence.ports.errors import PortError
 from clawdence.probe import ProbeError, probe, render_profile
 from clawdence.probe import render_json as render_probe_json
 from clawdence.probe import render_text as render_probe_text
@@ -84,6 +98,7 @@ from clawdence.runners import (
     Reclaimed,
 )
 from clawdence.store import (
+    Admission,
     ArrivalState,
     Intake,
     SqliteLedger,
@@ -92,6 +107,7 @@ from clawdence.store import (
     detect,
     sweep,
 )
+from clawdence.triage import CONFIG_FILENAME
 
 DEFAULT_SCHEMA_DIR = Path("schemas")
 
@@ -423,6 +439,75 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_show.add_argument("ref", metavar="REF", help="The reference it was submitted under.")
     _add_state_argument(inbox_show)
 
+    repos = subcommands.add_parser("repos", help="Inspect the configured repositories.")
+    repos_actions = repos.add_subparsers(dest="repos_command")
+
+    repos_list = repos_actions.add_parser("list", help="What this deployment is wired to.")
+    _add_config_argument(repos_list)
+
+    repos_show = repos_actions.add_parser("show", help="One repository, with its routing signals.")
+    repos_show.add_argument("repo_id", metavar="REPO_ID")
+    _add_config_argument(repos_show)
+
+    repos_check = repos_actions.add_parser(
+        "check",
+        help="Ask each forge whether its repository can be worked on as configured.",
+    )
+    _add_config_argument(repos_check)
+    repos_check.add_argument(
+        "repo_id",
+        metavar="REPO_ID",
+        nargs="?",
+        help="Check only this one. Omitted means all of them.",
+    )
+
+    triage_parser = subcommands.add_parser(
+        "triage",
+        help="Say which workflow and repository a request would route to. Runs nothing.",
+    )
+    triage_parser.add_argument(
+        "ref",
+        metavar="REF",
+        nargs="?",
+        help="A submitted request. Omitted means every pending one.",
+    )
+    _add_config_argument(triage_parser)
+    _add_state_argument(triage_parser)
+    triage_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the decisions as JSON.",
+    )
+
+    work = subcommands.add_parser(
+        "work",
+        help="Take pending requests and run them: route, execute, open a pull request.",
+    )
+    work.add_argument(
+        "ref",
+        metavar="REF",
+        nargs="?",
+        help="Work this one request. Omitted means every pending one, oldest first.",
+    )
+    _add_config_argument(work)
+    _add_state_argument(work)
+    work.add_argument(
+        "--limit",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "How many pending requests to take. Defaults to 1: each one spends "
+            "money, and a queue drained by accident is an expensive surprise."
+        ),
+    )
+    work.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Route and report without running anything. Same as `triage`.",
+    )
+
     probe_parser = subcommands.add_parser(
         "probe",
         help="Read a repository and propose a profile for it.",
@@ -480,6 +565,15 @@ def _add_state_argument(parser: argparse.ArgumentParser) -> None:
         type=Path,
         metavar="PATH",
         help=f"State database (default: ${STATE_HOME_ENV}/{STATE_FILENAME}).",
+    )
+
+
+def _add_config_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--config",
+        type=Path,
+        metavar="PATH",
+        help=f"Deployment configuration (default: ${STATE_HOME_ENV}/{CONFIG_FILENAME}).",
     )
 
 
@@ -768,6 +862,215 @@ def _inbox_show(ref: str, state: Path | None) -> int:
         turns = intake.turns(key)
     print(ingest_report.render_detail(admission, turns))
     return 0
+
+
+def _deployment(config: Path | None) -> triage.Deployment:
+    """Read the configuration, or say what is missing. Raises ``ConfigError``."""
+    return triage.load(config or triage.default_config_path())
+
+
+def _repos_list(config: Path | None) -> int:
+    try:
+        deployment = _deployment(config)
+    except triage.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    print(triage.render_deployment(deployment))
+    return 0
+
+
+def _repos_show(repo_id: str, config: Path | None) -> int:
+    try:
+        deployment = _deployment(config)
+        profile = deployment.profile(repo_id)
+    except triage.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    print(triage.render_repo(profile))
+    return 0
+
+
+def _repos_check(repo_id: str | None, config: Path | None) -> int:
+    """The verb S15 wrote ``check_policy`` for and could not expose.
+
+    Exit status is about whether the repositories are *usable*, not about whether
+    the command worked: 1 when any of them refuses, which is the answer a
+    deployment script wants before it starts accepting requests. Advisories are
+    printed and do not fail — a repository asking for two approvals is working as
+    intended, and refusing over it would block adoption on every well-governed
+    project.
+    """
+    try:
+        deployment = _deployment(config)
+        profiles = (
+            (deployment.profile(repo_id),)
+            if repo_id
+            else tuple(sorted(deployment.profiles.values(), key=lambda p: p.id))
+        )
+        secrets_provider = triage.secrets_for(deployment)
+        store = triage.repo_store(deployment, secrets_provider)
+        vcs = triage.vcs(deployment, store, secrets_provider)
+    except triage.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    if not profiles:
+        print("no repositories configured — `clawdence probe --out` writes one")
+        return 0
+
+    blocked = 0
+    for profile in profiles:
+        try:
+            violations = asyncio.run(vcs.check_policy(profile))
+        except PortError as exc:
+            print(f"{profile.id}  could not be checked: {exc.message}")
+            blocked += 1
+            continue
+        if not violations:
+            print(f"{profile.id}  ok")
+            continue
+        print(f"{profile.id}")
+        for violation in violations:
+            print(f"  {violation.describe()}")
+        blocked += any(violation.blocking for violation in violations)
+    return 1 if blocked else 0
+
+
+def _pending(intake: Intake, ref: str | None, limit: int) -> tuple[Admission, ...]:
+    """The requests a triage or work command is about.
+
+    A named reference is taken whatever state it is in — somebody asking about a
+    specific request means that one, including one already acknowledged. Without
+    one, only ``pending`` rows, oldest first, which is ``Intake.collect``'s order
+    and the order a queue is meant to be worked in.
+    """
+    if ref is not None:
+        admission = intake.get(ingest_cli.key(ref))
+        return () if admission is None else (admission,)
+    items = intake.collect(limit=limit)
+    found = [intake.for_work_item(item.id) for item in items]
+    return tuple(admission for admission in found if admission is not None)
+
+
+def _triage_command(
+    ref: str | None,
+    *,
+    config: Path | None,
+    state: Path | None,
+    as_json: bool,
+) -> int:
+    """Decide, print, change nothing.
+
+    Exit 1 when something did not route, because that is the finding: a request
+    nobody can place is one a person has to look at, and a script checking a
+    queue before draining it needs to know.
+    """
+    try:
+        deployment = _deployment(config)
+    except triage.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    with StateStore.open(state or default_state_path()) as store:
+        admissions = _pending(Intake(store), ref, limit=50)
+
+    if not admissions:
+        print(f"nothing submitted under {ref!r}" if ref else "nothing pending")
+        return 2 if ref else 0
+
+    decisions = [
+        triage.route(
+            admission.item,
+            profiles=deployment.profiles,
+            policy=deployment.config.routing,
+        )
+        for admission in admissions
+    ]
+    if as_json:
+        print(json.dumps([routed.payload() for routed in decisions], indent=2, sort_keys=True))
+    else:
+        print(
+            "\n\n".join(
+                triage.render_routing(routed, title=admission.item.title)
+                for routed, admission in zip(decisions, admissions, strict=True)
+            )
+        )
+    return 1 if any(not routed.routed for routed in decisions) else 0
+
+
+def _work_command(
+    ref: str | None,
+    *,
+    config: Path | None,
+    state: Path | None,
+    limit: int,
+    dry_run: bool,
+) -> int:
+    """Submission to pull request, which is the whole of M1's goal in one verb.
+
+    Requests are acknowledged only when a run actually started for them (see
+    ``triage.acknowledge``): one that could not be routed stays in the queue,
+    because taking it out would leave a person waiting on work that will never
+    begin.
+
+    The exit status is the *worst* outcome, not the last one. A command that
+    worked three requests and failed on the second has failed, and a loop that
+    reported the third one's success would hide it.
+    """
+    if dry_run:
+        return _triage_command(ref, config=config, state=state, as_json=False)
+
+    try:
+        deployment = _deployment(config)
+        secrets_provider = triage.secrets_for(deployment)
+        repo_store = triage.repo_store(deployment, secrets_provider)
+        runner = (
+            triage.runner(deployment.config.runner, secrets_provider)
+            if deployment.config.runner is not None
+            else None
+        )
+    except triage.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    status = 0
+    with StateStore.open(state or default_state_path()) as store:
+        intake = Intake(store)
+        admissions = _pending(intake, ref, limit=limit)
+        if not admissions:
+            print(f"nothing submitted under {ref!r}" if ref else "nothing pending")
+            return 2 if ref else 0
+
+        pipeline = triage.Pipeline(
+            deployment=deployment,
+            store=store,
+            repos=repo_store,
+            worktrees=triage.worktrees(deployment, repo_store),
+            vcs=triage.vcs(deployment, repo_store, secrets_provider),
+            runner=runner,
+            handlers=_agent_handler(),
+        )
+        for admission in admissions:
+            outcome = asyncio.run(pipeline.start(admission.item))
+            triage.acknowledge(intake, outcome)
+            print(triage.render_outcome(outcome))
+            if outcome.refusal is not None:
+                status = max(status, 2)
+            elif not outcome.succeeded:
+                status = max(status, 1)
+    return status
+
+
+def _agent_handler() -> dict[StepType, StepHandler]:
+    """The agent handler, if there is a key for it. Otherwise nothing.
+
+    Same rule as ``_registry``: no key means the refusal stands and names what to
+    wire. A pipeline is not a reason to start demanding credentials a workflow
+    may not need — ``quick-fix`` has no agent step at all.
+    """
+    registry = _registry()
+    handler = registry.for_type(StepType.AGENT)
+    return {} if isinstance(handler, UnimplementedHandler) else {StepType.AGENT: handler}
 
 
 def _runs_list(state: Path | None, *, status: str | None, limit: int) -> int:
@@ -1126,6 +1429,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _inbox_show(args.ref, args.state)
         parser.parse_args(["inbox", "--help"])
         return 0  # pragma: no cover - --help exits
+
+    if args.command == "repos":
+        if args.repos_command == "list":
+            return _repos_list(args.config)
+        if args.repos_command == "show":
+            return _repos_show(args.repo_id, args.config)
+        if args.repos_command == "check":
+            return _repos_check(args.repo_id, args.config)
+        parser.parse_args(["repos", "--help"])
+        return 0  # pragma: no cover - --help exits
+
+    if args.command == "triage":
+        return _triage_command(
+            args.ref,
+            config=args.config,
+            state=args.state,
+            as_json=args.as_json,
+        )
+
+    if args.command == "work":
+        return _work_command(
+            args.ref,
+            config=args.config,
+            state=args.state,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
 
     if args.command == "probe":
         return _probe_command(

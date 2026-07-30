@@ -2,18 +2,29 @@
 
 Workflow-driven orchestration for AI coding agents.
 
-**Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
-setup, the domain model, a workflow engine that executes `script` and `agent` steps, a state store
-that records runs so they survive the process, the ports every integration will sit behind — with
-an in-memory implementation of each and one real adapter for a model provider — and a runner that
-executes a coding agent against a git worktree, either on this machine or inside an ephemeral
-container, with the repository's dependencies installed first against a cache that outlives the
-worktree, a cap on how many runs happen at once, and a sweep that reclaims what a crashed control
-plane left behind, plus the version-control layer that gives a run its checkout and turns what comes
-back into a pull request. There is no network policy, and nothing yet decides which repository a
-piece of work belongs to. It can consult a model, run a coding agent, and open and merge a pull
-request for the result; it cannot run a sprint, because nothing yet joins those three up. It is
-public early so the build is inspectable from the start, not because any of it is ready to use.
+**Status: pre-alpha. The path runs end to end for the first time.** A request submitted at the
+command line is now routed to a workflow and a repository, executed — agents in the control plane,
+repository code in an ephemeral container — and published as a pull request:
+
+```sh
+clawdence submit --text "The billing export drops the tax line on refunds"
+clawdence work
+```
+
+What exists is the toolchain, CI and secret-scanning setup, the domain model, a workflow engine that
+executes `script`, `agent` and `runner` steps, a state store that records runs so they survive the
+process, the ports every integration will sit behind — with an in-memory implementation of each and
+real adapters for a model provider and for GitHub — a runner that executes a coding agent against a
+git worktree with the repository's dependencies installed first against a cache that outlives the
+worktree, a cap on how many runs happen at once, a sweep that reclaims what a crashed control plane
+left behind, the version-control layer that hands a run its checkout and turns what comes back into
+a pull request, and the triage layer that decides which repository and which process a request
+belongs to.
+
+**It is still not ready to use, and two absences are the reason.** There is no network policy on the
+runner, and no authorization on the way in — so it must not be pointed at input from people you do
+not trust. Concurrency, memory, verification contracts, human approval gates and the observability
+surface are all designed and unbuilt. It is public early so the build is inspectable from the start.
 
 ## Decisions taken so far
 
@@ -69,9 +80,14 @@ Two things it does deliberately differently from the engines it borrows its shap
   semicolons. Script steps also get a declared environment plus a small allowlist, never the
   control plane's own — which is where the API keys live.
 
-`runner` and `approval` steps parse and validate, and refuse to run with an error naming what they
-are still missing. The runner step is the interesting one: the runner itself is built, and what has
-not been built is the part that decides which repository, worktree and branch to point it at.
+`clawdence run` executes a workflow file directly, which is the ad-hoc path and the one to reach for
+when writing a workflow. `clawdence work` is the other one: it takes a submitted request, routes it,
+and runs the workflow that routing chose — see [triage](#triage-and-the-path-from-a-request-to-a-pull-request).
+
+`approval` steps parse and validate and then refuse, with an error naming the step that will
+implement them. That refusal is deliberate and it is the same one `runner` steps gave until triage
+existed to say which repository they were for: a stub returning success would make a workflow look
+like it ran, which is the most expensive possible way to be wrong about an orchestrator.
 
 ## Agent steps
 
@@ -82,7 +98,7 @@ declared in the workflow rather than discovered by trial:
 - id: requirements
   type: agent
   role: business-analyst          # a prompt file, versioned, overridable
-  task: 'Work out what is wanted: ${intake.json.parsed.text}'
+  task: 'Work out what is wanted: ${request.json.text}'   # the request, seeded by triage
   response_schema: requirements   # validated, with repair, before anything reads it
   max_turns: 1
   timeout_seconds: 300
@@ -95,10 +111,10 @@ declared in the workflow rather than discovered by trial:
     max_usd: 0.50
 ```
 
-See [`examples/spike.yaml`](examples/spike.yaml) — two agent steps, no repository, runs today — and
+See [`examples/spike.yaml`](examples/spike.yaml) — two agent steps and no repository — and
 [`examples/sprint.yaml`](examples/sprint.yaml), which is the same engine with four agent steps and a
-runner, and which stops at the runner by design. Set `ANTHROPIC_API_KEY` and `clawdence run` wires a
-provider; without one the step refuses rather than pretending.
+runner after them. Set `ANTHROPIC_API_KEY` and `clawdence run` wires a provider; without one the
+step refuses rather than pretending.
 
 - **Prompts are data, and an override is visible as one.** Role prompts live at
   `<role>/<version>.md`; `CLAWDENCE_PROMPT_PATH` adds directories searched first, so tuning the
@@ -413,6 +429,68 @@ gets wrong:
 Rate limiting, submitter authorisation and webhook signatures are **not here** — they are the
 ingress trust boundary, and the size caps in this package are resource bounds rather than that
 control.
+
+## Triage, and the path from a request to a pull request
+
+[`src/clawdence/triage/`](src/clawdence/triage/) is the composition root: it decides which workflow
+runs and which repository the work lands in, and then carries the request the rest of the way. Until
+it existed every other piece was built and tested and nothing joined them.
+
+A deployment is one file — which repositories exist, where their mirrors go, and what runs the code:
+
+```yaml
+# ~/.clawdence/config.yaml
+schema_version: 1
+paths:
+  repo_store: ~/.clawdence/repos     # bare mirrors, one per repository
+  work_root:  ~/.clawdence/work      # a worktree per run
+  workflows:  ./workflows            # a routed name resolves to <dir>/<name>.yaml
+forge_token_env: CLAWDENCE_FORGE_TOKEN   # a *name*; never a token
+runner:
+  tier: container
+  image: ghcr.io/example/runner@sha256:…  # digest-pinned; a tag is refused
+  argv: [codex, exec, --full-auto]
+  secret_env: {OPENAI_API_KEY: runner-llm-key}   # the runner's own scoped key
+repos:
+  - repos/acme-billing.json          # written by `clawdence probe --out`
+```
+
+```sh
+clawdence repos list                 # what this deployment is wired to
+clawdence repos check                # can each repository be worked on as configured?
+clawdence triage REQ-1               # what *would* happen, in full, changing nothing
+clawdence work REQ-1                 # route, run, push, open the pull request
+```
+
+The registry is the probe's output read back, so there is no second format to keep in step. `repos
+check` is the "fail at configuration time, not at merge time" verb: a repository requiring signed
+commits is refused before an agent step, a container or a test suite has been paid for.
+
+- **The two decisions are logged with their reasons, and overridable.** Every routing decision
+  records the candidates, their scores and the terms that matched, so "why did this go there" is
+  answerable and the fix is an edit to a repository profile. `--workflow` and `--repo` at submit
+  time override either.
+- **Routing reads the raw request text — and that is safe because the candidate set is closed.**
+  v1 routed off a paraphrased title and the paraphrase dropped product names, so a paraphrase must
+  not change the answer. But request text is the most attacker-controlled string in the system, so
+  it is a *selector over the repositories the operator configured* and never a source of new ones:
+  it can reorder them and can never extend them. Ambiguity refuses rather than guessing — a winner
+  must beat the runner-up outright — and a tie asks a person. See T25 in the threat model.
+- **A workflow sees the request as `${request.json.text}`.** Not a stage: a reserved name, seeded
+  by the pipeline, which is what retired the `intake` script step every shipped workflow used to
+  open with. A stage *called* `request` is a load error.
+- **Three shipped workflows, one engine.** [`sprint`](examples/sprint.yaml) is four agent steps and
+  a runner; [`quick-fix`](examples/quick-fix.yaml) is a runner and nothing else, for a one-line bug
+  that does not need three models to agree it is a one-line bug; [`spike`](examples/spike.yaml) has
+  no runner step at all, so it is never given a checkout and *cannot* open a pull request. None of
+  the three is a special case anywhere in the code.
+- **Nothing is published that a reviewer cannot read.** The diff is audited before it is pushed —
+  symlinks, submodules, vendored directories, huge files — and a run that committed nothing opens
+  no pull request rather than an empty one. A run whose *later* stages failed does publish, with
+  the failure named in the body: an agent's product is a proposal entering the normal review path,
+  and throwing it away would be deciding the review.
+- **A request nobody could route stays in the queue.** Acknowledging it would leave a person
+  waiting on work that will never start.
 
 ## The dev loop
 

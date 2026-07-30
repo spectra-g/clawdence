@@ -44,11 +44,19 @@ from clawdence.engine.handlers import (
 )
 from clawdence.engine.ledger import InMemoryLedger, Ledger
 from clawdence.engine.loader import load_workflow, parse_workflow, validate_references
-from clawdence.engine.refs import MISSING, Facet, Reference, Resolver, parse_reference
+from clawdence.engine.refs import (
+    MISSING,
+    REQUEST,
+    Facet,
+    Reference,
+    Resolver,
+    parse_reference,
+)
 from clawdence.engine.report import render_json, render_text, to_dict
 
 __all__ = [
     "MISSING",
+    "REQUEST",
     "ConditionEvalError",
     "ConditionSyntaxError",
     "EngineError",

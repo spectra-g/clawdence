@@ -985,8 +985,15 @@ def test_running_a_workflow_with_an_agent_step_and_no_key_halts_at_that_step(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The shipped example, end to end, on a machine with no credentials. It has to
-    fail *and say why* rather than reporting a success for work nobody did."""
+    fail *and say why* rather than reporting a success for work nobody did.
+
+    The first stage is the agent one now: S11 removed the ``intake`` script step
+    that used to echo a hardcoded request, because ``${request.json.text}`` is
+    where a workflow gets one. So the refusal arrives one stage earlier, which is
+    the same behaviour with one fewer stage in front of it.
+    """
     assert main(["run", "examples/spike.yaml", "--no-state"]) == 1
     out = capsys.readouterr().out
-    assert "intake" in out
+    assert "understand" in out
+    assert "step-type-not-implemented" in out
     assert "status: halted" in out

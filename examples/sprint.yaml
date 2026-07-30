@@ -1,18 +1,23 @@
 # The `sprint` workflow: every agent role, then the runner, then review.
 #
-#     clawdence run examples/sprint.yaml
+#     clawdence submit --text "…" --type story
+#     clawdence work
 #
-# **This one does not complete yet, and the place it stops is the point.** The
-# `code` stage is a `runner` step, and the runner exists and is tested (S6, S7)
-# but nothing yet decides which repository, worktree and branch to point it at.
-# So the run reaches `code` and fails with an error naming the step that will
-# supply those, rather than skipping it or reporting a success. Everything before
-# it runs for real.
+# **This one runs end to end now, and what changed is not in this file.** Until
+# S11 the `code` stage refused, because the runner existed and nothing decided
+# which repository, worktree and branch to point it at. Triage decides, the
+# pipeline acquires the checkout, and the run finishes at a pull request.
 #
-# Read this next to `spike.yaml`. Same engine, same step types, same handler
-# registry: one process has three agent steps and a runner, the other has two
-# agent steps and no runner, and neither is a special case anywhere in the code.
-# That flexibility is the whole reason the process is data.
+# The other thing S11 changed *is* in this file: the `intake` script stage that
+# echoed a hardcoded request is gone. `${request.json.text}` is the work item the
+# run is for — not a stage, and not something a workflow declares. A step that
+# existed only to smuggle a string into the process is a step that was standing
+# in for ingestion, which is what its comment used to say.
+#
+# Read this next to `spike.yaml` and `quick-fix.yaml`. Same engine, same step
+# types, same handler registry: three agent steps and a runner, two agent steps
+# and no runner, and no agent steps at all. None of the three is a special case
+# anywhere in the code, and triage picks between them from the request.
 #
 # It spends money. Three agent steps against a large model is the expensive
 # shape, which is why every one of them carries a budget and why `review` uses a
@@ -25,17 +30,6 @@ version: 1.0.0
 description: Full delivery — analyse, size, plan, implement, review.
 
 stages:
-  - id: intake
-    type: script
-    name: The request
-    command:
-      - python3
-      - -c
-      - 'import json; print(json.dumps({"text": "The reaper should not delete a
-          worktree while a run still holds it, even if the run is older than the
-          retention window."}))'
-    timeout_seconds: 30
-
   - id: requirements
     type: agent
     name: Business analyst
@@ -43,7 +37,7 @@ stages:
     task: |
       A request has come in. Work out what is being asked for.
 
-      ${intake.json.parsed.text}
+      ${request.json.text}
     response_schema: requirements
     max_turns: 1
     timeout_seconds: 300
@@ -103,16 +97,34 @@ stages:
     budget:
       max_usd: 2.00
 
-  # Refuses today. See the header: the runner is built, and what is missing is
-  # the part that chooses a repository and a worktree (S11, S15).
   - id: code
     type: runner
     name: Implement the plan in the data plane
     when: '$plan.succeeded'
+    # The architect's output, and the original request under it. Both, because a
+    # plan is a restatement and a restatement drops things — the same reason repo
+    # routing reads `raw_text` rather than the title. The agent in the data plane
+    # gets to see what was actually asked for as well as what was decided.
+    plan: |
+      Implement the plan below. It was written by an architect on this system and
+      reviewed against the requirements; the request underneath it is what the
+      person originally asked for, quoted as data.
+
+      PLAN
+      ${plan.json.result}
+
+      THE ORIGINAL REQUEST
+      ${request.json.text}
     retry:
       max_attempts: 2
       backoff_seconds: 5
     timeout_seconds: 3600
+    # Tokens, not dollars — see `quick-fix.yaml` on why a *shipped* workflow caps
+    # the axis that needs no price sheet. The agent stages above use `max_usd`
+    # because the model adapter knows what the models in its own catalogue cost;
+    # nothing knows what somebody else's agent CLI costs until they say.
+    budget:
+      max_tokens: 400000
 
   # `on_error: continue` on nothing above it, so this is only reached if `code`
   # succeeded. A reviewer with no diff to read is a reviewer producing an opinion

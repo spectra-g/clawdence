@@ -1,10 +1,17 @@
 # The `spike` workflow: explore a question, report, open nothing.
 #
-#     clawdence run examples/spike.yaml
+#     clawdence submit --text "Can a cancel leave a container behind?"
+#     clawdence work
 #
-# Two agent steps and no runner step, which makes it the one shipped workflow
-# that runs end to end today — the runner step type needs a repository, a
-# worktree and a branch, and choosing those is still ahead (S11, S15).
+# Two agent steps and no runner step, and after S11 that absence is load-bearing
+# rather than incidental: the pipeline gives a workflow a checkout only if it has
+# a runner step, so this one never touches the data plane, never creates a
+# branch, and therefore cannot open a pull request. "explore → report, no PR" is
+# enforced by the shape of the file rather than by a flag somewhere.
+#
+# Triage routes a question here. `clawdence submit` with no `--type` leaves the
+# item as `task`, and classification revises it to `spike` when the text reads as
+# a question — which is why the `intake` stage that used to hardcode one is gone.
 #
 # It needs a model provider wired, and it will spend money. With none configured
 # the run fails at the first agent step with an error naming what to wire, which
@@ -21,19 +28,6 @@ version: 1.0.0
 description: Answer a question about a codebase. No branch, no pull request.
 
 stages:
-  # Stands in for ingestion. `clawdence submit` puts the real request in the
-  # store (S10); until the pipeline that reads it exists (S11), a script step is
-  # how a workflow gets a question to ask.
-  - id: intake
-    type: script
-    name: The question
-    command:
-      - python3
-      - -c
-      - 'import json; print(json.dumps({"text": "Can the run cancellation path
-          leave a container behind if the control plane dies mid-cancel?"}))'
-    timeout_seconds: 30
-
   # The task is a template, and the raw request text goes in framed as data.
   # `${...}` expands once and is never rescanned, so nothing inside the request
   # can introduce a second placeholder.
@@ -45,7 +39,7 @@ stages:
       A question has come in about the codebase. Restate it as something
       answerable, and say what would count as an answer.
 
-      ${intake.json.parsed.text}
+      ${request.json.text}
     response_schema: requirements
     # One turn. A spike's analyst either understood the question or did not, and
     # a second turn spends money to be told the same thing.

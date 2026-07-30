@@ -24,6 +24,20 @@ Two sentinels, deliberately distinct:
 
 Resolution is total for conditions and strict for interpolation, and that
 asymmetry is intentional; see ``conditions`` and ``interpolation``.
+
+**One name is not a stage.** ``$request.json.text`` reads the work item the run
+is for, and it resolves against a value the pipeline (S11) seeded rather than
+against anything the workflow declares. It exists because a process has to be
+able to see what it was asked to do, and every alternative was worse: a first
+``script`` stage echoing the text — which is what ``examples/`` shipped until
+S11 — puts attacker-controlled text in an argv and makes every workflow carry a
+stage that does no work, and a handler that reached for the work item itself
+would give each step type its own private channel to the request.
+
+It is deliberately read-only, deliberately only navigable through ``json``, and
+deliberately reserved: the loader refuses a *stage* called ``request``, because
+a workflow that declared one would silently shadow this and change what every
+reference below it meant.
 """
 
 from __future__ import annotations
@@ -87,6 +101,10 @@ MISSING: Final = _MissingType()
 
 #: What a resolved reference can be: any JSON value, or absent.
 Resolved = JsonValue | _MissingType
+
+#: The one name a reference may use without a stage declaring it: the work item
+#: the run is for, seeded by the pipeline. See the module docstring.
+REQUEST: Final = "request"
 
 #: A stage id, per ``domain.ids.Slug``.
 _STAGE = r"[a-z][a-z0-9_-]*"
@@ -166,12 +184,19 @@ class Resolver:
     Holds results rather than a store: S3 has no persistence, and when S4
     arrives the executor hands it a resolver built from rows instead. Nothing
     below this line needs to know which it was.
+
+    ``request`` is the work item the run is for, or ``None`` for a run that has
+    no work item behind it — ``clawdence run`` against a file, which is every
+    ad-hoc run. ``None`` and "the request has no such field" both resolve to
+    ``MISSING``, which is right: a workflow reading ``${request.json.text}``
+    outside a pipeline has not been given one, and that is the same absence.
     """
 
-    __slots__ = ("_results",)
+    __slots__ = ("_request", "_results")
 
-    def __init__(self, results: Mapping[str, StepResult]) -> None:
+    def __init__(self, results: Mapping[str, StepResult], *, request: JsonValue = None) -> None:
         self._results = results
+        self._request = request
 
     def resolve(self, ref: Reference) -> Resolved:
         """The value a reference names, or ``MISSING``.
@@ -181,6 +206,13 @@ class Resolver:
         *earlier* stage, so the only way to get here is a stage the run never
         reached, and "not there" is the honest answer for that.
         """
+        if ref.stage_id == REQUEST:
+            # Only ``json``. The loader rejects the others, so reaching here
+            # with one means a ``Resolver`` built in Python without going
+            # through it — answered rather than raised, because this is a read
+            # of something absent and that is what ``MISSING`` is for.
+            return _descend(self._request, ref.path) if ref.facet is Facet.JSON else MISSING
+
         result = self._results.get(ref.stage_id)
         if result is None:
             return MISSING

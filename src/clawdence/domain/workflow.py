@@ -193,6 +193,20 @@ class RunnerStage(StageBase):
 
     type: Literal[StepType.RUNNER] = StepType.RUNNER
 
+    #: What the agent in the data plane is told to build, as a template —
+    #: ``${plan.json.result}`` after a planning stage, ``${request.json.text}``
+    #: in a workflow that has none. The runner half of ``AgentStage.task``, and
+    #: it is here for the same reason (S11, added rev 14): the plan a step is
+    #: given is *the process*, and the process is data. Left on the handler it
+    #: would be one template per composition root, so a workflow that plans and
+    #: one that goes straight to code could not both be wired by the same
+    #: pipeline — which is exactly what triage does with ``sprint`` and
+    #: ``quick-fix``.
+    #:
+    #: Absent means the handler's own default, which is what an ad-hoc
+    #: ``clawdence run`` gets.
+    plan: str | None = None
+
     #: Overrides the repo profile's tier when set. Narrowing only — the engine
     #: refuses a widening override for untrusted work.
     isolation_tier_override: str | None = None
