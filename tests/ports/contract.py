@@ -41,12 +41,16 @@ from typing import Any, ClassVar
 
 import pytest
 
-from clawdence.domain import RunnerRequest, WorkItem
+from clawdence.domain import RunnerRequest, TokenUsage, WorkItem
 from clawdence.ports import (
     ContextPort,
     ControlPort,
     IngestPort,
     KnowledgeKind,
+    Message,
+    MessageRole,
+    ModelPort,
+    ModelRequest,
     NotifyPort,
     PermanentError,
     PullRequest,
@@ -55,9 +59,11 @@ from clawdence.ports import (
     SecretNotFoundError,
     SecretProvider,
     StaleMergeError,
+    StopReason,
     Ticket,
     TicketState,
     TrackerPort,
+    UnknownModelError,
     VcsPort,
     dedupe_key,
 )
@@ -733,6 +739,74 @@ class ControlContract:
 
 
 # --------------------------------------------------------------------------- #
+# ModelPort
+# --------------------------------------------------------------------------- #
+
+
+class ModelContract:
+    """What every provider must answer about itself, and answer consistently.
+
+    Shorter than the other contracts, and deliberately so. The obligation that
+    dominates this package — every write is idempotent on a caller-derived key —
+    does not apply here and must not be asserted: ``ports.model`` argues that a
+    deduplicated completion breaks the one retry that matters. What is left is the
+    part a caller genuinely depends on, which is that ``describe`` can be trusted
+    before anything has been spent.
+    """
+
+    pytestmark = pytest.mark.contract
+
+    #: A model the adapter under test serves.
+    known: ClassVar[str] = "fake-model"
+
+    @pytest.fixture
+    def model(self) -> ModelPort:
+        raise NotImplementedError
+
+    def test_describe_answers_for_a_known_model(self, model: ModelPort) -> None:
+        descriptor = model.describe(self.known)
+        assert descriptor.model == self.known
+        assert descriptor.context_window_tokens > 0
+        assert descriptor.max_output_tokens > 0
+
+    def test_describe_refuses_an_unknown_model(self, model: ModelPort) -> None:
+        """A typo in a workflow must fail before the run, not as a 404 halfway
+        through a sprint."""
+        with pytest.raises(UnknownModelError):
+            model.describe("no-such-model-exists")
+
+    def test_describe_is_stable(self, model: ModelPort) -> None:
+        """Called during validation and again when the budget is worked out. A
+        descriptor that changed between the two would make the second check
+        measure something the first did not."""
+        assert model.describe(self.known) == model.describe(self.known)
+
+    def test_prices_are_evaluable(self, model: ModelPort) -> None:
+        """A dollar cap the adapter cannot evaluate is a cap that enforces
+        nothing — the lesson ``TokenPrice`` carries over from the runner."""
+        prices = model.describe(self.known).prices
+        assert prices.usd(TokenUsage(input_tokens=1_000, output_tokens=1_000)) >= 0
+
+    def test_a_completion_comes_back_attributed(self, model: ModelPort) -> None:
+        """``ModelResponse.model`` is what answered, which is not always what was
+        asked for. A response that did not say would make a quota fallback
+        invisible in the run record."""
+        descriptor = model.describe(self.known)
+        response = run(
+            model.complete(
+                ModelRequest(
+                    model=self.known,
+                    system="you are a business analyst",
+                    messages=(Message(role=MessageRole.USER, text="hello"),),
+                    max_output_tokens=min(64, descriptor.max_output_tokens),
+                )
+            )
+        )
+        assert response.model
+        assert isinstance(response.stop_reason, StopReason)
+
+
+# --------------------------------------------------------------------------- #
 # Null adapters
 # --------------------------------------------------------------------------- #
 
@@ -789,6 +863,7 @@ __all__ = [
     "ContextContract",
     "ControlContract",
     "IngestContract",
+    "ModelContract",
     "NotifyContract",
     "NullAdapterContract",
     "RunnerContract",

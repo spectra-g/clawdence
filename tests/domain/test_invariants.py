@@ -170,14 +170,14 @@ def test_agent_turn_budget_is_declared_and_bounded() -> None:
     declaration exists to prevent.
     """
     with pytest.raises(ValidationError):
-        AgentStage(id="ba", role="ba", model=ModelSelector(model="m"), max_turns=0)
+        AgentStage(id="ba", role="ba", task="t", model=ModelSelector(model="m"), max_turns=0)
     with pytest.raises(ValidationError):
-        AgentStage(id="ba", role="ba", model=ModelSelector(model="m"), max_turns=99)
+        AgentStage(id="ba", role="ba", task="t", model=ModelSelector(model="m"), max_turns=99)
 
 
 def test_agent_context_overflow_fails_loudly_by_default() -> None:
     """Never silently drop context — that was v1's whole Kimi failure class."""
-    stage = AgentStage(id="ba", role="ba", model=ModelSelector(model="m"))
+    stage = AgentStage(id="ba", role="ba", task="t", model=ModelSelector(model="m"))
     assert stage.on_context_overflow.value == "fail"
 
 

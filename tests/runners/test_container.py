@@ -32,7 +32,7 @@ import pytest
 from pydantic import ValidationError
 
 from clawdence.domain import Budget, ResourceCaps, RunnerOutcome, RunnerRequest
-from clawdence.ports import PermanentError, StaticSecrets
+from clawdence.ports import PermanentError, StaticSecrets, TokenPrice
 from clawdence.runners import (
     LABEL_NAMESPACE,
     Completion,
@@ -43,7 +43,6 @@ from clawdence.runners import (
     Installed,
     Mount,
     PlanDelivery,
-    TokenPrice,
     container_name,
 )
 from clawdence.runners import process as process_module

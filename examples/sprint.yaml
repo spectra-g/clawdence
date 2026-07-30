@@ -1,0 +1,141 @@
+# The `sprint` workflow: every agent role, then the runner, then review.
+#
+#     clawdence run examples/sprint.yaml
+#
+# **This one does not complete yet, and the place it stops is the point.** The
+# `code` stage is a `runner` step, and the runner exists and is tested (S6, S7)
+# but nothing yet decides which repository, worktree and branch to point it at.
+# So the run reaches `code` and fails with an error naming the step that will
+# supply those, rather than skipping it or reporting a success. Everything before
+# it runs for real.
+#
+# Read this next to `spike.yaml`. Same engine, same step types, same handler
+# registry: one process has three agent steps and a runner, the other has two
+# agent steps and no runner, and neither is a special case anywhere in the code.
+# That flexibility is the whole reason the process is data.
+#
+# It spends money. Three agent steps against a large model is the expensive
+# shape, which is why every one of them carries a budget and why `review` uses a
+# cheaper model — reviewing a written diff is not the task that needs the best
+# model in the catalogue.
+
+schema_version: 1
+name: sprint
+version: 1.0.0
+description: Full delivery — analyse, size, plan, implement, review.
+
+stages:
+  - id: intake
+    type: script
+    name: The request
+    command:
+      - python3
+      - -c
+      - 'import json; print(json.dumps({"text": "The reaper should not delete a
+          worktree while a run still holds it, even if the run is older than the
+          retention window."}))'
+    timeout_seconds: 30
+
+  - id: requirements
+    type: agent
+    name: Business analyst
+    role: business-analyst
+    task: |
+      A request has come in. Work out what is being asked for.
+
+      ${intake.json.parsed.text}
+    response_schema: requirements
+    max_turns: 1
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      fallbacks: [claude-haiku-4-5-20251001]
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # A request nobody understood is not worth sizing, planning or building. The
+  # guard is here rather than three stages later so the expensive steps are the
+  # ones that are gated.
+  - id: assessment
+    type: agent
+    name: Technical lead
+    when: '$requirements.json.result.confidence >= 0.5'
+    role: tech-lead
+    task: |
+      Size this work and say how you would approach it.
+
+      Requirements: ${requirements.json.result}
+    response_schema: assessment
+    max_turns: 2
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # An `L` is work that should be split before it starts, and splitting it is
+  # S15b. Until then the honest thing is not to plan it, which this guard does.
+  - id: plan
+    type: agent
+    name: Architect
+    when: '$assessment.json.result.size != "L"'
+    role: architect
+    task: |
+      Write the plan another agent will implement. It is a proposal: it is
+      reviewed before anything acts on it.
+
+      Requirements: ${requirements.json.result}
+      Assessment: ${assessment.json.result}
+    response_schema: plan
+    # Two turns, because a plan is the longest structured document in the process
+    # and therefore the one most likely to need a correction.
+    max_turns: 2
+    timeout_seconds: 600
+    model:
+      model: claude-opus-5
+      fallbacks: [claude-sonnet-5]
+      requires: [structured_output, long_context]
+      temperature: 0.0
+    budget:
+      max_usd: 2.00
+
+  # Refuses today. See the header: the runner is built, and what is missing is
+  # the part that chooses a repository and a worktree (S11, S15).
+  - id: code
+    type: runner
+    name: Implement the plan in the data plane
+    when: '$plan.succeeded'
+    retry:
+      max_attempts: 2
+      backoff_seconds: 5
+    timeout_seconds: 3600
+
+  # `on_error: continue` on nothing above it, so this is only reached if `code`
+  # succeeded. A reviewer with no diff to read is a reviewer producing an opinion
+  # about nothing, and paying for it.
+  - id: review
+    type: agent
+    name: Review the work against what was asked
+    when: '$code.succeeded'
+    role: reviewer
+    task: |
+      Review the completed work against the requirements and the plan.
+
+      Requirements: ${requirements.json.result}
+      Plan: ${plan.json.result}
+      What the runner reported: ${code.json}
+    response_schema: review
+    max_turns: 2
+    timeout_seconds: 300
+    model:
+      # Cheaper on purpose. Reading a written diff against stated criteria is not
+      # the task in this process that needs the best model in the catalogue.
+      model: claude-sonnet-5
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 1.00

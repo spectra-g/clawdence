@@ -37,7 +37,12 @@ import yaml
 from pydantic import ValidationError
 
 from clawdence.domain import Stage, Workflow
-from clawdence.domain.workflow import WORKFLOW_SCHEMA_VERSION, ApprovalStage, ScriptStage
+from clawdence.domain.workflow import (
+    WORKFLOW_SCHEMA_VERSION,
+    AgentStage,
+    ApprovalStage,
+    ScriptStage,
+)
 from clawdence.engine import conditions, interpolation
 from clawdence.engine.errors import (
     ConditionSyntaxError,
@@ -242,6 +247,8 @@ def _templates(stage: Stage) -> Iterator[tuple[str, str]]:
             yield stage.cwd, "cwd"
         if stage.stdin is not None:
             yield stage.stdin, "stdin"
+    elif isinstance(stage, AgentStage):
+        yield stage.task, "task"
     elif isinstance(stage, ApprovalStage):
         yield stage.prompt, "prompt"
 

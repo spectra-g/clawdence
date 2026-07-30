@@ -63,7 +63,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
@@ -89,6 +88,7 @@ from clawdence.ports.control import (
     Signal,
 )
 from clawdence.ports.errors import PermanentError
+from clawdence.ports.model import TokenPrice
 from clawdence.ports.runner import validate_result
 from clawdence.ports.secrets import NullSecrets, SecretProvider
 from clawdence.runners import plan as plan_text
@@ -151,34 +151,6 @@ class PlanDelivery(StrEnum):
     STDIN = "stdin"
     ARGUMENT = "argument"
     FILE = "file"
-
-
-@dataclass(frozen=True, slots=True)
-class TokenPrice:
-    """What tokens cost, per million, for the model this CLI runs.
-
-    Configured rather than derived, because the runner cannot see which model the
-    CLI chose. Required whenever a request sets ``Budget.max_usd``: a runner that
-    accepted a dollar cap it had no way to evaluate would report a budget as
-    enforced while enforcing nothing.
-    """
-
-    input_usd: Decimal
-    output_usd: Decimal
-    cached_input_usd: Decimal = Decimal("0")
-
-    def usd(self, usage: TokenUsage, *, unattributed: int = 0) -> Decimal:
-        """Cost of this usage, plus tokens reported without a breakdown.
-
-        Unattributed tokens are priced at the output rate — the more expensive of
-        the two. A cap that errs towards firing early is still a cap; one that
-        errs the other way is decoration.
-        """
-        return (
-            self.input_usd * usage.input_tokens
-            + self.output_usd * (usage.output_tokens + usage.reasoning_tokens + unattributed)
-            + self.cached_input_usd * usage.cached_input_tokens
-        ) / Decimal(1_000_000)
 
 
 @dataclass(frozen=True, slots=True)

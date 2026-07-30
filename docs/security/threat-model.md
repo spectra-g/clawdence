@@ -9,13 +9,22 @@ It is written *before* the execution machinery exists, deliberately. A threat mo
 the fact describes a design; this one is meant to constrain it.
 
 > **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
-> executes `script` steps, a state store, the ports every integration will sit behind — with
-> in-memory implementations, not real adapters — and **three runner tiers**: `host`, which has no
-> isolation at all, `container`, which has the plane split, and `container+docker:socket`, which
-> has the plane split and then hands out the means to undo it. There is **no egress policy**, no
-> agent step and no ingestion. Many controls below are **Designed**, not **Built**. Do not point
-> this at anything you care about, and do not expose it to input from people you do not trust,
-> until the ingress and egress controls are built and this notice is gone.
+> executes `script` and `agent` steps, a state store, the ports every integration will sit behind —
+> with in-memory implementations plus **one real adapter**, a model provider — and **three runner
+> tiers**: `host`, which has no isolation at all, `container`, which has the plane split, and
+> `container+docker:socket`, which has the plane split and then hands out the means to undo it.
+> There is **no egress policy** and no ingestion beyond the CLI. `runner` and `approval` steps
+> still refuse. Many controls below are **Designed**, not **Built**. Do not point this at anything
+> you care about, and do not expose it to input from people you do not trust, until the ingress and
+> egress controls are built and this notice is gone.
+>
+> **An agent step now sends text to a third party.** Request text, retrieved context and every
+> prior step's output leave the control plane in a prompt, over TLS, to a provider that logs.
+> Nothing about that is a new *threat* — it is the point of the system — but it is a new data flow,
+> and the controls on it are narrow and worth stating: the request carries no credential the caller
+> did not put in it, the adapter refuses to send over plaintext to anything but loopback, and
+> provider error text is never copied into an error message or an audit record because it quotes
+> the request back (T11).
 >
 > The `container` tier makes the plane split real — one bind mount, every capability dropped, a
 > read-only root, no Docker socket, resource caps the kernel enforces — and the claims that are
@@ -553,10 +562,30 @@ guard covers changes to itself, so removing it is a change that is also visible 
 (agent steps) is where output first becomes a diff and S17 (approval gates) is where the gate
 becomes real; both trace here.
 
-**Disposition today: accepted, unmitigated.** Neither step exists. There is no agent step, so
-nothing produces a diff, so nothing can propose a change to anything — the risk is currently
-theoretical because the capability is absent, not because a control is present. Stated rather than
-scored as low, because the day the capability arrives the disposition has to change with it.
+**Disposition today: accepted, partially mitigated — the first half of the control is now
+structural.** S12 has shipped and the disposition changes with it, as this entry said it would have
+to. Two things are true and they are worth keeping apart.
+
+*What arrived.* An agent step now produces output, and that output can be interpolated into a
+runner step's plan. So text a model wrote can reach a process that edits a repository, which is one
+link in the chain this threat describes.
+
+*What did not.* An agent step still cannot write anything. `clawdence.agent.AgentHandler` is
+constructed with a model port, a prompt registry, a schema registry and a tool surface, and with
+nothing else — no state store, no workflow loader, no VCS adapter, no filesystem. Its return value
+is a `HandlerOutcome` the engine records. That is the enforcement, and it is deliberately a matter
+of what the object was *given* rather than a check it performs: there is no code path by which an
+agent's output arrives already applied, so there is nothing for a future change to forget to call.
+A test asserts the constructor surface for that reason, so widening it is a visible diff rather
+than a quiet one. The tool surface is empty for the same reason and refuses a declared tool by
+name — an agent step runs in Zone 2, and a model-directed file read there is a read inside the
+process holding every credential in the system.
+
+*What is still accepted.* Nothing produces a **diff** yet: that is the `runner` step, which still
+refuses because nothing chooses a repository (S11, S15). And the second half of the intended
+mitigation — *no run may satisfy the gate that merges its own proposal* — does not exist, because
+approval gates do not exist (S17). The absence of a diff remains an absence of capability rather
+than a control, and the day S15 lands this entry has to be read again.
 
 ### T23 · Mid-run steering as an unauthenticated instruction channel
 
@@ -629,7 +658,7 @@ what it does.
 | **R6** | Single-machine, single-tenant only | Multi-tenant and multi-machine are stated non-goals. There is no tenant isolation because there are no tenants. | A hosted mode, which is not planned. |
 | **R7** | The operator's own machine is trusted | The control plane, the state store, and the runners share a host. A compromised host is a total compromise. | Nothing. This is the deployment model. |
 | **R8** | Denial of service against the system itself | Rate limits and budgets bound the damage; they do not prevent a determined submitter from making the system unavailable to its operator. | Nothing planned. Availability is not a security goal here. |
-| **R9** | The system's own output changing the standard it is judged by (T22) | Accepted only because nothing today can produce a diff: there is no agent step. It is an absence of capability, not a control. | S12 shipping. The proposal-plus-self-approval-refusal in T22 has to exist in the same change that makes an agent step able to write one. |
+| **R9** | The system's own output changing the standard it is judged by (T22) | Partially mitigated as of S12: an agent step is structurally incapable of writing anything, because the handler is given no store, no loader and no VCS. Still accepted for the rest — nothing produces a diff (no `runner` step is wired) and no approval gate exists to refuse self-approval. | S15 shipping, which is what makes a diff possible. The self-approval refusal has to exist in the same change as the gate (S17). |
 
 ---
 

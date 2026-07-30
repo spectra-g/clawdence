@@ -35,13 +35,14 @@ import asyncio
 import os
 import secrets
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from clawdence import __version__
+from clawdence.agent import AgentHandler, AnthropicModels, PromptRegistry
 from clawdence.devloop import (
     ResetRefused,
     render_dead_letters,
@@ -58,7 +59,9 @@ from clawdence.devloop import (
 from clawdence.devloop import refusal as reset_refusal
 from clawdence.domain import EventKind, RunStatus, WorkItemType, jsonschema
 from clawdence.engine import (
+    HandlerRegistry,
     WorkflowLoadError,
+    default_registry,
     execute,
     load_workflow,
     render_json,
@@ -67,6 +70,7 @@ from clawdence.engine import (
 from clawdence.ingest import DEFAULT_TYPE, NormaliseError
 from clawdence.ingest import cli as ingest_cli
 from clawdence.ingest import report as ingest_report
+from clawdence.ports import EnvSecrets
 from clawdence.probe import ProbeError, probe, render_profile
 from clawdence.probe import render_json as render_probe_json
 from clawdence.probe import render_text as render_probe_text
@@ -500,6 +504,38 @@ def _schema_command(action: str, out: Path) -> int:
     return 0
 
 
+#: The environment variable an API key is read from. Uppercase and conventional,
+#: because it is the name every provider's own documentation uses and a user who
+#: has one exported already should not have to learn ours.
+API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+
+def _registry(environ: Mapping[str, str] | None = None) -> HandlerRegistry:
+    """The handlers a CLI run gets: script always, agent if a key is present.
+
+    Wired here rather than in ``default_registry`` because the engine must not
+    know what a provider is, and read from the environment rather than from a
+    config file because configuration is S22's and a key in a file is a key in a
+    backup. The allowlist is one name, so a workflow cannot make this resolve a
+    different variable.
+
+    **No key means the refusal stands**, and the refusal names what to wire. That
+    is the whole reason this returns a registry rather than raising: a workflow
+    with no agent steps runs perfectly well on a machine with no credentials, and
+    ``clawdence run examples/toy.yaml`` must not start demanding one.
+    """
+    env = os.environ if environ is None else environ
+    if not env.get(API_KEY_ENV):
+        return default_registry(env)
+    return default_registry(
+        env,
+        agent=AgentHandler(
+            model=AnthropicModels(EnvSecrets(env, allowed={API_KEY_ENV}), secret_name=API_KEY_ENV),
+            prompts=PromptRegistry.from_env(env),
+        ),
+    )
+
+
 def _run_command(
     path: Path,
     *,
@@ -532,7 +568,12 @@ def _run_command(
 
     if no_state:
         report = asyncio.run(
-            execute(workflow, run_id=f"run.{secrets.token_hex(6)}", work_item_id=work_item_id)
+            execute(
+                workflow,
+                run_id=f"run.{secrets.token_hex(6)}",
+                work_item_id=work_item_id,
+                registry=_registry(),
+            )
         )
         print(render_json(report) if as_json else render_text(report))
         return 0 if report.succeeded else 1
@@ -565,6 +606,7 @@ def _run_command(
                 workflow,
                 run_id=run_id,
                 work_item_id=work_item_id,
+                registry=_registry(),
                 ledger=SqliteLedger(store, run_id=run_id),
             )
         )

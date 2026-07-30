@@ -37,7 +37,9 @@ class TestText:
     def test_a_stage_with_no_quotable_detail_renders_one_line(self) -> None:
         # An agent step's output is not a script envelope, so there is no
         # stdout to echo — the line should still be there.
-        stage = AgentStage(id="plan", role="ba", model=ModelSelector(model="claude-opus-5"))
+        stage = AgentStage(
+            id="plan", role="ba", task="do it", model=ModelSelector(model="claude-opus-5")
+        )
         text = render_text(go(workflow(stage), StubHandler(output={"epic": "…"})))
         assert "plan  [agent]" in text
 

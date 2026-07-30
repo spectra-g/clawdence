@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pytest
 
-from clawdence import __version__
+from clawdence import __version__, cli
+from clawdence.agent import AgentHandler, AnthropicModels
 from clawdence.cli import main
 from clawdence.domain import Run, RunStatus, StepResult, StepStatus, StepType
+from clawdence.engine import UnimplementedHandler
 from clawdence.ports.ingest import SELF_ID
 from clawdence.store import Intake, StateStore
 
@@ -937,3 +939,54 @@ def _stale_worktree(root: Path, name: str) -> Path:
     old = (datetime.now(UTC) - timedelta(days=30)).timestamp()
     os.utime(directory, (old, old))
     return directory
+
+
+# --------------------------------------------------------------------------- #
+# Which handlers a CLI run gets (S12)
+# --------------------------------------------------------------------------- #
+
+
+def test_with_no_api_key_the_agent_step_refuses_and_names_what_to_wire() -> None:
+    """A workflow with no agent steps must run perfectly well on a machine with no
+    credentials, so this cannot be a startup error — it has to be a refusal at the
+    step, and the refusal has to say what is missing."""
+    registry = cli._registry({})
+    handler = registry.for_type(StepType.AGENT)
+    assert isinstance(handler, UnimplementedHandler)
+
+
+def test_with_an_api_key_the_agent_step_is_wired_to_the_provider() -> None:
+    registry = cli._registry({cli.API_KEY_ENV: "not-a-real-key"})
+    handler = registry.for_type(StepType.AGENT)
+    assert isinstance(handler, AgentHandler)
+    assert isinstance(handler.model, AnthropicModels)
+    assert handler.model.describe("claude-sonnet-5").model == "claude-sonnet-5"
+
+
+def test_an_empty_api_key_counts_as_absent() -> None:
+    """``export ANTHROPIC_API_KEY=`` is how a credential goes missing in a shell
+    script, and wiring a provider that would 401 is worse than refusing."""
+    assert isinstance(
+        cli._registry({cli.API_KEY_ENV: ""}).for_type(StepType.AGENT), UnimplementedHandler
+    )
+
+
+def test_the_credential_allowlist_is_one_name() -> None:
+    """So a workflow naming a secret cannot make this resolve a different variable
+    — ``EnvSecrets`` without an allowlist is ``os.environ``."""
+    registry = cli._registry({cli.API_KEY_ENV: "not-a-real-key", "AWS_SECRET_ACCESS_KEY": "no"})
+    handler = registry.for_type(StepType.AGENT)
+    assert isinstance(handler, AgentHandler)
+    assert isinstance(handler.model, AnthropicModels)
+    assert handler.model.headers()["x-api-key"] == "not-a-real-key"
+
+
+def test_running_a_workflow_with_an_agent_step_and_no_key_halts_at_that_step(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The shipped example, end to end, on a machine with no credentials. It has to
+    fail *and say why* rather than reporting a success for work nobody did."""
+    assert main(["run", "examples/spike.yaml", "--no-state"]) == 1
+    out = capsys.readouterr().out
+    assert "intake" in out
+    assert "status: halted" in out

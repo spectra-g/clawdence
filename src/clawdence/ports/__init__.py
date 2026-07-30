@@ -1,12 +1,17 @@
 """The edges of the system — every interface that talks to something else.
 
-Eight ports, and the rule they exist to enforce is one sentence: **nothing above
+Nine ports, and the rule they exist to enforce is one sentence: **nothing above
 this package knows what service it is talking to.** The pipeline opens a pull
 request; whether that is GitHub, a local git remote or a dictionary is decided
 once, at startup, in ``Ports``. v1 had GitHub's API shape, Slack's message
 format and Jira's transition ids spread through a 5,107-line orchestrator, which
 is why it could not be tested without credentials and could not be run without
 all three services.
+
+``model`` (S12) is the one that breaks the idempotency rule below, on purpose,
+and its module docstring is where that is argued: the retry a completion has to
+support is "that response failed its schema, ask again", which a port answering
+from a cache cannot do.
 
 ``control`` (S6c) is the one that points inwards rather than outwards: the thing
 on the other side of it is the control plane's own store, and the caller is the
@@ -19,7 +24,7 @@ The layering is one-directional, as in ``domain``, ``engine`` and ``store``::
 
     errors ─ _common
       └─ secrets
-      └─ ingest · notify · tracker · vcs · runner · context · control
+      └─ ingest · notify · tracker · vcs · runner · context · control · model
                        └─ outbox
                             └─ __init__ (the ``Ports`` bundle)
 
@@ -77,6 +82,29 @@ from clawdence.ports.errors import (
     TransientError,
 )
 from clawdence.ports.ingest import IngestPort, InMemoryIngest, dedupe_key
+from clawdence.ports.model import (
+    CHARS_PER_TOKEN,
+    FAKE_MODEL,
+    INCOMPLETE,
+    CapabilityError,
+    ContextWindowExceededError,
+    Message,
+    MessageRole,
+    ModelDescriptor,
+    ModelPort,
+    ModelRequest,
+    ModelResponse,
+    QuotaExhaustedError,
+    RateLimitedError,
+    RefusingModel,
+    ScriptedModel,
+    StopReason,
+    TokenPrice,
+    ToolCall,
+    ToolSpec,
+    UnknownModelError,
+    estimate_tokens,
+)
 from clawdence.ports.notify import (
     Notification,
     NotificationKind,
@@ -124,10 +152,10 @@ class Ports:
     class.
 
     The defaults are the ones that do nothing and say so: no secrets, no
-    notifications, no tracker, no memory, and a runner that refuses while naming
-    what to wire. A control plane assembled with no configuration runs script
-    workflows and fails clearly on everything else, which is exactly what it can
-    honestly do today.
+    notifications, no tracker, no memory, and a runner and a model provider that
+    refuse while naming what to wire. A control plane assembled with no
+    configuration runs script workflows and fails clearly on everything else,
+    which is exactly what it can honestly do today.
 
     ``ingest`` and ``vcs`` have no null default, because there is no honest one.
     A system with no source of work and no version control is not a degraded
@@ -138,6 +166,7 @@ class Ports:
     ingest: IngestPort
     vcs: VcsPort
     runner: RunnerPort = field(default_factory=RefusingRunner)
+    model: ModelPort = field(default_factory=RefusingModel)
     notify: NotifyPort = field(default_factory=NullNotifier)
     tracker: TrackerPort = field(default_factory=NullTracker)
     context: ContextPort = field(default_factory=NullContext)
@@ -161,6 +190,11 @@ class Ports:
             ingest=InMemoryIngest(),
             vcs=InMemoryVcs(),
             runner=FakeRunner(),
+            # Deliberately unscripted. It knows one model exists and has no
+            # answer for any prompt, so a test that wants an agent step to
+            # succeed has to say what the model replied — the same rule as
+            # ``StubHandler``, one layer down.
+            model=ScriptedModel(catalogue={FAKE_MODEL.model: FAKE_MODEL}),
             notify=RecordingNotifier(),
             tracker=InMemoryTracker(),
             context=InMemoryContext(),
@@ -170,12 +204,17 @@ class Ports:
 
 
 __all__ = [
+    "CHARS_PER_TOKEN",
     "DEFAULT_POLL_SECONDS",
+    "FAKE_MODEL",
+    "INCOMPLETE",
     "MAX_STEERING_CHARS",
     "REDACTED",
     "Branch",
     "Cancellation",
+    "CapabilityError",
     "ContextPort",
+    "ContextWindowExceededError",
     "ControlPort",
     "EnvSecrets",
     "FakeRunner",
@@ -189,6 +228,12 @@ __all__ = [
     "KnowledgeItem",
     "KnowledgeKind",
     "MergeMethod",
+    "Message",
+    "MessageRole",
+    "ModelDescriptor",
+    "ModelPort",
+    "ModelRequest",
+    "ModelResponse",
     "NoControl",
     "Notification",
     "NotificationKind",
@@ -204,11 +249,15 @@ __all__ = [
     "Ports",
     "PullRequest",
     "PullRequestState",
+    "QuotaExhaustedError",
+    "RateLimitedError",
     "Receipt",
     "RecordingNotifier",
+    "RefusingModel",
     "RefusingRunner",
     "Retrieval",
     "RunnerPort",
+    "ScriptedModel",
     "Secret",
     "SecretNotFoundError",
     "SecretProvider",
@@ -216,12 +265,18 @@ __all__ = [
     "StaleMergeError",
     "StaticSecrets",
     "Steer",
+    "StopReason",
     "Ticket",
     "TicketState",
+    "TokenPrice",
+    "ToolCall",
+    "ToolSpec",
     "TrackerPort",
     "TransientError",
     "Undelivered",
+    "UnknownModelError",
     "VcsPort",
     "dedupe_key",
+    "estimate_tokens",
     "validate_result",
 ]

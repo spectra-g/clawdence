@@ -155,6 +155,16 @@ class AgentStage(StageBase):
     role: str
     prompt_version: str | None = None
 
+    #: What this step is asked to do, as a template — ``${intake.json.text}``,
+    #: ``${ba.json.result.summary}``. Required, and in the workflow rather than in
+    #: the handler, because "what is this agent being asked" is the process, and
+    #: the process is data (S12, added rev 13). The role prompt says *who* the
+    #: model is; this says what it is looking at. It is delivered framed as
+    #: quoted material, never concatenated into the role prompt, because the
+    #: values it expands are request text, memory and discovery notes — all of
+    #: which an attacker may have influenced (§3.9, and S10b at the other end).
+    task: str
+
     model: ModelSelector
 
     #: Explicit, not discovered by trial. v1's budgets were BA 1, Tech Lead 1,

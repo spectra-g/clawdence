@@ -25,13 +25,12 @@ from clawdence.domain import (
     RunnerResult,
     VerificationContract,
 )
-from clawdence.ports import PermanentError, StaticSecrets
+from clawdence.ports import PermanentError, StaticSecrets, TokenPrice
 from clawdence.runners import (
     VERDICT_PATH,
     HostRunner,
     LogLine,
     PlanDelivery,
-    TokenPrice,
 )
 from clawdence.runners import process as process_module
 from clawdence.runners import worktree as wt

@@ -3,15 +3,15 @@
 Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha, no runnable pipeline yet.** What exists is the toolchain, CI, secret-scanning
-setup, the domain model, a workflow engine that executes `script` steps, a state store that records
-runs so they survive the process, the ports every integration will sit behind — with an in-memory
-implementation of each — and a runner that executes a coding agent against a git worktree, either
-on this machine or inside an ephemeral container, with the repository's dependencies installed
-first against a cache that outlives the worktree, a cap on how many runs happen at once, and a
-sweep that reclaims what a crashed control plane left behind. There is no network policy and no
-agent step, and nothing yet decides which repository a piece of work belongs to. It can run a
-coding agent; it cannot run a sprint. It is public early so the build is inspectable from the
-start, not because any of it is ready to use.
+setup, the domain model, a workflow engine that executes `script` and `agent` steps, a state store
+that records runs so they survive the process, the ports every integration will sit behind — with
+an in-memory implementation of each and one real adapter for a model provider — and a runner that
+executes a coding agent against a git worktree, either on this machine or inside an ephemeral
+container, with the repository's dependencies installed first against a cache that outlives the
+worktree, a cap on how many runs happen at once, and a sweep that reclaims what a crashed control
+plane left behind. There is no network policy, and nothing yet decides which repository a piece of
+work belongs to. It can consult a model and it can run a coding agent; it cannot run a sprint. It is
+public early so the build is inspectable from the start, not because any of it is ready to use.
 
 ## Decisions taken so far
 
@@ -67,10 +67,65 @@ Two things it does deliberately differently from the engines it borrows its shap
   semicolons. Script steps also get a declared environment plus a small allowlist, never the
   control plane's own — which is where the API keys live.
 
-`agent`, `runner` and `approval` steps parse and validate, and refuse to run with an error naming
-what they are still missing. The runner step is the interesting one of the three: the runner itself
-is built, and what has not been built is the part that decides which repository, worktree and
-branch to point it at.
+`runner` and `approval` steps parse and validate, and refuse to run with an error naming what they
+are still missing. The runner step is the interesting one: the runner itself is built, and what has
+not been built is the part that decides which repository, worktree and branch to point it at.
+
+## Agent steps
+
+An `agent` step is a role, a task, a model and a bounded conversation, and every part of that is
+declared in the workflow rather than discovered by trial:
+
+```yaml
+- id: requirements
+  type: agent
+  role: business-analyst          # a prompt file, versioned, overridable
+  task: 'Work out what is wanted: ${intake.json.parsed.text}'
+  response_schema: requirements   # validated, with repair, before anything reads it
+  max_turns: 1
+  timeout_seconds: 300
+  model:
+    model: claude-sonnet-5
+    fallbacks: [claude-haiku-4-5-20251001]   # tried when the account is out of quota
+    requires: [structured_output]            # a model swap fails validation, not at run time
+    temperature: 0.0
+  budget:
+    max_usd: 0.50
+```
+
+See [`examples/spike.yaml`](examples/spike.yaml) — two agent steps, no repository, runs today — and
+[`examples/sprint.yaml`](examples/sprint.yaml), which is the same engine with four agent steps and a
+runner, and which stops at the runner by design. Set `ANTHROPIC_API_KEY` and `clawdence run` wires a
+provider; without one the step refuses rather than pretending.
+
+- **Prompts are data, and an override is visible as one.** Role prompts live at
+  `<role>/<version>.md`; `CLAWDENCE_PROMPT_PATH` adds directories searched first, so tuning the
+  business analyst does not mean forking. Every run records which role, which version, and whether
+  the text was ours or yours. The shipped prompts name no build tool, test runner or language — a
+  test enforces it, because a role prompt that names one is wrong for every repository using
+  something else and the model complies anyway.
+- **Turns are a budget, not a loop.** A second turn happens for one reason: the response failed its
+  schema and there is budget left to say so. The correction names the failing field and supplies no
+  content, because a correction that supplies content gets echoed back as a conclusion.
+- **Context is bounded and never silently dropped.** The prompt is measured against the model's
+  window before it is sent; over budget does what the stage declared — `fail`, `compact` or
+  `truncate` — and the run record says which, because a prompt quietly cut by a provider surfaces
+  as a model that ignored half its instructions long after it was paid for.
+- **Malformed JSON is repaired, and every repair is named.** Fences, prose, reasoning blocks,
+  trailing commas, and — only if the step asked — a document truncated mid-write. Single quotes are
+  deliberately *not* converted: the fix for `{'a': 1}` corrupts `{"note": "it's fine"}` silently,
+  and a wrong value that validated is worse than a parse failure that can be retried.
+- **Steps are stateless.** Every attempt is a fresh conversation built from the prompt registry and
+  the run record. Nothing carries between attempts and nothing between stages except through the
+  store.
+- **Output is a proposal.** An agent step is given a model, prompts, schemas and tools, and nothing
+  else — no store, no VCS, no filesystem — so its output cannot arrive already applied. The tool
+  surface is empty and refuses a declared tool by name: work that reads or runs a repository belongs
+  in a `runner` step, which executes in the data plane.
+- **No provider SDK.** The adapter is `urllib` in a thread behind a `ModelPort`, so the control
+  plane's dependency tree stays two packages wide. Quota exhaustion and rate limiting are different
+  failures — the first falls through to a fallback model, the second does not — which is the
+  distinction v1 got wrong and retried against a dead billing account.
 
 ## The state store
 
@@ -128,6 +183,11 @@ instead of per integration:
 - **Merging states what you verified.** `VcsPort.merge` requires the head and base commits the
   evidence was produced against and refuses if either moved. A required check is one a caller has
   to have looked at its evidence to satisfy; an optional one gets omitted.
+
+The model port is the one that breaks the idempotency rule, on purpose, and it argues its case in
+its own module docstring: the retry a completion has to support is "that response failed its schema,
+ask again", which a port answering from a cache cannot do. Charging twice is prevented one layer up
+instead, where the executor already re-runs a stage only if it did not previously succeed.
 
 ```sh
 uv run pytest -m contract   # or: make contract-tests
@@ -353,6 +413,7 @@ make docker-tests    # the container tier against a real daemon (needs docker or
 make schema          # regenerate schemas/ after changing the domain model
 make schema-test     # assert schemas/ is current and the contracts round-trip
 make scan            # gitleaks over the working tree and the history
+make record          # re-record the LLM cassettes (costs money; needs credentials)
 ```
 
 The suite runs with **TCP and DNS blocked** and no LLM calls: fakes and recorded interactions

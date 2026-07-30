@@ -6,13 +6,14 @@ step types and know nothing about control flow. That split is what lets S12
 reopening the executor — and S6 did arrive exactly that way, as
 ``clawdence.runners.RunnerHandler``.
 
-The default registry still ships one handler, because a ``runner`` step needs a
-repository, a worktree and a branch, and choosing those is triage's job (S11).
-The other three fail loudly with an error naming the step that will supply what
-they are missing, rather than succeeding vacuously — a stub that
-returns success makes a workflow look like it ran, which is the most expensive
-possible way to be wrong about an orchestrator. ``StubHandler`` exists for tests
-and for S3c's dry-run, and has to be registered deliberately.
+The default registry ships one handler and takes the others as keyword arguments,
+because the things they need live outside the engine: an agent step needs a model
+provider (S12), a runner step needs a repository, a worktree and a branch (S11,
+S15). What is *not* supplied fails loudly with an error naming the step that will
+supply it, rather than succeeding vacuously — a stub that returns success makes a
+workflow look like it ran, which is the most expensive possible way to be wrong
+about an orchestrator. ``StubHandler`` exists for tests and for S3c's dry-run, and
+has to be registered deliberately.
 
 Script steps get an environment they were **given**, not the one the control
 plane happens to hold. The control plane holds every provider key in the
@@ -302,13 +303,41 @@ class HandlerRegistry:
         return handler
 
 
-def default_registry(environ: Mapping[str, str] | None = None) -> HandlerRegistry:
-    """The M1 registry: script runs, the rest say who will implement them."""
+def default_registry(
+    environ: Mapping[str, str] | None = None,
+    *,
+    agent: StepHandler | None = None,
+    runner: StepHandler | None = None,
+    approval: StepHandler | None = None,
+) -> HandlerRegistry:
+    """The M1 registry: script runs, and the rest refuse unless supplied.
+
+    The keyword arguments are how a composed system wires the handlers whose
+    dependencies live outside the engine — ``clawdence.agent.AgentHandler`` needs
+    a model port, ``clawdence.runners.RunnerHandler`` needs a runner and a
+    dispatch. Passed in rather than imported, because the engine depending on
+    either package would invert the layering that lets a step type arrive as one
+    registration.
+
+    Omitting one keeps the refusal, and the refusal names the step that will
+    supply what is missing. That default is the load-bearing part: a stub
+    returning success would make a workflow look like it ran, which is the most
+    expensive possible way to be wrong about an orchestrator.
+    """
     return HandlerRegistry(
         {
             StepType.SCRIPT: ScriptHandler(environ),
-            StepType.AGENT: UnimplementedHandler(StepType.AGENT, "S12"),
-            StepType.RUNNER: UnimplementedHandler(
+            StepType.AGENT: agent
+            or UnimplementedHandler(
+                StepType.AGENT,
+                "S12",
+                why=(
+                    "have an implementation (clawdence.agent.AgentHandler) but no model "
+                    "provider was wired into this registry"
+                ),
+            ),
+            StepType.RUNNER: runner
+            or UnimplementedHandler(
                 StepType.RUNNER,
                 "S11",
                 why=(
@@ -316,6 +345,6 @@ def default_registry(environ: Mapping[str, str] | None = None) -> HandlerRegistr
                     "repository, worktree and branch to point it at"
                 ),
             ),
-            StepType.APPROVAL: UnimplementedHandler(StepType.APPROVAL, "S17"),
+            StepType.APPROVAL: approval or UnimplementedHandler(StepType.APPROVAL, "S17"),
         }
     )

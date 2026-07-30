@@ -105,6 +105,10 @@
           "title": "Salvage Partial Output",
           "type": "boolean"
         },
+        "task": {
+          "title": "Task",
+          "type": "string"
+        },
         "timeout_seconds": {
           "anyOf": [
             {
@@ -150,6 +154,7 @@
       "required": [
         "id",
         "role",
+        "task",
         "model"
       ],
       "title": "AgentStage",

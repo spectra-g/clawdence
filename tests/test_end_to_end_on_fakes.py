@@ -9,9 +9,10 @@ possible, which is the difference between a guarantee and a hope:
 
 - **Zero network calls** — the autouse guard in ``conftest`` makes a TCP
   connection raise. Nothing here has to remember to check.
-- **Zero LLM spend** — the agent stage plays a cassette, and a cassette miss is
-  an error rather than a call. Test one below removes even the possibility by
-  handing the cassette a live transport and asserting it is never touched.
+- **Zero LLM spend** — the agent stage runs the *real* handler (S12) against a
+  scripted model port, and the cassette test below runs it against the real
+  provider adapter with a recording in front of it, handing the cassette a live
+  transport and asserting it is never touched.
 - **Nothing left behind** — the ``reaper`` fixture releases what a test
   registered and the fixture itself asserts nothing leaked.
 
@@ -23,6 +24,7 @@ answerable from a unit test of any one of them.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from dataclasses import replace
 from pathlib import Path
@@ -30,6 +32,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue
 
+from clawdence.agent import CATALOGUE, DEFAULT_SECRET_NAME, AnthropicModels
 from clawdence.domain import (
     BuildSystem,
     IsolationTier,
@@ -38,17 +41,21 @@ from clawdence.domain import (
     StepStatus,
     WorkItemType,
 )
-from clawdence.engine import execute, load_workflow
+from clawdence.engine import RunReport, execute, load_workflow
 from clawdence.ports import (
+    FAKE_MODEL,
     FakeRunner,
     InMemoryTracker,
     InMemoryVcs,
+    ModelDescriptor,
     Notification,
     NotificationKind,
     Outbox,
     Ports,
     PullRequestState,
     RecordingNotifier,
+    ScriptedModel,
+    StaticSecrets,
     TicketState,
     TransientError,
     dedupe_key,
@@ -79,15 +86,17 @@ WORKFLOW = textwrap.dedent(
 
       - id: plan
         type: agent
-        role: senior-dev
+        role: business-analyst
+        task: 'Work out what is being asked: ${classify.json.parsed.size}'
+        response_schema: requirements
         model:
-          model: a-model
+          model: fake-model
         max_turns: 2
 
       - id: gate
         type: approval
         prompt: Ship it?
-        when: '$plan.json.confidence == "high"'
+        when: '$plan.json.result.confidence >= 0.5'
 
       - id: code
         type: runner
@@ -112,27 +121,34 @@ def _profile() -> RepoProfile:
     )
 
 
-def _seeded_cassette(path: Path, answer: JsonValue) -> Cassette:
-    """Record one agent answer, then hand back a cassette in replay mode."""
-    recorder = Cassette(path, mode=Mode.RECORD)
+def replace_model(descriptor: ModelDescriptor, name: str) -> ModelDescriptor:
+    """The same model under a different name, so the shipped catalogue does not
+    have to be edited for a test to use it."""
+    return descriptor.model_copy(update={"model": name})
 
-    async def once(request: JsonValue) -> JsonValue:
-        return answer
 
-    run(
-        recorder.play(
-            {
-                "stage": "plan",
-                "role": "senior-dev",
-                "model": "a-model",
-                "prompt_version": None,
-                "max_turns": 2,
-            },
-            once,
-        )
+def _answer(confidence: float) -> str:
+    """What the scripted model replies. A document, because the stage declares a
+    schema and the handler validates against it."""
+    return json.dumps(
+        {
+            "summary": "make the thing do the thing",
+            "acceptance_criteria": ["the thing does the thing"],
+            "confidence": confidence,
+        }
     )
-    recorder.save()
-    return Cassette(path, mode=Mode.REPLAY)
+
+
+def _model(confidence: float = 0.9) -> ScriptedModel:
+    """A model port that answers the business analyst and nothing else.
+
+    Keyed on the role prompt, so a stage that used a different role would get no
+    answer rather than this one — the property ``ScriptedModel`` exists for.
+    """
+    return ScriptedModel(
+        {"business analyst": _answer(confidence)},
+        catalogue={FAKE_MODEL.model: FAKE_MODEL},
+    )
 
 
 def test_a_full_workflow_runs_on_fakes(tmp_path: Path, reaper: Reaper) -> None:
@@ -145,8 +161,7 @@ def test_a_full_workflow_runs_on_fakes(tmp_path: Path, reaper: Reaper) -> None:
         {"code": make.runner_result("code")},
         clock=counting_clock(START),
     )
-    ports = replace(Ports.fakes(), runner=runner)
-    cassette = _seeded_cassette(tmp_path / "plan.json", {"confidence": "high", "steps": 3})
+    ports = replace(Ports.fakes(), runner=runner, model=_model())
 
     store = StateStore.open(tmp_path / "state.db")
     reaper.register("state store", store.close)
@@ -158,7 +173,6 @@ def test_a_full_workflow_runs_on_fakes(tmp_path: Path, reaper: Reaper) -> None:
             work_item_id=make.WORK_ITEM_ID,
             registry=fake_registry(
                 ports,
-                cassette=cassette,
                 profile=_profile(),
                 work_item_id=make.WORK_ITEM_ID,
                 branch="clawdence/wi-test",
@@ -189,34 +203,91 @@ def test_a_full_workflow_runs_on_fakes(tmp_path: Path, reaper: Reaper) -> None:
     assert len(store.steps_for("run.e2e")) == 5
 
 
-def test_the_agent_stage_never_reaches_a_transport(tmp_path: Path, reaper: Reaper) -> None:
+def _provider_reply(confidence: float) -> JsonValue:
+    """A Messages API reply, as the provider would send it."""
+    return {
+        "model": "claude-sonnet-5",
+        "content": [{"type": "text", "text": _answer(confidence)}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 900, "output_tokens": 60},
+    }
+
+
+def test_the_real_provider_replays_and_never_reaches_a_transport(tmp_path: Path) -> None:
     """Zero LLM spend, made structural rather than asserted after the fact.
 
-    The cassette is handed a live transport that fails the test if called. In
-    replay mode it is not called even though it is right there — which is the
-    rule that stops a new prompt quietly costing money on somebody's laptop.
-    """
-    called: list[JsonValue] = []
+    This is the seam ``tests/harness/cassette`` was written for — "S12 plugs its
+    real transport into ``play``" — and it is the whole agent step, not a stand-in:
+    ``AnthropicModels`` builds the payload it would really post, the cassette keys
+    on that payload, and the recording answers it.
 
-    async def transport(request: JsonValue) -> JsonValue:
-        called.append(request)
+    Two runs, and the second is the point. Recording once and replaying once proves
+    the payload digest is *stable*: a request built from a prompt file, a schema
+    projection and a framed task has a great many chances to vary between two
+    identical runs, and a digest that varied would make every cassette in the
+    project a single-use fixture. The replay run is handed a live transport that
+    fails the test if it is called, so a miss cannot fall through to a socket — it
+    fails here, offline and free, which is the rule that stops a new prompt quietly
+    costing money on somebody's laptop.
+    """
+    workflow_path = tmp_path / "fakes.yaml"
+    workflow_path.write_text(WORKFLOW, encoding="utf-8")
+    workflow = load_workflow(workflow_path)
+    tape = tmp_path / "business-analyst.json"
+
+    async def canned(request: JsonValue) -> JsonValue:
+        return _provider_reply(0.9)
+
+    async def forbidden(request: JsonValue) -> JsonValue:
         raise AssertionError("replay must never reach a live transport")
 
-    cassette = _seeded_cassette(tmp_path / "plan.json", {"confidence": "high"})
-    answer = run(
-        cassette.play(
-            {
-                "stage": "plan",
-                "role": "senior-dev",
-                "model": "a-model",
-                "prompt_version": None,
-                "max_turns": 2,
-            },
-            transport,
+    def go(cassette: Cassette, live: object, run_id: str) -> object:
+        transport = canned if live is canned else forbidden
+        provider = AnthropicModels(
+            StaticSecrets({DEFAULT_SECRET_NAME: "not-a-real-key"}),
+            catalogue={"fake-model": replace_model(CATALOGUE["claude-sonnet-5"], "fake-model")},
+            transport=lambda payload: cassette.play(payload, transport),
         )
-    )
-    assert answer == {"confidence": "high"}
-    assert called == []
+        return run(
+            execute(
+                workflow,
+                run_id=run_id,
+                work_item_id=make.WORK_ITEM_ID,
+                registry=fake_registry(
+                    replace(Ports.fakes(), model=provider, runner=FakeRunner()),
+                    profile=_profile(),
+                    work_item_id=make.WORK_ITEM_ID,
+                    branch="clawdence/wi-test",
+                    base_commit=make.commit(1),
+                    worktree_path=make.WORKTREE,
+                    decisions={"gate": {"decision": "rejected"}},
+                ),
+            )
+        )
+
+    recorder = Cassette(tape, mode=Mode.RECORD)
+    recorded = go(recorder, canned, "run.record")
+    assert recorder.save() is True
+
+    player = Cassette(tape, mode=Mode.REPLAY)
+    replayed = go(player, forbidden, "run.replay")
+
+    assert player.unused == frozenset()
+    for report in (recorded, replayed):
+        assert isinstance(report, RunReport)
+        assert report.final["plan"].status is StepStatus.SUCCEEDED
+        output = report.final["plan"].output
+        assert isinstance(output, dict)
+        assert output["model"] == "claude-sonnet-5"
+        assert output["prompt_origin"] == "builtin"
+        assert output["result"] == {
+            "summary": "make the thing do the thing",
+            "acceptance_criteria": ["the thing does the thing"],
+            "out_of_scope": [],
+            "open_questions": [],
+            "confidence": 0.9,
+            "unusual_request": None,
+        }
 
 
 def test_a_guard_reading_the_agent_answer_can_stop_the_run(tmp_path: Path, reaper: Reaper) -> None:
@@ -230,8 +301,7 @@ def test_a_guard_reading_the_agent_answer_can_stop_the_run(tmp_path: Path, reape
     workflow_path.write_text(WORKFLOW, encoding="utf-8")
 
     runner = FakeRunner({"code": make.runner_result("code")}, clock=counting_clock(START))
-    ports = replace(Ports.fakes(), runner=runner)
-    cassette = _seeded_cassette(tmp_path / "plan.json", {"confidence": "low"})
+    ports = replace(Ports.fakes(), runner=runner, model=_model(confidence=0.1))
 
     report = run(
         execute(
@@ -240,7 +310,6 @@ def test_a_guard_reading_the_agent_answer_can_stop_the_run(tmp_path: Path, reape
             work_item_id=make.WORK_ITEM_ID,
             registry=fake_registry(
                 ports,
-                cassette=cassette,
                 profile=_profile(),
                 work_item_id=make.WORK_ITEM_ID,
                 branch="clawdence/wi-test",
@@ -273,8 +342,7 @@ def test_a_failing_runner_retries_and_then_halts(tmp_path: Path) -> None:
         {"code": make.runner_result("code", outcome=RunnerOutcome.TESTS_FAILED)},
         clock=counting_clock(START),
     )
-    ports = replace(Ports.fakes(), runner=runner)
-    cassette = _seeded_cassette(tmp_path / "plan.json", {"confidence": "high"})
+    ports = replace(Ports.fakes(), runner=runner, model=_model())
 
     report = run(
         execute(
@@ -283,7 +351,6 @@ def test_a_failing_runner_retries_and_then_halts(tmp_path: Path) -> None:
             work_item_id=make.WORK_ITEM_ID,
             registry=fake_registry(
                 ports,
-                cassette=cassette,
                 profile=_profile(),
                 work_item_id=make.WORK_ITEM_ID,
                 branch="clawdence/wi-test",

@@ -249,7 +249,9 @@ class TestOnError:
 
 class TestStepResults:
     def test_type_is_carried_from_the_stage(self) -> None:
-        stage = AgentStage(id="a", role="ba", model=ModelSelector(model="claude-opus-5"))
+        stage = AgentStage(
+            id="a", role="ba", task="do it", model=ModelSelector(model="claude-opus-5")
+        )
         report = go(workflow(stage), StubHandler())
         assert report.final["a"].type is StepType.AGENT
 

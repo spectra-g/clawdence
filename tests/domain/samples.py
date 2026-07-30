@@ -215,6 +215,7 @@ WORKFLOW_STAGES = (
         when='$checkout.json.status == "ok"',
         role="senior-dev",
         prompt_version="3",
+        task="Plan the change described in ${intake.json.text}",
         model=ModelSelector(
             model="claude-opus-5",
             fallbacks=("claude-sonnet-5",),
