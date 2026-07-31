@@ -67,7 +67,6 @@
   ],
   "profile": {
     "agents_md_path": null,
-    "aliases": [],
     "branch_prefix": "clawdence/",
     "build_command": [
       "npm",
@@ -105,7 +104,6 @@
       "ci"
     ],
     "isolation_tier": "container",
-    "keywords": [],
     "max_concurrent_runs": 1,
     "mcp_servers": [],
     "name": "acme-web",
@@ -120,6 +118,10 @@
     },
     "remote_url": "",
     "require_full_test_suite": false,
+    "routing": {
+      "aliases": [],
+      "keywords": []
+    },
     "runner_image": null,
     "test_command": [
       "npm",

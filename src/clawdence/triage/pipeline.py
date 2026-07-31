@@ -14,7 +14,8 @@ is entirely in what happens when one of them says no, so that is what the rest o
 this docstring is about.
 
 **Refusals are ordered by what they cost.** Routing refuses before a file is
-opened, the policy check refuses before a checkout, and the diff audit refuses
+opened, a missing runner refuses before the policy check spends a call to the
+forge, the policy check refuses before a checkout, and the diff audit refuses
 before anything is published — so a repository that requires signed commits is
 turned away before an agent step, a container or a test suite has been paid for,
 which is what "fail at configuration time, not at merge time" meant. Reversing
@@ -226,6 +227,24 @@ class Pipeline:
         run_id: str | None,
     ) -> Outcome:
         needs_worktree = any(stage.type is StepType.RUNNER for stage in workflow.stages)
+
+        if needs_worktree and self.runner is None:
+            # Cheaper than the policy check below, and checked first: no I/O at
+            # all, versus a call to the forge. A workflow with a runner step and
+            # no runner configured is refused here, before a worktree is
+            # acquired for it — not discovered several steps later as a
+            # step-type-not-implemented failure once the checkout already
+            # happened for nothing.
+            return Outcome(
+                item_id=item.id,
+                routed=routed,
+                refusal=(
+                    f"{routed.workflow.value!r} has a runner step, but this deployment has no "
+                    "`runner:` section configured — refusing before a worktree is acquired. "
+                    "Add one to config.yaml (see USER-GUIDE.md §3), or route this to a "
+                    "workflow with no runner step."
+                ),
+            )
 
         if needs_worktree:
             # Before the checkout, because a repository that cannot be worked on

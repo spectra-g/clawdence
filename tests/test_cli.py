@@ -799,7 +799,7 @@ class TestDevLoop:
         run_id = _only_run_id(state)
         capsys.readouterr()
 
-        assert main(["replay", run_id, "--state", str(state)]) == 0
+        assert main(["runs", "replay", run_id, "--state", str(state)]) == 0
         out = capsys.readouterr().out
         assert "the log and the stored state agree" in out
         assert "not carried by the log" in out
@@ -816,7 +816,7 @@ class TestDevLoop:
             store.finish_step(step.model_copy(update={"status": StepStatus.FAILED}))
         capsys.readouterr()
 
-        assert main(["replay", run_id, "--state", str(state)]) == 1
+        assert main(["runs", "replay", run_id, "--state", str(state)]) == 1
         assert "divergence" in capsys.readouterr().out
 
     def test_a_truncated_replay_says_it_did_not_compare(
@@ -825,20 +825,21 @@ class TestDevLoop:
         state = self.state(tmp_path)
         capsys.readouterr()
 
-        assert main(["replay", _only_run_id(state), "--state", str(state), "--through", "3"]) == 0
+        run_id = _only_run_id(state)
+        assert main(["runs", "replay", run_id, "--state", str(state), "--through", "3"]) == 0
         assert "not compared" in capsys.readouterr().out
 
     def test_replay_emits_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         state = self.state(tmp_path)
         capsys.readouterr()
 
-        assert main(["replay", _only_run_id(state), "--state", str(state), "--json"]) == 0
+        assert main(["runs", "replay", _only_run_id(state), "--state", str(state), "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["agrees"] is True
 
     def test_replaying_a_run_that_never_existed_is_refused(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert main(["replay", "run.x", "--state", str(tmp_path / "state.db")]) == 2
+        assert main(["runs", "replay", "run.x", "--state", str(tmp_path / "state.db")]) == 2
         assert "run.x" in capsys.readouterr().err
 
     # -------------------------------------------------------------- audit
@@ -849,7 +850,7 @@ class TestDevLoop:
         state = self.state(tmp_path)
         capsys.readouterr()
 
-        assert main(["audit", "--state", str(state), "--run", _only_run_id(state)]) == 0
+        assert main(["audit", _only_run_id(state), "--state", str(state)]) == 0
         out = capsys.readouterr().out
         assert "run.started" in out
         assert "step.finished" in out

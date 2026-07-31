@@ -64,8 +64,7 @@ def host_widget(forge: Forge) -> RepoProfile:
             "remote_url": forge.url,
             "default_branch": "main",
             "isolation_tier": IsolationTier.HOST,
-            "aliases": ("widget", "widget-api"),
-            "keywords": ("adder", "arithmetic"),
+            "routing": {"aliases": ("widget", "widget-api"), "keywords": ("adder", "arithmetic")},
         }
     )
 

@@ -64,8 +64,10 @@ def widget(forge: Forge) -> RepoProfile:
             "name": "widget",
             "remote_url": forge.url,
             "default_branch": "main",
-            "aliases": ("widget", "widget-api"),
-            "keywords": ("adder", "arithmetic", "sum"),
+            "routing": {
+                "aliases": ("widget", "widget-api"),
+                "keywords": ("adder", "arithmetic", "sum"),
+            },
         }
     )
 
@@ -81,8 +83,7 @@ def portal(forge: Forge) -> RepoProfile:
             "name": "portal",
             "remote_url": forge.url,
             "default_branch": "main",
-            "aliases": ("portal", "customer portal"),
-            "keywords": ("login", "signup"),
+            "routing": {"aliases": ("portal", "customer portal"), "keywords": ("login", "signup")},
         }
     )
 

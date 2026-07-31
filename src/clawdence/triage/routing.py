@@ -340,11 +340,11 @@ def score(raw_text: str, profiles: Mapping[RepoId, RepoProfile]) -> tuple[Candid
 def _score_one(raw_text: str, profile: RepoProfile) -> tuple[int, tuple[str, ...]]:
     matched: list[str] = []
     points = 0
-    for term in dict.fromkeys((profile.id, profile.name, *profile.aliases)):
+    for term in dict.fromkeys((profile.id, profile.name, *profile.routing.aliases)):
         if term and _mentions(raw_text, term):
             matched.append(term)
             points += ALIAS_WEIGHT
-    for term in profile.keywords:
+    for term in profile.routing.keywords:
         if term and term not in matched and _mentions(raw_text, term):
             matched.append(term)
             points += KEYWORD_WEIGHT

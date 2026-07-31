@@ -45,6 +45,7 @@ from clawdence.domain.repo import (
     PullRequestPolicy,
     RepoProfile,
     ResourceCaps,
+    RoutingSignals,
 )
 from clawdence.domain.run import Run, RunStatus, StepError, StepResult, StepStatus
 from clawdence.domain.runner import (
@@ -125,6 +126,7 @@ __all__ = [
     "ResourceCaps",
     "ResumeVerb",
     "RetryPolicy",
+    "RoutingSignals",
     "Run",
     "RunId",
     "RunStatus",

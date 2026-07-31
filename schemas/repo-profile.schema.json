@@ -273,6 +273,30 @@
       "title": "ResourceCaps",
       "type": "object"
     },
+    "RoutingSignals": {
+      "additionalProperties": false,
+      "description": "Repo routing signal (S11). Matched against a work item's *raw* text.\n\nA dedicated object rather than two top-level fields so the two stay\nadjacent wherever this profile is read or written — sorted-key JSON\nserialization otherwise scatters them alphabetically among a dozen\nunrelated fields, which is exactly the wrong shape for two values that\nonly mean something together.",
+      "properties": {
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "keywords": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        }
+      },
+      "title": "RoutingSignals",
+      "type": "object"
+    },
     "TestReporter": {
       "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
       "enum": [
@@ -303,14 +327,6 @@
       ],
       "default": null,
       "title": "Agents Md Path"
-    },
-    "aliases": {
-      "default": [],
-      "items": {
-        "type": "string"
-      },
-      "title": "Aliases",
-      "type": "array"
     },
     "branch_prefix": {
       "default": "clawdence/",
@@ -400,14 +416,6 @@
       "$ref": "#/$defs/IsolationTier",
       "default": "container"
     },
-    "keywords": {
-      "default": [],
-      "items": {
-        "type": "string"
-      },
-      "title": "Keywords",
-      "type": "array"
-    },
     "max_concurrent_runs": {
       "default": 1,
       "exclusiveMinimum": 0,
@@ -450,6 +458,13 @@
       "default": false,
       "title": "Require Full Test Suite",
       "type": "boolean"
+    },
+    "routing": {
+      "$ref": "#/$defs/RoutingSignals",
+      "default": {
+        "aliases": [],
+        "keywords": []
+      }
     },
     "runner_image": {
       "anyOf": [

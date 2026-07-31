@@ -204,6 +204,20 @@ class ResourceCaps(DomainModel):
     wall_clock_seconds: float | None = Field(default=None, gt=0)
 
 
+class RoutingSignals(DomainModel):
+    """Repo routing signal (S11). Matched against a work item's *raw* text.
+
+    A dedicated object rather than two top-level fields so the two stay
+    adjacent wherever this profile is read or written — sorted-key JSON
+    serialization otherwise scatters them alphabetically among a dozen
+    unrelated fields, which is exactly the wrong shape for two values that
+    only mean something together.
+    """
+
+    aliases: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+
+
 class RepoProfile(DomainModel):
     """Everything the system knows about one repository."""
 
@@ -281,9 +295,7 @@ class RepoProfile(DomainModel):
     caps: ResourceCaps = ResourceCaps()
     mcp_servers: tuple[McpServer, ...] = ()
 
-    #: Repo routing signal (S11). Matched against a work item's *raw* text.
-    aliases: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
+    routing: RoutingSignals = RoutingSignals()
 
     @model_validator(mode="after")
     def _socket_mode_is_acknowledged(self) -> RepoProfile:

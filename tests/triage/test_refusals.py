@@ -21,7 +21,11 @@ import pytest
 from clawdence.domain import (
     IngestSource,
     RepoProfile,
+    RoutingSignals,
     Run,
+    RunnerOutcome,
+    RunnerRequest,
+    RunnerResult,
     SourceRef,
     Submitter,
     WorkItem,
@@ -44,7 +48,7 @@ from clawdence.triage import (
 )
 from clawdence.vcs import RepoStore, Rule, Violation, WorktreeManager
 from tests.engine.factories import script, workflow
-from tests.ports.factories import run
+from tests.ports.factories import run, runner_result
 from tests.triage.conftest import PORTAL, WIDGET, ConfigWriter
 
 AT = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
@@ -108,6 +112,30 @@ class BlindVcs:
     """A ``VcsPort`` with no ``check_policy`` at all — ``InMemoryVcs``'s shape."""
 
 
+class NeverDispatchedRunner:
+    """A ``RunnerPort`` present only so the pipeline's fail-fast runner-config
+    check does not preempt what these tests actually mean to exercise.
+
+    Every test using this fails earlier still — at the policy check or the
+    worktree acquisition — so ``dispatch`` asserting is the point: it proves
+    the double was never called rather than silently standing in for one.
+    """
+
+    async def dispatch(self, request: RunnerRequest) -> RunnerResult:
+        raise AssertionError("dispatched — this test's own refusal should have preempted it")
+
+
+class EmptyDiffRunner:
+    """A ``RunnerPort`` that reports it changed nothing, without touching the
+    worktree. Enough to get a test past the runner step to what it is actually
+    about — a run with a report and no pull request — without a real commit."""
+
+    async def dispatch(self, request: RunnerRequest) -> RunnerResult:
+        return runner_result(
+            request.stage_id, run_id=request.run_id, outcome=RunnerOutcome.EMPTY_DIFF
+        )
+
+
 @pytest.fixture
 def pipeline_for(
     deployment: Deployment,
@@ -122,6 +150,10 @@ def pipeline_for(
             repos=repo_store,
             worktrees=worktrees,
             vcs=vcs,  # type: ignore[arg-type]
+            # Not ``NeverDispatchedRunner``: two of this fixture's three callers
+            # (an advisory violation, no ``check_policy`` at all) pass the policy
+            # check and reach the runner step for real.
+            runner=EmptyDiffRunner(),  # type: ignore[arg-type]
         )
 
     return build
@@ -182,6 +214,7 @@ def test_a_checkout_that_cannot_be_made_is_reported_rather_than_raised(
         repos=repo_store,
         worktrees=FullDisk(),  # type: ignore[arg-type]
         vcs=BlindVcs(),  # type: ignore[arg-type]
+        runner=NeverDispatchedRunner(),  # type: ignore[arg-type]
     )
     outcome = run(pipeline.start(item()))
     assert outcome.run_id is None
@@ -246,7 +279,7 @@ def test_the_json_rendering_is_the_audit_payload(widget: RepoProfile) -> None:
 def test_a_repository_with_no_signals_is_told_so(widget: RepoProfile) -> None:
     """Empty is the state that makes a request unroutable, so an operator asking
     "why did this not route" has to see the absence rather than infer it."""
-    bare = widget.model_copy(update={"aliases": (), "keywords": ()})
+    bare = widget.model_copy(update={"routing": RoutingSignals()})
     text = render_repo(bare)
     assert "(none)" in text
     assert "only repository configured" in text
@@ -332,10 +365,11 @@ def test_a_push_that_is_rejected_leaves_the_work_on_a_local_branch(
         repos=repo_store,
         worktrees=worktrees,
         vcs=RejectingVcs(),  # type: ignore[arg-type]
+        runner=EmptyDiffRunner(),  # type: ignore[arg-type]
     )
-    # The run itself refuses at the runner step (nothing is wired), so nothing is
-    # committed and the push is never reached. What this covers is the arm above
-    # it: an outcome that has a run and a report and no pull request.
+    # The runner reports nothing changed, so no commit exists and the push is
+    # never reached. What this covers is the arm above it: an outcome that has
+    # a run and a report and no pull request.
     outcome = run(pipeline.start(item()))
     assert outcome.run_id is not None
     assert outcome.published is False

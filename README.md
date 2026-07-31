@@ -501,8 +501,8 @@ state agree.
 ```sh
 clawdence reset --dry-run              # what would go
 clawdence reset --keep-inbox           # runs, steps, log and debris go; requests stay
-clawdence replay RUN_ID                # rebuild the run from its log and diff it
-clawdence audit --run RUN_ID           # the timeline
+clawdence runs replay RUN_ID           # rebuild the run from its log and diff it
+clawdence audit RUN_ID                 # the timeline
 clawdence audit --dead-letters         # records that could not join it
 clawdence runs show RUN_ID             # steps, durations, and why one failed
 ```

@@ -10,9 +10,9 @@ projects — and routing it through the CLI rather than a loose script is what
 keeps the entry-point rule true for the build as well as for users.
 
 ``runs`` arrives with the state store, and is deliberately thin: enough to find
-a run, read what it did, and unstick it. The read *surface* is HQ's (S19); what
-belongs here is the part an operator needs when HQ is not the thing that is
-working.
+a run, read what it did, unstick it, and (``replay``) rebuild it from the audit
+log. The read *surface* is HQ's (S19); what belongs here is the part an
+operator needs when HQ is not the thing that is working.
 
 ``submit`` and ``inbox`` arrive with ingestion (S10), and they are not a
 convenience wrapper over one: the command line *is* an ``IngestPort`` source,
@@ -199,6 +199,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report what is stalled without changing anything.",
     )
 
+    runs_replay = runs_actions.add_parser(
+        "replay",
+        help="Rebuild a run from its audit log and compare it with what is stored.",
+    )
+    runs_replay.add_argument("run_id", metavar="RUN_ID")
+    _add_state_argument(runs_replay)
+    runs_replay.add_argument(
+        "--through",
+        type=int,
+        metavar="N",
+        help=(
+            "Fold only this run's first N events — what did it look like before "
+            "the stage that went wrong. Skips the comparison; see `replay`."
+        ),
+    )
+    runs_replay.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the reconstruction and the divergences as JSON.",
+    )
+
     reap = subcommands.add_parser(
         "reap",
         help="Reclaim containers, worktrees and caches that no live run owns.",
@@ -270,31 +292,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation. Required when nothing is on a terminal to ask.",
     )
 
-    replay_parser = subcommands.add_parser(
-        "replay",
-        help="Rebuild a run from its audit log and compare it with what is stored.",
-    )
-    replay_parser.add_argument("run_id", metavar="RUN_ID")
-    _add_state_argument(replay_parser)
-    replay_parser.add_argument(
-        "--through",
-        type=int,
-        metavar="N",
-        help=(
-            "Fold only this run's first N events — what did it look like before "
-            "the stage that went wrong. Skips the comparison; see `replay`."
-        ),
-    )
-    replay_parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="as_json",
-        help="Emit the reconstruction and the divergences as JSON.",
-    )
-
     audit = subcommands.add_parser("audit", help="Read the audit log.")
     _add_state_argument(audit)
-    audit.add_argument("--run", metavar="RUN_ID", help="Only records for this run.")
+    audit.add_argument(
+        "run_id",
+        metavar="RUN_ID",
+        nargs="?",
+        help="Only records for this run. Omitted means every run — narrow with --work-item/--kind.",
+    )
     audit.add_argument("--work-item", metavar="ID", help="Only records for this work item.")
     audit.add_argument(
         "--kind",
@@ -1359,6 +1364,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _runs_show(args.run_id, args.state, as_json=args.as_json)
         if args.runs_command == "recover":
             return _runs_recover(args.state, dry_run=args.dry_run)
+        if args.runs_command == "replay":
+            return _replay_command(
+                args.run_id,
+                args.state,
+                through=args.through,
+                as_json=args.as_json,
+            )
         parser.parse_args(["runs", "--help"])
         return 0  # pragma: no cover - --help exits
 
@@ -1382,18 +1394,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             yes=args.yes,
         )
 
-    if args.command == "replay":
-        return _replay_command(
-            args.run_id,
-            args.state,
-            through=args.through,
-            as_json=args.as_json,
-        )
-
     if args.command == "audit":
         return _audit_command(
             args.state,
-            run_id=args.run,
+            run_id=args.run_id,
             work_item_id=args.work_item,
             kinds=args.kinds,
             since=args.since,

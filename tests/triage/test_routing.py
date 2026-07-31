@@ -225,7 +225,7 @@ def test_a_substring_is_not_a_mention(portal: RepoProfile) -> None:
             "id": WIDGET,
             "name": "widget",
             "remote_url": portal.remote_url,
-            "keywords": ("sum",),
+            "routing": {"keywords": ("sum",)},
         }
     )
     profiles = {narrow.id: narrow, portal.id: portal}

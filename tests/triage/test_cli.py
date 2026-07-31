@@ -181,28 +181,32 @@ def test_work_takes_one_request_by_default(
     """Each request spends money, so a queue drained by accident is an expensive
     surprise. ``--limit`` is how somebody asks for more, deliberately.
 
-    The runs themselves fail here — no runner is configured, so the ``quick-fix``
-    workflow's only stage refuses — which is what makes the *count* observable:
-    exactly one request left the queue.
+    No runner is configured, so the one request taken refuses before a
+    worktree is acquired — and, refused rather than run, it is correctly left
+    pending rather than acknowledged (``acknowledge`` only takes a request off
+    the queue once it has a run id). So ``--limit`` is checked directly here:
+    exactly one line of output, for the one request `work` actually attempted.
     """
     put(db, "The widget adder mishandles floats", ref="a")
     put(db, "The widget adder mishandles ints too", ref="b")
 
-    assert main(["work", "--config", str(config_path), "--state", str(db)]) == 1
+    assert main(["work", "--config", str(config_path), "--state", str(db)]) == 2
+    assert capsys.readouterr().out.count("repo.widget") == 1
     with StateStore.open(db) as store:
-        assert len(Intake(store).collect()) == 1
+        assert len(Intake(store).collect()) == 2
 
 
 def test_a_deployment_with_no_runner_says_so_rather_than_substituting_one(
     config_path: Path, db: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The refusal ``default_registry`` has had since S6, reached through the
-    pipeline. A composition root that quietly substituted the host tier would be
-    choosing, for an operator, to run model-authored code outside a container.
+    """The refusal the pipeline raises before acquiring a worktree, reached
+    through ``work``. A composition root that quietly substituted the host
+    tier would be choosing, for an operator, to run model-authored code
+    outside a container — this refuses instead, and names the missing config.
     """
     put(db, "The widget adder mishandles floats", ref="a")
-    assert main(["work", "--config", str(config_path), "--state", str(db)]) == 1
-    assert "failed" in capsys.readouterr().out
+    assert main(["work", "--config", str(config_path), "--state", str(db)]) == 2
+    assert "no `runner:` section configured" in capsys.readouterr().out
 
 
 def test_work_refuses_an_unroutable_request_and_leaves_it_queued(

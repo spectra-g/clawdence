@@ -38,6 +38,7 @@ from clawdence.domain import (
     ResourceCaps,
     ResumeVerb,
     RetryPolicy,
+    RoutingSignals,
     Run,
     RunnerOutcome,
     RunnerRequest,
@@ -168,8 +169,10 @@ REPO_PROFILE = RepoProfile(
             bearer_token_env_var="ACME_DOCS_MCP_TOKEN",  # noqa: S106
         ),
     ),
-    aliases=("billing", "invoicing"),
-    keywords=("invoice", "proration", "subscription"),
+    routing=RoutingSignals(
+        aliases=("billing", "invoicing"),
+        keywords=("invoice", "proration", "subscription"),
+    ),
 )
 
 WORK_ITEM = WorkItem(

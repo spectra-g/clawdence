@@ -339,11 +339,10 @@ def default_registry(
             StepType.RUNNER: runner
             or UnimplementedHandler(
                 StepType.RUNNER,
-                "S11",
+                "a `runner:` section in config.yaml",
                 why=(
-                    "have a runner (clawdence.runners, S6) and a worktree and branch to give it "
-                    "(clawdence.vcs, S15) but nothing that chooses which repository a work "
-                    "item belongs to"
+                    "have an implementation (clawdence.runners.RunnerHandler) but this "
+                    "registry was built without one wired in"
                 ),
             ),
             StepType.APPROVAL: approval or UnimplementedHandler(StepType.APPROVAL, "S17"),

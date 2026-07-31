@@ -122,10 +122,10 @@ def render_repo(profile: RepoProfile) -> str:
         f"  parallel   {profile.max_concurrent_runs} run(s) at a time",
         "",
         "  routing signals — what a request has to say to land here:",
-        f"    aliases   {', '.join(profile.aliases) or '(none)'}",
-        f"    keywords  {', '.join(profile.keywords) or '(none)'}",
+        f"    aliases   {', '.join(profile.routing.aliases) or '(none)'}",
+        f"    keywords  {', '.join(profile.routing.keywords) or '(none)'}",
     ]
-    if not profile.aliases and not profile.keywords:
+    if not profile.routing.aliases and not profile.routing.keywords:
         lines.append("    with neither, this only wins when it is the only repository configured")
     return "\n".join(lines)
 
