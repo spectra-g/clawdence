@@ -254,6 +254,37 @@ _MIGRATIONS: Final[tuple[str, ...]] = (
 
     CREATE INDEX publications_pending ON publications (state, updated_at);
     """,
+    # 5 — S4b.1: one durable queue for every external side effect. The
+    # publication-specific table from migration 4 is retained only so an older
+    # database's pending rows can be drained during upgrade. Current code never
+    # writes new rows there.
+    """
+    CREATE TABLE external_effects (
+        id                TEXT    NOT NULL PRIMARY KEY,
+        idempotency_key   TEXT    NOT NULL UNIQUE,
+        run_id            TEXT    NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        kind              TEXT    NOT NULL,
+        command           TEXT    NOT NULL,
+        state             TEXT    NOT NULL,
+        attempts          INTEGER NOT NULL DEFAULT 0,
+        max_attempts      INTEGER NOT NULL,
+        next_attempt_at   TEXT    NOT NULL,
+        error_kind        TEXT,
+        error_detail      TEXT,
+        claim_owner       TEXT,
+        claim_expires_at  TEXT,
+        created_at        TEXT    NOT NULL,
+        updated_at        TEXT    NOT NULL,
+        delivered_at      TEXT,
+        CHECK (attempts >= 0),
+        CHECK (max_attempts > 0)
+    ) STRICT;
+
+    CREATE INDEX external_effects_due
+        ON external_effects (state, next_attempt_at, claim_expires_at);
+    CREATE INDEX external_effects_run
+        ON external_effects (run_id, created_at, id);
+    """,
 )
 
 #: The schema version this build writes and expects.

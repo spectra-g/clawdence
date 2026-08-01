@@ -68,6 +68,7 @@ from clawdence.devloop import (
     reset,
 )
 from clawdence.devloop import refusal as reset_refusal
+from clawdence.devloop.report import effect_dict
 from clawdence.domain import EventKind, RunStatus, StepType, WorkItemType, jsonschema
 from clawdence.engine import (
     HandlerRegistry,
@@ -101,6 +102,8 @@ from clawdence.runners import (
 from clawdence.store import (
     Admission,
     ArrivalState,
+    EffectState,
+    ExternalEffects,
     Intake,
     SqliteLedger,
     StateStore,
@@ -221,6 +224,33 @@ def build_parser() -> argparse.ArgumentParser:
         dest="as_json",
         help="Emit the reconstruction and the divergences as JSON.",
     )
+
+    effects = subcommands.add_parser(
+        "effects", help="Inspect and retry durable external deliveries."
+    )
+    effects_actions = effects.add_subparsers(dest="effects_command")
+
+    effects_list = effects_actions.add_parser("list", help="List external effects.")
+    _add_state_argument(effects_list)
+    effects_list.add_argument(
+        "--status",
+        choices=tuple(state.value for state in EffectState),
+        help="Show only effects in this delivery state.",
+    )
+    effects_list.add_argument("--run", dest="run_id", metavar="RUN_ID")
+    effects_list.add_argument("--limit", type=int, default=20, metavar="N")
+    effects_list.add_argument("--json", action="store_true", dest="as_json")
+
+    effects_show = effects_actions.add_parser("show", help="Show one external effect.")
+    effects_show.add_argument("effect_id", metavar="EFFECT_ID")
+    _add_state_argument(effects_show)
+    effects_show.add_argument("--json", action="store_true", dest="as_json")
+
+    effects_retry = effects_actions.add_parser(
+        "retry", help="Return one parked effect to the delivery queue."
+    )
+    effects_retry.add_argument("effect_id", metavar="EFFECT_ID")
+    _add_state_argument(effects_retry)
 
     reap = subcommands.add_parser(
         "reap",
@@ -1061,9 +1091,9 @@ def _work_command(
             handlers=_agent_handler(),
         )
 
-        # Publication is the provisional S4b.1 bridge. Drain it before taking fresh work so
-        # a process that died after the agent committed resumes the cheap,
-        # idempotent remote operations instead of dispatching the agent again.
+        # Drain due durable effects before fresh work. A process that died after
+        # the agent committed resumes cheap, idempotent remote operations instead
+        # of dispatching the agent again.
         resumed = asyncio.run(pipeline.resume_publications(ref=ref, limit=limit))
         resumed_items = {outcome.item_id for outcome in resumed}
         for outcome in resumed:
@@ -1158,12 +1188,76 @@ def _runs_show(run_id: str, state: Path | None, *, as_json: bool = False) -> int
             return 2
         steps = store.steps_for(run_id)
         events = len(store.audit.read(run_id=run_id))
+        effects = ExternalEffects(store).list(run_id=run_id)
 
     print(
-        render_run_json(run, steps, events=events)
+        render_run_json(run, steps, events=events, effects=effects)
         if as_json
-        else render_run(run, steps, events=events)
+        else render_run(run, steps, events=events, effects=effects)
     )
+    return 0
+
+
+def _effects_list(
+    state: Path | None,
+    *,
+    status: str | None,
+    run_id: str | None,
+    limit: int,
+    as_json: bool,
+) -> int:
+    with StateStore.open(state or default_state_path()) as store:
+        effects = ExternalEffects(store).list(
+            state=EffectState(status) if status else None,
+            run_id=run_id,
+            limit=limit,
+        )
+    if as_json:
+        print(json.dumps([effect_dict(effect, command=False) for effect in effects], indent=2))
+        return 0
+    if not effects:
+        print("no external effects")
+        return 0
+    for effect in effects:
+        print(
+            f"{effect.id}  {effect.state.value:<10}  {effect.kind}  {effect.run_id}  "
+            f"{effect.attempts}/{effect.max_attempts} attempt(s)"
+        )
+    return 0
+
+
+def _effects_show(effect_id: str, state: Path | None, *, as_json: bool) -> int:
+    with StateStore.open(state or default_state_path()) as store:
+        effect = ExternalEffects(store).get(effect_id)
+    if effect is None:
+        print(f"no external effect with id {effect_id!r}", file=sys.stderr)
+        return 2
+    payload = effect_dict(effect, command=True)
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+        return 0
+    print(f"effect {effect.id}  {effect.kind}")
+    print(f"run {effect.run_id}  delivery {effect.state.value}")
+    print(f"attempts {effect.attempts}/{effect.max_attempts}")
+    if effect.error_kind is not None:
+        print(f"error {effect.error_kind}: {effect.error_detail}")
+    print("\ncommand:")
+    print(json.dumps(effect.command, indent=2, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+def _effects_retry(effect_id: str, state: Path | None) -> int:
+    with StateStore.open(state or default_state_path()) as store:
+        effects = ExternalEffects(store)
+        if effects.get(effect_id) is None:
+            print(f"no external effect with id {effect_id!r}", file=sys.stderr)
+            return 2
+        try:
+            retried = effects.retry(effect_id)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    print(f"{retried.id}  pending — it will be attempted by the next `clawdence work`")
     return 0
 
 
@@ -1430,6 +1524,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.as_json,
             )
         parser.parse_args(["runs", "--help"])
+        return 0  # pragma: no cover - --help exits
+
+    if args.command == "effects":
+        if args.effects_command == "list":
+            return _effects_list(
+                args.state,
+                status=args.status,
+                run_id=args.run_id,
+                limit=args.limit,
+                as_json=args.as_json,
+            )
+        if args.effects_command == "show":
+            return _effects_show(args.effect_id, args.state, as_json=args.as_json)
+        if args.effects_command == "retry":
+            return _effects_retry(args.effect_id, args.state)
+        parser.parse_args(["effects", "--help"])
         return 0  # pragma: no cover - --help exits
 
     if args.command == "reap":

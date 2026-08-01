@@ -33,10 +33,10 @@ from clawdence.domain import (
     WorkItem,
 )
 from clawdence.ingest import cli as ingest_cli
-from clawdence.ports import TransientError
+from clawdence.ports import PermanentError, TransientError
 from clawdence.ports.vcs import PullRequest
 from clawdence.runners import HostRunner
-from clawdence.store import Intake, Publications, PublicationState, StateStore
+from clawdence.store import EffectState, ExternalEffects, Intake, StateStore
 from clawdence.triage import Deployment, Pipeline, acknowledge, load
 from clawdence.vcs import GhVcs, RepoStore, WorktreeManager
 from clawdence.vcs.git import git
@@ -236,10 +236,30 @@ def test_publication_resumes_without_running_the_agent_again(
     assert first.run_id is not None
     assert first.refusal is not None
     assert "queued for retry" in first.refusal
-    queued = Publications(state).require(first.run_id)
-    assert queued.state is PublicationState.PENDING
+    assert first.effect_id is not None
+    queued = ExternalEffects(state).require(first.effect_id)
+    assert queued.state is EffectState.PENDING
     assert queued.attempts == 1
-    assert run(git(forge.remote, "rev-parse", f"refs/heads/{queued.branch}")) == queued.head_commit
+    command = queued.command
+    assert isinstance(command, dict)
+    assert set(command) == {
+        "repository_id",
+        "work_item_id",
+        "branch",
+        "base_commit",
+        "head_commit",
+        "title",
+        "body",
+        "base_branch",
+        "policy",
+    }
+    assert "workflow" not in command
+    assert "raw_text" not in command
+    branch = command["branch"]
+    head_commit = command["head_commit"]
+    assert isinstance(branch, str)
+    assert isinstance(head_commit, str)
+    assert run(git(forge.remote, "rev-parse", f"refs/heads/{branch}")) == head_commit
     attempts = state.steps_for(first.run_id)
 
     restarted = Pipeline(
@@ -249,17 +269,134 @@ def test_publication_resumes_without_running_the_agent_again(
         worktrees=pipeline.worktrees,
         vcs=pipeline.vcs,
         runner=None,
+        effect_clock=lambda: queued.next_attempt_at,
     )
     outcomes = run(restarted.resume_publications())
 
     assert len(outcomes) == 1
     assert outcomes[0].published is True
-    assert Publications(state).require(first.run_id).state is PublicationState.PUBLISHED
+    assert ExternalEffects(state).require(first.effect_id).state is EffectState.DELIVERED
     assert state.steps_for(first.run_id) == attempts
     pull = outcomes[0].pull_request
     assert pull is not None
     published = run(git(forge.remote, "show", f"refs/heads/{pull.head_branch}:app.py"))
     assert "float(a)" in published
+
+
+def test_a_crash_before_the_first_forge_write_reclaims_the_effect(
+    pipeline: Pipeline,
+    state: StateStore,
+    forge: Forge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = GhVcs.create_branch
+    calls = 0
+
+    async def crash_once(self: GhVcs, repo_id: str, name: str, *, from_commit: str) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated process death before branch creation")
+        return await original(self, repo_id, name, from_commit=from_commit)
+
+    monkeypatch.setattr(GhVcs, "create_branch", crash_once)
+    item_id = submit(state, "The widget adder should accept floating point numbers.")
+
+    with pytest.raises(RuntimeError, match="simulated process death"):
+        run(pipeline.start(item_for(state, item_id)))
+
+    (abandoned,) = ExternalEffects(state).list()
+    assert abandoned.state is EffectState.DELIVERING
+    claim_deadline = abandoned.claim_expires_at
+    assert claim_deadline is not None
+    attempts = state.steps_for(abandoned.run_id)
+    restarted = Pipeline(
+        deployment=pipeline.deployment,
+        store=state,
+        repos=pipeline.repos,
+        worktrees=pipeline.worktrees,
+        vcs=pipeline.vcs,
+        runner=None,
+        effect_clock=lambda: claim_deadline,
+    )
+
+    (recovered,) = run(restarted.resume_publications())
+
+    assert recovered.published is True
+    assert ExternalEffects(state).require(abandoned.id).state is EffectState.DELIVERED
+    assert state.steps_for(abandoned.run_id) == attempts
+    assert len(forge.state()["pulls"]) == 1
+
+
+def test_a_crash_after_pull_creation_finds_the_same_pull_request(
+    pipeline: Pipeline,
+    state: StateStore,
+    forge: Forge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = ExternalEffects.delivered
+    calls = 0
+
+    def crash_once(
+        self: ExternalEffects,
+        effect_id: str,
+        *,
+        owner: str,
+        at: datetime | None = None,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated process death after pull creation")
+        return original(self, effect_id, owner=owner, at=at)
+
+    monkeypatch.setattr(ExternalEffects, "delivered", crash_once)
+    item_id = submit(state, "The widget adder should accept floating point numbers.")
+
+    with pytest.raises(RuntimeError, match="simulated process death"):
+        run(pipeline.start(item_for(state, item_id)))
+
+    assert len(forge.state()["pulls"]) == 1
+    (abandoned,) = ExternalEffects(state).list()
+    claim_deadline = abandoned.claim_expires_at
+    assert claim_deadline is not None
+    attempts = state.steps_for(abandoned.run_id)
+    restarted = Pipeline(
+        deployment=pipeline.deployment,
+        store=state,
+        repos=pipeline.repos,
+        worktrees=pipeline.worktrees,
+        vcs=pipeline.vcs,
+        runner=None,
+        effect_clock=lambda: claim_deadline,
+    )
+
+    (recovered,) = run(restarted.resume_publications())
+
+    assert recovered.published is True
+    assert len(forge.state()["pulls"]) == 1
+    assert state.steps_for(abandoned.run_id) == attempts
+
+
+def test_a_permanent_publication_failure_parks_without_retrying(
+    pipeline: Pipeline,
+    state: StateStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unauthorised(self: GhVcs, *args: object, **kwargs: object) -> PullRequest:
+        del self, args, kwargs
+        raise PermanentError("bad-credentials", "the forge rejected the credential")
+
+    monkeypatch.setattr(GhVcs, "open_pull_request", unauthorised)
+    item_id = submit(state, "The widget adder should accept floating point numbers.")
+
+    outcome = run(pipeline.start(item_for(state, item_id)))
+
+    assert outcome.delivery_state is EffectState.PARKED
+    assert outcome.effect_id is not None
+    parked = ExternalEffects(state).require(outcome.effect_id)
+    assert parked.error_kind == "bad-credentials"
+    assert run(pipeline.resume_publications()) == ()
 
 
 def test_the_workflow_it_chose_is_the_one_the_run_records(

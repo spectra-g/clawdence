@@ -42,11 +42,9 @@ and the whole premise (§1.3) is that an agent's product is a proposal entering
 the normal review path. A human reads the pull request; the run record says the
 review failed.
 
-**Publication recovery is currently a bridge.** The publication intent written
-below closes the immediate crash window found during runner testing, but it is
-not the final external-effects architecture. S4b.1 is next and is expected to
-replace or substantially rework ``store.publication`` into the generic durable
-effects mechanism. Nothing else should grow a private queue by copying it.
+**Publication is a durable external effect.** The immutable command is recorded
+before the first forge write. Delivery is claimed separately from workflow
+execution, so a crash resumes Git work without dispatching the coding agent.
 """
 
 from __future__ import annotations
@@ -80,12 +78,26 @@ from clawdence.engine import (
     execute,
     load_workflow,
 )
+from clawdence.ports._common import Clock, utc_now
 from clawdence.ports.errors import PortError
 from clawdence.ports.runner import RunnerPort
 from clawdence.ports.vcs import PullRequest, VcsPort
 from clawdence.runners import Dispatch, RunnerHandler
-from clawdence.store import Intake, Publication, Publications, SqliteLedger, StateStore
+from clawdence.store import (
+    DEFAULT_LEASE_SECONDS,
+    EffectKind,
+    EffectState,
+    ExternalEffect,
+    ExternalEffects,
+    Intake,
+    Publication,
+    Publications,
+    SqliteLedger,
+    StateStore,
+    new_effect_id,
+)
 from clawdence.triage.config import ConfigError, Deployment
+from clawdence.triage.effects import PublicationEffectHandler, PublishPullRequestCommand
 from clawdence.triage.routing import Decision, Routed, route
 from clawdence.vcs import (
     Finding,
@@ -143,6 +155,10 @@ class Outcome:
     report: RunReport | None = None
     pull_request: PullRequest | None = None
 
+    #: Delivery is independent of the terminal workflow status.
+    effect_id: str | None = None
+    delivery_state: EffectState | None = None
+
     #: Why this went no further. ``None`` when nothing stopped it.
     refusal: str | None = None
 
@@ -192,6 +208,11 @@ class Pipeline:
 
     environ: Mapping[str, str] | None = None
 
+    #: Stable for this drainer process; claims from a dead process expire.
+    effect_owner: str = field(default_factory=lambda: f"work.{_secrets.token_hex(6)}")
+    effect_lease_seconds: float = DEFAULT_LEASE_SECONDS
+    effect_clock: Clock = utc_now
+
     async def start(self, item: WorkItem, *, run_id: str | None = None) -> Outcome:
         """Route one work item and carry it as far as it goes.
 
@@ -224,7 +245,7 @@ class Pipeline:
     async def resume_publications(
         self, *, ref: str | None = None, limit: int | None = None
     ) -> tuple[Outcome, ...]:
-        """Retry durable forge work without dispatching the coding agent again.
+        """Drain due publication effects without dispatching the agent again.
 
         An intent is written before the first remote side effect. Branch creation,
         pushing the same hash and opening-or-finding a pull request are all
@@ -232,38 +253,153 @@ class Pipeline:
         safely continue on the next ``work`` invocation.
         """
         outcomes: list[Outcome] = []
-        pending = Publications(self.store).pending(limit=None if ref is not None else limit)
-        for publication in pending:
+        outcomes.extend(await self._resume_legacy_publications(ref=ref, limit=limit))
+        if limit is not None and len(outcomes) >= limit:
+            return tuple(outcomes)
+        queue = self._effects()
+        remaining = None if limit is None else limit - len(outcomes)
+        due = queue.due(limit=None if ref is not None else remaining)
+        intake = Intake(self.store)
+        for effect in due:
+            if effect.kind != EffectKind.PUBLISH_PULL_REQUEST:
+                claimed = queue.claim(
+                    effect.id,
+                    owner=self.effect_owner,
+                    lease_seconds=self.effect_lease_seconds,
+                )
+                if claimed is not None:
+                    queue.park(
+                        claimed.id,
+                        owner=self.effect_owner,
+                        error_kind="unsupported-effect-kind",
+                        error_detail=f"no handler is installed for {claimed.kind!r}",
+                    )
+                continue
+            try:
+                command = PublishPullRequestCommand.model_validate(effect.command)
+            except ValueError:
+                command = None
+            admission = None if command is None else intake.for_work_item(command.work_item_id)
+            if admission is None:
+                claimed = queue.claim(
+                    effect.id,
+                    owner=self.effect_owner,
+                    lease_seconds=self.effect_lease_seconds,
+                )
+                if claimed is not None:
+                    queue.park(
+                        claimed.id,
+                        owner=self.effect_owner,
+                        error_kind=(
+                            "invalid-effect-command" if command is None else "work-item-not-found"
+                        ),
+                        error_detail=(
+                            "the publication command is invalid"
+                            if command is None
+                            else f"no intake row exists for {command.work_item_id!r}"
+                        ),
+                    )
+                continue
+            item = admission.item
+            if ref is not None and item.source_ref.external_id != ref:
+                continue
+            if limit is not None and len(outcomes) >= limit:
+                break
+            claimed = queue.claim(
+                effect.id,
+                owner=self.effect_owner,
+                lease_seconds=self.effect_lease_seconds,
+            )
+            if claimed is None:
+                continue
+            report = self._stored_report(claimed)
+            routed = self._stored_routing(item, claimed, report)
+            outcomes.append(
+                await self._deliver_publication(
+                    claimed,
+                    item=item,
+                    routed=routed,
+                    report=report,
+                )
+            )
+        return tuple(outcomes)
+
+    async def _resume_legacy_publications(
+        self, *, ref: str | None, limit: int | None
+    ) -> tuple[Outcome, ...]:
+        """Drain migration 4 rows written before generic effects existed.
+
+        New code never enqueues here. Keeping this narrow reader is what makes
+        upgrading with a commit waiting to publish safe instead of silently
+        abandoning the obligation in an old table.
+        """
+        outcomes: list[Outcome] = []
+        legacy = Publications(self.store)
+        for publication in legacy.pending(limit=None if ref is not None else limit):
             item = publication.work_item
             if ref is not None and item.source_ref.external_id != ref:
                 continue
             if limit is not None and len(outcomes) >= limit:
                 break
-            report = self._stored_report(publication)
-            routed = self._stored_routing(item, publication, report)
+            report = self._legacy_report(publication)
+            routed = self._legacy_routing(item, publication, report)
+            base = Outcome(
+                item_id=item.id,
+                routed=routed,
+                run_id=publication.run_id,
+                report=report,
+            )
             try:
                 profile = self.deployment.profile(publication.repo_id)
-            except ConfigError as exc:
-                Publications(self.store).failed(publication.run_id, str(exc))
-                outcomes.append(
-                    Outcome(
-                        item_id=item.id,
-                        routed=routed,
-                        run_id=publication.run_id,
-                        report=report,
-                        refusal=f"the completed run is waiting to publish: {exc}",
+                inspect_path = self.repos.mirror(profile)
+                legacy.attempting(publication.run_id)
+                findings = await audit(
+                    inspect_path,
+                    publication.base_commit,
+                    publication.head_commit,
+                )
+                if findings:
+                    refusal = (
+                        "this legacy branch is not reviewable as it stands, so nothing was "
+                        "published:\n  " + "\n  ".join(finding.describe() for finding in findings)
                     )
+                    legacy.refused(publication.run_id, refusal)
+                    outcomes.append(replace(base, findings=findings, refusal=refusal))
+                    continue
+                await self.vcs.create_branch(
+                    profile.id,
+                    publication.branch,
+                    from_commit=publication.head_commit,
                 )
+                await self.vcs.push(
+                    profile.id,
+                    publication.branch,
+                    worktree_path=str(inspect_path),
+                    expect_commit=publication.head_commit,
+                )
+                pull = await self.vcs.open_pull_request(
+                    profile.id,
+                    title=item.title,
+                    body=render_body(
+                        _summary(item, routed, report),
+                        template=await read_template(
+                            self.repos,
+                            profile,
+                            publication.base_commit,
+                        ),
+                    ),
+                    head_branch=publication.branch,
+                    base_branch=profile.default_branch,
+                    work_item_id=item.id,
+                    policy=profile.pull_request,
+                )
+            except (ConfigError, GitError, OSError, PortError) as exc:
+                refusal = f"legacy publication is still queued for retry: {exc}"
+                legacy.failed(publication.run_id, refusal)
+                outcomes.append(replace(base, refusal=refusal))
                 continue
-            outcomes.append(
-                await self._publish_intent(
-                    publication,
-                    routed,
-                    profile,
-                    report,
-                    inspect_path=self.repos.mirror(profile),
-                )
-            )
+            legacy.published(publication.run_id)
+            outcomes.append(replace(base, pull_request=pull))
         return tuple(outcomes)
 
     # ------------------------------------------------------------------ steps
@@ -359,96 +495,124 @@ class Pipeline:
         if head is None or head == lease.base_commit:
             return base
 
-        publication = Publications(self.store).enqueue(
-            Publication(
-                run_id=lease.run_id,
-                work_item=item,
-                workflow=report.workflow,
-                repo_id=profile.id,
-                branch=lease.branch,
-                base_commit=lease.base_commit,
-                head_commit=head,
-            )
-        )
-        return await self._publish_intent(
-            publication, routed, profile, report, inspect_path=lease.path
-        )
-
-    async def _publish_intent(
-        self,
-        publication: Publication,
-        routed: Routed,
-        profile: RepoProfile,
-        report: RunReport,
-        *,
-        inspect_path: Path,
-    ) -> Outcome:
-        """One idempotent attempt at a previously recorded publication."""
-        item = publication.work_item
-        queue = Publications(self.store)
-        queue.attempting(publication.run_id)
-        base = Outcome(
-            item_id=item.id,
-            routed=routed,
-            run_id=publication.run_id,
-            report=report,
-        )
         try:
-            findings = await audit(inspect_path, publication.base_commit, publication.head_commit)
+            findings = await audit(lease.path, lease.base_commit, head)
         except (GitError, OSError) as exc:
-            message = (
-                f"the completed run is waiting to publish because its diff could not be read: {exc}"
+            return replace(
+                base,
+                refusal=(
+                    f"the completed run could not publish because its diff could not be read: {exc}"
+                ),
             )
-            queue.failed(publication.run_id, message)
-            return replace(base, refusal=message)
         if findings:
             refusal = (
                 "this branch is not reviewable as it stands, so nothing was "
                 "published:\n  " + "\n  ".join(finding.describe() for finding in findings)
             )
-            queue.refused(publication.run_id, refusal)
+            return replace(base, findings=findings, refusal=refusal)
+
+        body = render_body(
+            _summary(item, routed, report),
+            template=await read_template(self.repos, profile, lease.base_commit),
+        )
+        command = PublishPullRequestCommand(
+            repository_id=profile.id,
+            work_item_id=item.id,
+            branch=lease.branch,
+            base_commit=lease.base_commit,
+            head_commit=head,
+            title=item.title,
+            body=body,
+            base_branch=profile.default_branch,
+            policy=profile.pull_request,
+        )
+        effect = self._effects().enqueue(
+            effect_id=new_effect_id(),
+            idempotency_key=(f"publish-pull-request:{lease.run_id}:{lease.branch}:{head}"),
+            run_id=lease.run_id,
+            kind=EffectKind.PUBLISH_PULL_REQUEST,
+            command=command.model_dump(mode="json"),
+        )
+        claimed = self._effects().claim(
+            effect.id,
+            owner=self.effect_owner,
+            lease_seconds=self.effect_lease_seconds,
+        )
+        if claimed is None:
+            current = self._effects().require(effect.id)
             return replace(
                 base,
-                findings=findings,
-                refusal=refusal,
+                effect_id=current.id,
+                delivery_state=current.state,
+                refusal=self._delivery_refusal(current),
             )
+        return await self._deliver_publication(
+            claimed,
+            item=item,
+            routed=routed,
+            report=report,
+            inspect_path=lease.path,
+        )
 
-        try:
-            await self.vcs.create_branch(
-                profile.id, publication.branch, from_commit=publication.head_commit
+    async def _deliver_publication(
+        self,
+        effect: ExternalEffect,
+        *,
+        item: WorkItem,
+        routed: Routed,
+        report: RunReport | None,
+        inspect_path: Path | None = None,
+    ) -> Outcome:
+        """One claimed, idempotent attempt at a recorded publication."""
+        base = Outcome(
+            item_id=item.id,
+            routed=routed,
+            run_id=effect.run_id,
+            report=report,
+            effect_id=effect.id,
+            delivery_state=EffectState.DELIVERING,
+        )
+        pull = await PublicationEffectHandler(
+            deployment=self.deployment,
+            effects=self._effects(),
+            repos=self.repos,
+            vcs=self.vcs,
+            owner=self.effect_owner,
+        ).deliver(effect, inspect_path=inspect_path)
+        settled = self._effects().require(effect.id)
+        if pull is not None:
+            return replace(
+                base,
+                pull_request=pull,
+                delivery_state=EffectState.DELIVERED,
             )
-            await self.vcs.push(
-                profile.id,
-                publication.branch,
-                worktree_path=str(inspect_path),
-                expect_commit=publication.head_commit,
-            )
-            pull = await self.vcs.open_pull_request(
-                profile.id,
-                title=item.title,
-                body=render_body(
-                    _summary(item, routed, report),
-                    template=await read_template(self.repos, profile, publication.base_commit),
-                ),
-                head_branch=publication.branch,
-                base_branch=profile.default_branch,
-                work_item_id=item.id,
-                policy=profile.pull_request,
-            )
-        except PortError as exc:
-            # The durable intent, local branch and objects remain. A later work
-            # invocation resumes here rather than paying for another agent run.
-            refusal = (
-                f"the run produced {publication.head_commit[:12]} and publication is queued "
-                f"for retry: {exc}"
-            )
-            queue.failed(publication.run_id, refusal)
-            return replace(base, refusal=refusal)
+        return replace(
+            base,
+            delivery_state=settled.state,
+            refusal=self._delivery_refusal(settled),
+        )
 
-        queue.published(publication.run_id)
-        return replace(base, pull_request=pull)
+    @staticmethod
+    def _delivery_refusal(effect: ExternalEffect) -> str:
+        command = PublishPullRequestCommand.model_validate(effect.command)
+        head = str(command.head_commit)[:12]
+        if effect.state is EffectState.PARKED:
+            return (
+                f"the run produced {head}, but publication is parked after "
+                f"{effect.attempts} attempt(s): {effect.error_kind}: {effect.error_detail}"
+            )
+        if effect.state is EffectState.DELIVERING:
+            return f"the run produced {head} and publication is claimed by another drainer"
+        return (
+            f"the run produced {head} and publication is queued for retry at "
+            f"{effect.next_attempt_at.isoformat(timespec='seconds')}: "
+            f"{effect.error_kind}: {effect.error_detail}"
+        )
 
     # --------------------------------------------------------------- plumbing
+
+    def _effects(self) -> ExternalEffects:
+        return ExternalEffects(self.store, clock=self.effect_clock)
 
     def _workflow(self, name: str) -> Workflow:
         return load_workflow(self.deployment.workflow_path(name))
@@ -541,18 +705,51 @@ class Pipeline:
         repo_id = routed.repo.value
         self.store.update_run(run_id, lambda run: run.model_copy(update={"repo_id": repo_id}))
 
-    def _stored_report(self, publication: Publication) -> RunReport:
-        run = self.store.require_run(publication.run_id)
-        attempts = self.store.steps_for(publication.run_id)
+    def _stored_report(self, effect: ExternalEffect) -> RunReport | None:
+        run = self.store.require_run(effect.run_id)
+        try:
+            workflow = self._workflow(run.workflow)
+        except WorkflowLoadError:
+            return None
+        attempts = self.store.steps_for(effect.run_id)
         final = {result.stage_id: result for result in attempts}
         return RunReport(
             run=run,
-            workflow=publication.workflow,
+            workflow=workflow,
             attempts=attempts,
             final=final,
         )
 
     def _stored_routing(
+        self, item: WorkItem, effect: ExternalEffect, report: RunReport | None
+    ) -> Routed:
+        command = PublishPullRequestCommand.model_validate(effect.command)
+        run = self.store.require_run(effect.run_id)
+        current = route(
+            item,
+            profiles=self.deployment.profiles,
+            policy=self.deployment.config.routing,
+        )
+        return replace(
+            current,
+            workflow=Decision(
+                report.workflow.name if report is not None else run.workflow,
+                "pinned by the completed run",
+            ),
+            repo=Decision(command.repository_id, "pinned by the publication command"),
+        )
+
+    def _legacy_report(self, publication: Publication) -> RunReport:
+        run = self.store.require_run(publication.run_id)
+        attempts = self.store.steps_for(publication.run_id)
+        return RunReport(
+            run=run,
+            workflow=publication.workflow,
+            attempts=attempts,
+            final={result.stage_id: result for result in attempts},
+        )
+
+    def _legacy_routing(
         self, item: WorkItem, publication: Publication, report: RunReport
     ) -> Routed:
         current = route(
@@ -562,8 +759,8 @@ class Pipeline:
         )
         return replace(
             current,
-            workflow=Decision(report.workflow.name, "pinned by the completed run"),
-            repo=Decision(publication.repo_id, "pinned by the publication intent"),
+            workflow=Decision(report.workflow.name, "pinned by the completed legacy run"),
+            repo=Decision(publication.repo_id, "pinned by the legacy publication intent"),
         )
 
 

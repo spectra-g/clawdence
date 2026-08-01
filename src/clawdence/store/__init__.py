@@ -11,8 +11,7 @@ rebuilds to keep working forever.
 The layering, as elsewhere, is one-directional::
 
     errors ─ schema ─ codec
-                └─ audit ─ state ─ control · intake ─ ledger ─ watchdog
-                                  └─ publication "provisional S4b.1 bridge"
+                └─ audit ─ state ─ control · intake ─ ledger ─ watchdog · effects
 
 ``ledger`` is the seam with the engine: it satisfies ``engine.Ledger``, so the
 executor persists a run without knowing that it does. ``control`` is the same
@@ -21,9 +20,9 @@ a runner can be steered and stopped mid-flight without importing this package.
 ``intake`` is the third (S10) and satisfies ``ports.IngestPort`` — durable
 because the CLI adapter's arrival and the pipeline's collection are two
 different processes, so an in-memory dedupe guard would guard nothing.
-``publication`` is deliberately provisional: it closes the crash window found
-during M1 runner testing, while S4b.1 owns replacing or reshaping it into the
-generic durable-effects mechanism. It must not be copied for another adapter.
+``effects`` closes the transaction gap between state transitions and external
+adapters. Its commands are immutable and generic lifecycle owns claim, retry,
+parking and delivery; adapters still own effect-specific idempotency.
 """
 
 from __future__ import annotations
@@ -42,6 +41,16 @@ from clawdence.store.control import (
     MessageState,
     SteeringMessage,
     StoreControl,
+)
+from clawdence.store.effects import (
+    BASE_BACKOFF_SECONDS,
+    DEFAULT_LEASE_SECONDS,
+    DEFAULT_MAX_ATTEMPTS,
+    EffectKind,
+    EffectState,
+    ExternalEffect,
+    ExternalEffects,
+    new_effect_id,
 )
 from clawdence.store.errors import (
     ConcurrentUpdateError,
@@ -76,6 +85,9 @@ from clawdence.store.watchdog import (
 )
 
 __all__ = [
+    "BASE_BACKOFF_SECONDS",
+    "DEFAULT_LEASE_SECONDS",
+    "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_SILENCE_SECONDS",
     "IN_MEMORY",
     "MAX_CLAIM",
@@ -88,6 +100,10 @@ __all__ = [
     "DeadLetter",
     "Disposition",
     "DuplicateAttemptError",
+    "EffectKind",
+    "EffectState",
+    "ExternalEffect",
+    "ExternalEffects",
     "Inbox",
     "Intake",
     "MessageRejectedError",
@@ -114,6 +130,7 @@ __all__ = [
     "connect",
     "detect",
     "migrate",
+    "new_effect_id",
     "recover",
     "sweep",
     "transaction",

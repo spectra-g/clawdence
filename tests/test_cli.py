@@ -24,8 +24,9 @@ from clawdence.agent import AgentHandler, AnthropicModels
 from clawdence.cli import main
 from clawdence.domain import Run, RunStatus, StepResult, StepStatus, StepType
 from clawdence.engine import UnimplementedHandler
+from clawdence.ports import PermanentError
 from clawdence.ports.ingest import SELF_ID
-from clawdence.store import Intake, StateStore
+from clawdence.store import ExternalEffects, Intake, StateStore
 
 
 def test_version_is_populated() -> None:
@@ -161,6 +162,59 @@ class TestRunsCommands:
     ) -> None:
         assert main(["runs", "recover", "--state", str(tmp_path / "state.db")]) == 0
         assert "nothing stalled" in capsys.readouterr().out
+
+
+class TestEffectsCommands:
+    def parked(self, tmp_path: Path) -> tuple[Path, str, str]:
+        path = tmp_path / "state.db"
+        main(["run", "examples/toy.yaml", "--state", str(path)])
+        run_id = _only_run_id(path)
+        with StateStore.open(path) as store:
+            effects = ExternalEffects(store)
+            effect = effects.enqueue(
+                effect_id="fx.cli",
+                idempotency_key="cli:test",
+                run_id=run_id,
+                kind="publish_pull_request",
+                command={"title": "immutable command"},
+            )
+            claimed = effects.claim(effect.id, owner="test")
+            assert claimed is not None
+            effects.failed(
+                claimed.id,
+                owner="test",
+                error=PermanentError("bad-credentials", "fix the token"),
+            )
+        return path, run_id, effect.id
+
+    def test_list_show_and_retry_a_parked_effect(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state, _, effect_id = self.parked(tmp_path)
+        capsys.readouterr()
+
+        assert main(["effects", "list", "--state", str(state), "--status", "parked"]) == 0
+        assert effect_id in capsys.readouterr().out
+
+        assert main(["effects", "show", effect_id, "--state", str(state), "--json"]) == 0
+        shown = json.loads(capsys.readouterr().out)
+        assert shown["command"]["title"] == "immutable command"
+        assert shown["error_kind"] == "bad-credentials"
+
+        assert main(["effects", "retry", effect_id, "--state", str(state)]) == 0
+        assert "pending" in capsys.readouterr().out
+
+    def test_runs_show_exposes_execution_and_delivery_as_two_axes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state, run_id, effect_id = self.parked(tmp_path)
+        capsys.readouterr()
+
+        assert main(["runs", "show", run_id, "--state", str(state), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["run"]["status"] == "halted"
+        assert payload["effects"][0]["id"] == effect_id
+        assert payload["effects"][0]["state"] == "parked"
 
     def test_recover_dry_run_changes_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

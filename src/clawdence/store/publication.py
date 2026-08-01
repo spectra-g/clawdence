@@ -1,4 +1,4 @@
-"""Provisional durable publication intents: execution once, delivery may retry.
+"""Read-only upgrade bridge for migration-4 publication intents.
 
 A run can finish and create a local commit while the forge is unavailable. That
 is not a reason to run the coding agent again: the expensive, non-idempotent
@@ -6,14 +6,10 @@ part already happened, while create-branch, push-the-same-hash and open-or-find
 the pull request are deliberately idempotent. This table is the seam between
 those two lifetimes.
 
-This is the immediate single-publication bridge found while testing M1, not the
-settled S4b.1 architecture. S4b.1 is the next planned step and is expected to
-replace or substantially rework this into generic durable external effects with
-minimal immutable commands, transient retry versus permanent parking, bounded
-backoff, expiring claims, audit events and several effects per run. Keeping that
-warning here matters: an integration author must not copy this table and create
-one private retry queue per port merely because publication happened to expose
-the deferred dual-write problem first.
+S4b.1 replaced this with ``store.effects``. New code must not enqueue here; the
+reader remains so an installation upgraded while a migration-4 row is pending
+can finish it rather than abandon a commit. Once those rows settle this module
+has no runtime role.
 """
 
 from __future__ import annotations
@@ -56,10 +52,7 @@ class Publication:
 
 
 class Publications:
-    """The provisional bridge for branch and pull-request publication.
-
-    S4b.1 is the next private-plan step; consult it before extending this API.
-    """
+    """Migration compatibility only; use ``ExternalEffects`` for new work."""
 
     __slots__ = ("_clock", "_store")
 

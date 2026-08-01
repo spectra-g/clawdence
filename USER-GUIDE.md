@@ -243,21 +243,21 @@ way you're already typing.
   at by hand — `clawdence runs show RUN_ID` to see the findings.
 - **Publication queued for retry** — the runner finished and its commit is
   preserved, but Git or GitHub could not finish the branch/push/PR sequence.
-  Do not resubmit the request: after fixing the credential or outage, run
-  `clawdence work` again. Pending publications are drained before a fresh
-  agent is dispatched, so this does not pay for or execute the coding work a
-  second time.
+  Do not resubmit the request. A transient failure retries with backoff on a
+  later `clawdence work`; a permanent or exhausted failure is parked. Inspect
+  it with `clawdence effects show EFFECT_ID`, fix the cause, then run
+  `clawdence effects retry EFFECT_ID`. Due effects are drained before a fresh
+  agent is dispatched, so this does not execute the coding work a second time.
 - **Request still `pending` in `clawdence inbox list`** — it couldn't be
   routed at all. It's *not* silently dropped; it stays in the queue until
   you fix the routing (usually an `aliases`/`keywords` edit) and run `work`
   again.
 
-The publication retry above is intentionally the first, narrow implementation
-of a larger state-store obligation. It is safe for the current one-PR-per-run
-pipeline, but it is not the reusable design for future Slack, tracker or
-multi-PR delivery. The next planned step, S4b.1, replaces or substantially
-reworks it into generic durable external effects with transient backoff,
-permanent-failure parking, expiring claims, audit records and operator retry.
+Publication is the first handler on the generic durable-effects facility. Use
+`clawdence effects list --status parked` for the operator queue and
+`clawdence runs show RUN_ID` to see workflow execution and external delivery as
+separate statuses. Tracker and notification handlers will reuse the lifecycle
+when their owning steps arrive; they do not get private retry tables.
 
 ## Troubleshooting the two credentials, concretely
 

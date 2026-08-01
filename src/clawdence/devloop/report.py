@@ -22,6 +22,7 @@ from clawdence.devloop.replay import UNOBSERVABLE, Replay
 from clawdence.devloop.reset import Reset
 from clawdence.domain import Event, Run, StepResult, StepStatus
 from clawdence.store.audit import DeadLetter
+from clawdence.store.effects import ExternalEffect
 
 #: The engine's marks, reused. A step reads the same in ``runs show`` as in a
 #: live trace, which is the point of having them at all.
@@ -222,7 +223,13 @@ def render_dead_letters(letters: Sequence[DeadLetter]) -> str:
 # --------------------------------------------------------------------- run
 
 
-def render_run(run: Run, steps: Sequence[StepResult], *, events: int) -> str:
+def render_run(
+    run: Run,
+    steps: Sequence[StepResult],
+    *,
+    events: int,
+    effects: Sequence[ExternalEffect] = (),
+) -> str:
     lines = [
         f"run {run.id}  workflow {run.workflow}@{run.workflow_version}",
         f"work item {run.work_item_id}  status {run.status.value}",
@@ -242,22 +249,65 @@ def render_run(run: Run, steps: Sequence[StepResult], *, events: int) -> str:
             lines.append(f"        {step.error.kind}: {step.error.message}")
     if not steps:
         lines.append("  no steps recorded")
+    lines += ["", "external delivery:"]
+    if effects:
+        for effect in effects:
+            lines.append(
+                f"  {effect.state.value:<10}  {effect.kind}  {effect.id}  "
+                f"({effect.attempts}/{effect.max_attempts} attempt(s))"
+            )
+            if effect.error_kind is not None:
+                lines.append(f"              {effect.error_kind}: {effect.error_detail}")
+    else:
+        lines.append("  no external effects")
     lines.append("")
     lines.append(f"{events} audit record(s) — `clawdence audit {run.id}`")
     return "\n".join(lines)
 
 
-def render_run_json(run: Run, steps: Sequence[StepResult], *, events: int) -> str:
+def render_run_json(
+    run: Run,
+    steps: Sequence[StepResult],
+    *,
+    events: int,
+    effects: Sequence[ExternalEffect] = (),
+) -> str:
     return json.dumps(
         {
             "run": run.model_dump(mode="json"),
             "steps": [step.model_dump(mode="json") for step in steps],
+            "effects": [effect_dict(effect, command=False) for effect in effects],
             "events": events,
         },
         indent=2,
         sort_keys=True,
         ensure_ascii=False,
     )
+
+
+def effect_dict(effect: ExternalEffect, *, command: bool) -> dict[str, object]:
+    result: dict[str, object] = {
+        "id": effect.id,
+        "idempotency_key": effect.idempotency_key,
+        "run_id": effect.run_id,
+        "kind": effect.kind,
+        "state": effect.state.value,
+        "attempts": effect.attempts,
+        "max_attempts": effect.max_attempts,
+        "next_attempt_at": effect.next_attempt_at.isoformat(),
+        "error_kind": effect.error_kind,
+        "error_detail": effect.error_detail,
+        "claim_owner": effect.claim_owner,
+        "claim_expires_at": (
+            None if effect.claim_expires_at is None else effect.claim_expires_at.isoformat()
+        ),
+        "created_at": effect.created_at.isoformat(),
+        "updated_at": effect.updated_at.isoformat(),
+        "delivered_at": None if effect.delivered_at is None else effect.delivered_at.isoformat(),
+    }
+    if command:
+        result["command"] = effect.command
+    return result
 
 
 # ------------------------------------------------------------------ shared

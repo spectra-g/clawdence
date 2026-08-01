@@ -176,12 +176,11 @@ Three properties worth naming:
   step output or a stderr tail. Redaction at write time is not built yet, and an append-only table
   cannot un-write a pasted key, so what is not yet screened is also not yet carried.
 
-Publication currently has one extra durability seam discovered during runner testing. Once a run
-has committed, Clawdence records the exact repository, branch and hashes before contacting the
-forge; a later `work` invocation retries that publication before starting another agent. This is a
-provisional M1 bridge, clearly marked in code. The private plan's S4b.1 is next and replaces or
-substantially reworks it into the shared durable-effects facility rather than letting each adapter
-grow its own retry table.
+External delivery has its own durable state. Once a run has committed, Clawdence records an
+immutable `publish_pull_request` command — pinned repository, branch, hashes, rendered body and
+policy — before contacting the forge. A later `work` invocation claims due effects before starting
+another agent. Transient failures back off, permanent or exhausted failures park, and expired
+claims are recoverable after a crash; adapters still make the remote write idempotent.
 
 ## The ports
 
@@ -498,9 +497,9 @@ commits is refused before an agent step, a container or a test suite has been pa
   the failure named in the body: an agent's product is a proposal entering the normal review path,
   and throwing it away would be deciding the review.
 - **A forge interruption does not rerun the agent.** The completed commit remains in the mirror and
-  its publication is retried before fresh work on the next `clawdence work`. The current
-  publication-specific queue is the immediate bridge; S4b.1 is explicitly next and owns the
-  generic retry, parking, backoff, claiming and operations model.
+  its due publication effect is retried before fresh work on the next `clawdence work`. Delivery
+  has transactional claims, bounded transient backoff, permanent-failure parking and an explicit
+  `clawdence effects retry EFFECT_ID` operator path.
 - **A request nobody could route stays in the queue.** Acknowledging it would leave a person
   waiting on work that will never start.
 

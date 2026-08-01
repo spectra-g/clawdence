@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 
 from clawdence.domain import RepoProfile
+from clawdence.store import EffectState
 from clawdence.triage.config import Deployment
 from clawdence.triage.pipeline import Outcome, workflow_names
 from clawdence.triage.routing import Routed
@@ -155,6 +156,8 @@ def render_outcome(outcome: Outcome, *, ref: str | None = None) -> str:
         lines.append(f"  pull request  {pull.url or f'#{pull.number}'}")
     if outcome.run_id is not None:
         lines.append(f"  run           {outcome.run_id}")
+    if outcome.effect_id is not None and outcome.delivery_state is not None:
+        lines.append(f"  delivery      {outcome.delivery_state.value}  ({outcome.effect_id})")
     if outcome.report is not None and outcome.report.failed_stages:
         lines.append(f"  failed        {', '.join(outcome.report.failed_stages)}")
         for stage_id in outcome.report.failed_stages:
@@ -172,7 +175,11 @@ def render_outcome(outcome: Outcome, *, ref: str | None = None) -> str:
         ]
 
     next_lines: list[str] = []
-    if outcome.run_id is not None and not outcome.succeeded:
+    if outcome.delivery_state is EffectState.PARKED and outcome.effect_id is not None:
+        next_lines = [f"  next          clawdence effects retry {outcome.effect_id}"]
+    elif outcome.delivery_state is EffectState.PENDING:
+        next_lines = ["  next          publication will retry on a later `clawdence work`"]
+    elif outcome.run_id is not None and not outcome.succeeded:
         next_lines = [
             f"  next          clawdence runs show {outcome.run_id}",
             "                this request is already acknowledged — a run started, so "

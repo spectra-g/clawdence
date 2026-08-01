@@ -67,7 +67,13 @@
         "verification.recorded",
         "budget.exceeded",
         "halted_for_human",
-        "degraded"
+        "degraded",
+        "external_effect.enqueued",
+        "external_effect.claimed",
+        "external_effect.retry_scheduled",
+        "external_effect.delivered",
+        "external_effect.parked",
+        "external_effect.retried"
       ],
       "title": "EventKind",
       "type": "string"
