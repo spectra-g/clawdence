@@ -6,7 +6,7 @@ import pytest
 
 from clawdence.domain import RunStatus, StepStatus
 from clawdence.store import DuplicateAttemptError, StateStore, UnknownRunError
-from tests.store.factories import RUN_ID, at, make_run, make_step, running_step
+from tests.store.factories import RUN_ID, TEST_CREDENTIAL, at, make_run, make_step, running_step
 
 
 class TestRuns:
@@ -56,6 +56,12 @@ class TestRuns:
 
 
 class TestSteps:
+    def test_step_output_is_screened_before_it_is_stored(self, state: StateStore) -> None:
+        state.create_run(make_run())
+        state.finish_step(make_step("agent", output={"transcript": f"token={TEST_CREDENTIAL}"}))
+
+        assert state.steps_for(RUN_ID)[0].output == {"transcript": "token=[redacted]"}
+
     def test_a_started_step_reads_back(self, state: StateStore) -> None:
         state.create_run(make_run())
         step = running_step("build")

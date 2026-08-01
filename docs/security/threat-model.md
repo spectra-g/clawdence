@@ -355,33 +355,39 @@ An unsigned webhook endpoint is an open invitation to spend someone else's money
 configuration flag to disable it. Ingestion is idempotent on a source-stable key, so replaying a
 captured delivery produces one work item rather than N.
 
-### T11 · Secrets written into the audit trail — **partially built**
+### T11 · Secrets written into the audit trail — **built**
 
-The audit trail carries chat text, issue bodies, plans, and logs. Any of those can contain a key
-somebody pasted. The trail is append-only, so **there is no deleting it afterwards**.
+The state system receives chat text, issue bodies, plans, logs and provider errors. Any of those
+can contain a key somebody pasted. The audit trail is append-only by policy, so correction must be
+an exceptional and visible operation rather than an ordinary update.
 
-**Planned mitigations:** redaction happens at write time, not at read time. Records carry a flag
+**Mitigations:** redaction happens at write time, not at read time. Records carry a flag
 recording that the redaction pass ran, so a record written by a path that skipped screening is
 findable rather than indistinguishable from a clean one. A rare, audited tombstone-and-rewrite
 escape hatch exists for when redaction misses, because it will.
 
-**What the state store actually does today (S4), pending redaction (S4b):**
+**What the state store does:**
 
 - **Audit payloads are metadata, not content.** What the engine writes is identifiers, statuses,
   attempt numbers and error *kinds* — never step output, never a stderr tail, never a prompt. This
   is a real reduction, not a deferral: the payloads worth redacting are not in the append-only
-  table yet, so the window in which redaction is missing is a window in which little of value
-  passes through it. The rule has to hold as later steps add payloads, and the one that is easiest
-  to get wrong is the error message, which is why the engine records `error.kind` and drops
-  `error.message` on the way in.
-- **The `redacted` flag is written `false`, honestly.** Nothing screens payloads yet, so nothing
-  claims to have. The seam that S4b fills is a one-argument substitution, and when it lands the
-  flag starts telling the truth without any other change.
+  table. The rule still matters after screening: carrying less sensitive material is safer than
+  relying on every credential having a recognisable shape.
+- **One screening boundary serves every durable writer.** Known OpenAI, Anthropic, GitHub,
+  GitLab, npm, Slack, AWS and Google key shapes are masked inside arbitrary text. Structured fields
+  named like credentials are masked regardless of their value's shape. Intake and replies, step
+  output/response/errors, steering and cancellation text, audit and dead letters, and external
+  effect commands/provider errors all cross this boundary before storage.
+- **The `redacted` flag attests that screening ran.** It is true even when there was no match,
+  rather than ambiguously meaning "a key happened to be found."
+- **Repair keeps the exception visible.** `clawdence state redact` reads the missed value from a
+  file rather than argv, rewrites only content-bearing columns, and appends a tombstone containing
+  operator, reason, table counts and occurrence count—never the value or a guessable fingerprint.
 
 Commit-time and full-history secret scanning is in place in this repository from the first commit,
 for the same reason at a different layer.
 
-### T20 · Sensitive data at rest in the state store — **partially built**
+### T20 · Sensitive data at rest in the state store — **built for the trusted single node**
 
 Distinct from T11 and newer than it. The state store records what each step *produced*: captured
 stdout and stderr, parsed output, agent responses. That is the run's evidence and the system cannot
@@ -394,9 +400,13 @@ something it should not can be deleted or rewritten, unlike an audit entry. Capt
 64 KiB per stream, so a step cannot put an entire build log in the record. The database is a file
 under the operator's own account and inherits its permissions.
 
-**Not mitigated:** the file is not encrypted at rest, and there is no retention policy — both
-follow from R7, that the operator's own machine is trusted. Backup and restore, which will move
-this data off that machine and make its handling somebody's explicit decision, is S4b's.
+The same write-time screening described under T11 applies to the content tables, not only audit.
+Backup uses SQLite's online backup API so committed WAL pages are included. Both backup and restore
+check database integrity and require exactly the schema version understood by the running build;
+restore publishes atomically into an absent destination and refuses to overwrite existing state.
+
+**Accepted:** the file and its backups are not encrypted at rest, and there is no retention policy
+— both follow from R7, that the operator's own machine and chosen backup location are trusted.
 
 ### T21 · Credentials recorded into committed test fixtures — **built**
 
@@ -769,8 +779,8 @@ The honest summary. Most of this is not built.
 | Credential-free runner request; env-var-name-only MCP config | T3, T18 | **Built** (schema) |
 | Untrusted-by-default submitters | T9 | **Built** (schema) |
 | Commit-time and full-history secret scanning | T11 | **Built** |
-| Metadata-only audit payloads; honestly-false `redacted` flag | T11 | **Built** |
-| Bounded capture; deletable state tables (not append-only) | T20 | **Built** |
+| Metadata-only audit payloads; write-time screening and audited rewrite escape hatch | T11 | **Built** |
+| Bounded screened capture; schema-checked online backup and clean restore | T20 | **Built** |
 | Plane split — scoped credentials, one worktree | T3, T4, T5 | **Built**, and asserted from inside a real container |
 | Container isolation — one mount, all capabilities dropped, no new privileges, read-only root, no Docker socket | T4, T5 | **Built** |
 | Resource caps — CPU, memory, pids, wall clock | T7 | **Built**; disk only where the storage driver supports a quota |

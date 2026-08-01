@@ -15,7 +15,7 @@ has no runtime role.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -62,6 +62,20 @@ class Publications:
 
     def enqueue(self, publication: Publication) -> Publication:
         """Record intent before the first forge side effect; idempotent by run."""
+        publication = replace(
+            publication,
+            work_item=WorkItem.model_validate(
+                self._store.screen(publication.work_item.model_dump(mode="json"))
+            ),
+            workflow=Workflow.model_validate(
+                self._store.screen(publication.workflow.model_dump(mode="json"))
+            ),
+            last_error=(
+                None
+                if publication.last_error is None
+                else self._store.screen_text(publication.last_error)
+            ),
+        )
         at = publication.updated_at or self._clock()
         with transaction(self._store.connection) as connection:
             connection.execute(
@@ -136,6 +150,8 @@ class Publications:
         return self._set(run_id, PublicationState.PUBLISHED, None)
 
     def _set(self, run_id: str, state: PublicationState, error: str | None) -> Publication:
+        if error is not None:
+            error = self._store.screen_text(error)
         with transaction(self._store.connection) as connection:
             connection.execute(
                 "UPDATE publications SET state = ?, last_error = ?, updated_at = ? "

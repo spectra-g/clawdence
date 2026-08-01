@@ -22,11 +22,12 @@ import pytest
 from clawdence import __version__, cli
 from clawdence.agent import AgentHandler, AnthropicModels
 from clawdence.cli import main
-from clawdence.domain import Run, RunStatus, StepResult, StepStatus, StepType
+from clawdence.domain import EventKind, Run, RunStatus, StepResult, StepStatus, StepType
 from clawdence.engine import UnimplementedHandler
 from clawdence.ports import PermanentError
 from clawdence.ports.ingest import SELF_ID
 from clawdence.store import ExternalEffects, Intake, StateStore
+from tests.store.factories import TEST_CREDENTIAL
 
 
 def test_version_is_populated() -> None:
@@ -251,6 +252,59 @@ class TestEffectsCommands:
 
         assert main(["runs", "recover", "--state", str(state)]) == 0
         assert "dead letters: 1 parked, 0 replayed" in capsys.readouterr().out
+
+
+class TestStateCommands:
+    def test_backup_and_clean_restore_round_trip_the_record(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        source = tmp_path / "state.db"
+        main(["run", "examples/toy.yaml", "--state", str(source)])
+        expected = _only_run_id(source)
+        backup_path = tmp_path / "backup.db"
+        restored = tmp_path / "clean" / "state.db"
+        capsys.readouterr()
+
+        assert main(["state", "backup", str(backup_path), "--state", str(source)]) == 0
+        assert "schema" in capsys.readouterr().out
+        assert main(["state", "restore", str(backup_path), "--state", str(restored)]) == 0
+        assert "restored" in capsys.readouterr().out
+        assert _only_run_id(restored) == expected
+
+    def test_missed_secret_repair_reads_the_value_from_a_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state_path = tmp_path / "state.db"
+        with StateStore.open(state_path) as store:
+            store.audit.record(EventKind.DEGRADED, at=_now(), payload={"detail": "safe"})
+            store.connection.execute(
+                "UPDATE audit SET payload = ?",
+                (f'{{"detail":"provider echoed {TEST_CREDENTIAL}"}}',),
+            )
+        secret_file = tmp_path / "credential"
+        secret_file.write_text(f"{TEST_CREDENTIAL}\n")
+
+        assert (
+            main(
+                [
+                    "state",
+                    "redact",
+                    "--state",
+                    str(state_path),
+                    "--secret-file",
+                    str(secret_file),
+                    "--reason",
+                    "legacy writer missed it",
+                    "--as",
+                    "test-operator",
+                ]
+            )
+            == 0
+        )
+        assert "rewrote 1 occurrence" in capsys.readouterr().out
+        with StateStore.open(state_path) as store:
+            assert TEST_CREDENTIAL not in "\n".join(store.connection.iterdump())
+            assert store.audit.read()[-1].kind is EventKind.STATE_SECRET_REWRITTEN
 
 
 def _now() -> datetime:

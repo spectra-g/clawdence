@@ -169,6 +169,8 @@ class Inbox:
                 f"{MAX_STEERING_CHARS} — it is pasted into the agent's context whole, and a "
                 f"truncated instruction can mean the opposite of the one that was sent"
             )
+        text = self._store.screen_text(text)
+        sender = self._store.screen_text(sender)
         self._store.require_run(run_id)
 
         message_id = f"st.{secrets.token_hex(8)}"
@@ -260,6 +262,7 @@ class Inbox:
         reason: str,
         states: tuple[MessageState, ...],
     ) -> int:
+        reason = self._store.screen_text(reason)
         placeholders = ", ".join("?" * len(states))
         with transaction(self._store.connection) as connection:
             cursor = connection.execute(
@@ -316,6 +319,8 @@ class Cancellations:
         says one run was cancelled once, by whoever got there first.
         """
         self._store.require_run(run_id)
+        reason = self._store.screen_text(reason)
+        requested_by = self._store.screen_text(requested_by)
         with transaction(self._store.connection) as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO cancellations "

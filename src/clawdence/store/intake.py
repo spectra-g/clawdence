@@ -213,6 +213,7 @@ class Intake:
         """
         moment = at or self._clock()
         self._screen(item)
+        item = self._screen_item(item)
         key = dedupe_key(item)
 
         with transaction(self._store.connection) as connection:
@@ -253,6 +254,7 @@ class Intake:
         """
         moment = at or self._clock()
         self._screen(item)
+        item = self._screen_item(item)
         key = dedupe_key(item)
 
         with transaction(self._store.connection) as connection:
@@ -296,6 +298,7 @@ class Intake:
         "this had already been picked up" instead of "done".
         """
         moment = at or self._clock()
+        reason = self._store.screen_text(reason)
         with transaction(self._store.connection) as connection:
             row = self._require(key)
             connection.execute(
@@ -338,6 +341,8 @@ class Intake:
             raise SubmissionRejectedError(
                 f"this reply is {len(text)} characters and the limit is {MAX_REQUEST_CHARS}"
             )
+        text = self._store.screen_text(text)
+        author = self._store.screen_text(author)
 
         row = self._conversation_row(source, conversation_id)
         turn_id = f"turn.{secrets.token_hex(8)}"
@@ -488,6 +493,10 @@ class Intake:
             raise SubmissionRejectedError(
                 f"this title is {len(item.title)} characters and the limit is {MAX_TITLE_CHARS}"
             )
+
+    def _screen_item(self, item: WorkItem) -> WorkItem:
+        screened = self._store.screen(item.model_dump(mode="json"))
+        return WorkItem.model_validate(screened)
 
     def _insert(
         self,

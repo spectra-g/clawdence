@@ -12,7 +12,7 @@ from clawdence.domain import EventKind, RunStatus
 from clawdence.ports import PermanentError, TransientError
 from clawdence.store import EffectState, ExternalEffects, StateStore
 from tests.conftest import StoreFactory
-from tests.store.factories import RUN_ID, at, make_run
+from tests.store.factories import RUN_ID, TEST_CREDENTIAL, at, make_run
 
 
 def queue(state: StateStore, *, effect_id: str = "fx.one", key: str = "key.one") -> ExternalEffects:
@@ -54,6 +54,29 @@ def test_enqueue_is_idempotent_but_the_command_is_immutable(state: StateStore) -
             command={"repository_id": "repo.test", "body": "changed"},
             max_attempts=3,
         )
+
+
+def test_commands_and_provider_errors_are_screened_before_storage(state: StateStore) -> None:
+    state.create_run(make_run(status=RunStatus.DONE))
+    effects = ExternalEffects(state, clock=lambda: at(0))
+    queued = effects.enqueue(
+        effect_id="fx.secret",
+        idempotency_key="key.secret",
+        run_id=RUN_ID,
+        kind="publish_pull_request",
+        command={"body": f"accidentally pasted {TEST_CREDENTIAL}"},
+    )
+    claimed = effects.claim(queued.id, owner="worker", at=at(1))
+    assert claimed is not None
+    parked = effects.failed(
+        queued.id,
+        owner="worker",
+        error=PermanentError("rejected", f"provider echoed {TEST_CREDENTIAL}"),
+        at=at(2),
+    )
+
+    assert parked.command == {"body": "accidentally pasted [redacted]"}
+    assert parked.error_detail == "provider echoed [redacted]"
 
 
 def test_two_drainers_cannot_claim_one_logical_delivery(state: StateStore) -> None:

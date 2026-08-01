@@ -7,13 +7,9 @@ becomes a housekeeping problem rather than a correctness one.
 
 **What goes in a payload is a security decision, and S4's answer is: metadata.**
 Identifiers, statuses, attempt numbers, error *kinds*. Never step output, never
-stderr, never a prompt. The reason is the obligation ADR-0005 refused to drop:
-an append-only store cannot un-write a key someone pasted, and redaction at
-write time is S4b's. Until that exists, the honest mitigation is for this log
-not to carry the payloads worth redacting — and ``redacted`` is written
-**false**, because a record that claims to have been screened when no screening
-ran is worse than one that admits it. ``Redactor`` is the seam S4b fills; when
-it does, the flag starts telling the truth on its own.
+stderr, never a prompt. Redaction still runs at this boundary, because metadata
+can contain a human-provided label or adapter detail and the cheapest secret to
+repair is the one that never became durable.
 
 The dead-letter queue guards the one boundary where a record arrives *untyped*:
 ``submit``, for records from outside this process (S10's webhooks, S6's runner
@@ -38,6 +34,7 @@ from pydantic import JsonValue, ValidationError
 
 from clawdence.domain import Actor, Event, EventKind
 from clawdence.store import codec
+from clawdence.store.redaction import redact
 from clawdence.store.schema import iso, transaction
 
 #: How much of a validation failure is kept. Enough to recognise the fault,
@@ -48,16 +45,16 @@ MAX_REASON_CHARS = 2_000
 class Redactor(Protocol):
     """Screens a payload on the way in.
 
-    Returns the payload to store and whether screening actually ran. S4b
-    replaces the default with one that finds and masks secrets; everything
-    about the interface is already in place so that substitution is one line.
+    Returns the payload to store and whether screening actually ran. The
+    boolean is not "a match was found": it attests that this write crossed the
+    screening boundary.
     """
 
     def __call__(self, payload: JsonValue) -> tuple[JsonValue, bool]: ...
 
 
 def unscreened(payload: JsonValue) -> tuple[JsonValue, bool]:
-    """The default: store as given, and say so. See the module docstring."""
+    """Explicit test/compatibility escape hatch: store as given, and say so."""
     return payload, False
 
 
@@ -105,7 +102,7 @@ class AuditLog:
         self,
         connection: sqlite3.Connection,
         *,
-        redactor: Redactor = unscreened,
+        redactor: Redactor = redact,
         new_id: Callable[[], str] = new_event_id,
     ) -> None:
         self._connection = connection
@@ -115,7 +112,11 @@ class AuditLog:
     def append(self, event: Event) -> Event:
         """Write a record built in this process. Screens the payload first."""
         payload, screened = self._redactor(event.payload)
-        stored = event.model_copy(update={"payload": payload, "redacted": screened})
+        actor = event.actor
+        if actor is not None:
+            screened_actor, _ = self._redactor(actor.model_dump(mode="json"))
+            actor = Actor.model_validate(screened_actor)
+        stored = event.model_copy(update={"actor": actor, "payload": payload, "redacted": screened})
         self._insert(stored)
         return stored
 
@@ -275,12 +276,18 @@ class AuditLog:
             connection.execute(sql, values)
 
     def _park(self, raw: object, *, at: datetime, origin: str, reason: str) -> None:
+        screened_reason, _ = self._redactor(reason)
+        reason = str(screened_reason)
+        screened_origin, _ = self._redactor(origin)
+        origin = str(screened_origin)
         try:
-            body = codec.dumps(raw)
+            screened, _ = self._redactor(raw)  # type: ignore[arg-type]
+            body = codec.dumps(screened)
         except (TypeError, ValueError):
             # Not even serialisable. Keeping the repr beats keeping nothing:
             # a human still has to be able to see what arrived.
-            body = json.dumps(repr(raw))
+            representation, _ = self._redactor(repr(raw))
+            body = json.dumps(representation)
         with transaction(self._connection) as connection:
             connection.execute(
                 "INSERT INTO dead_letters (at, origin, reason, body) VALUES (?, ?, ?, ?)",
@@ -298,6 +305,8 @@ class AuditLog:
         why it first failed, since the usual reason for replaying is that
         something was changed in between.
         """
+        screened_reason, _ = self._redactor(reason)
+        reason = str(screened_reason)
         with transaction(self._connection) as connection:
             connection.execute(
                 "UPDATE dead_letters SET tries = tries + 1, at = ?, reason = ? WHERE id = ?",

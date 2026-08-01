@@ -32,6 +32,7 @@ from clawdence.store import (
     UnknownSubmissionError,
 )
 from tests.ports.factories import run
+from tests.store.factories import TEST_CREDENTIAL
 
 START = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
 
@@ -76,6 +77,14 @@ def intake(state: StateStore) -> Intake:
 
 
 class TestFirstArrival:
+    def test_a_pasted_api_key_is_screened_before_the_request_is_stored(
+        self, intake: Intake
+    ) -> None:
+        admission = intake.submit(item(raw_text=f"Please diagnose {TEST_CREDENTIAL}"), at=at(0))
+
+        assert admission.item.raw_text == "Please diagnose [redacted]"
+        assert intake.collect()[0].raw_text == "Please diagnose [redacted]"
+
     def test_a_new_request_is_created_and_pending(self, intake: Intake) -> None:
         admission = intake.submit(item(), at=at(0))
         assert admission.disposition is Disposition.CREATED

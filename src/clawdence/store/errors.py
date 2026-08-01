@@ -13,6 +13,10 @@ class StoreError(Exception):
     """Base for everything this package raises."""
 
 
+class StateOperationError(StoreError):
+    """A backup, restore or audited repair was refused or found invalid state."""
+
+
 class UnsupportedDatabaseError(StoreError):
     """The SQLite build underneath is too old for the schema.
 

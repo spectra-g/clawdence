@@ -39,7 +39,7 @@ from typing import Any
 import pytest
 
 from clawdence.domain import BuildSystem
-from clawdence.store import IN_MEMORY, Redactor, StateStore, connect, unscreened
+from clawdence.store import IN_MEMORY, Redactor, StateStore, connect, redact
 from tests.harness.cassette import Cassette, Mode
 from tests.harness.cleanup import Reaper
 from tests.harness.repos import FixtureRepo, build_repo, git_available
@@ -180,7 +180,7 @@ def stores() -> Iterator[StoreFactory]:
     def open_store(
         path: Path | str = IN_MEMORY,
         *,
-        redactor: Redactor = unscreened,
+        redactor: Redactor = redact,
         conflict_window: Callable[[], None] = lambda: None,
     ) -> StateStore:
         store = StateStore.open(path, redactor=redactor, conflict_window=conflict_window)

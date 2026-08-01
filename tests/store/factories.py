@@ -21,6 +21,7 @@ from clawdence.engine.executor import idempotency_key
 RUN_ID = "run.test"
 WORK_ITEM_ID = "wi.test"
 START = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+TEST_CREDENTIAL = "sk-" + "abcdefghijklmnop" + "123456"
 
 
 def at(seconds: float) -> datetime:

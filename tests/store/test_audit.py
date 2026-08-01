@@ -5,10 +5,10 @@ from __future__ import annotations
 from pydantic import JsonValue
 
 from clawdence.domain import EVENT_SCHEMA_VERSION, Actor, ActorKind, EventKind
-from clawdence.store import StateStore
+from clawdence.store import StateStore, unscreened
 from clawdence.store.schema import iso
 from tests.conftest import StoreFactory
-from tests.store.factories import RUN_ID, at
+from tests.store.factories import RUN_ID, TEST_CREDENTIAL, at
 
 
 class TestAppending:
@@ -82,10 +82,28 @@ class TestAppending:
 
 
 class TestRedaction:
-    def test_an_unscreened_payload_says_so(self, state: StateStore) -> None:
+    def test_an_unscreened_payload_says_so(self, stores: StoreFactory) -> None:
         """Claiming to have screened when nothing screened is the worse lie."""
+        state = stores(redactor=unscreened)
         state.audit.record(EventKind.STEP_FINISHED, at=at(0), payload={"attempt": 1})
         assert state.audit.read()[0].redacted is False
+
+    def test_the_default_screens_known_secrets(self, state: StateStore) -> None:
+        state.audit.record(
+            EventKind.STEP_FINISHED,
+            at=at(0),
+            payload={
+                "message": f"provider echoed {TEST_CREDENTIAL}",
+                "api_key": "unusual-shape",
+            },
+        )
+
+        stored = state.audit.read()[0]
+        assert stored.payload == {
+            "message": "provider echoed [redacted]",
+            "api_key": "[redacted]",
+        }
+        assert stored.redacted is True
 
     def test_a_redactor_is_applied_and_recorded(self, stores: StoreFactory) -> None:
         def mask(payload: JsonValue) -> tuple[JsonValue, bool]:

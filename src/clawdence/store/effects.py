@@ -95,6 +95,7 @@ class ExternalEffects:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
         at = self._clock()
+        command = self._store.screen(command)
         encoded = codec.dumps(command)
         kind_value = str(kind)
         with transaction(self._store.connection) as connection:
@@ -289,6 +290,7 @@ class ExternalEffects:
     ) -> ExternalEffect:
         """Schedule a transient retry or park a permanent/exhausted error."""
         now = at or self._clock()
+        error_detail = self._store.screen_text(error.message)
         with transaction(self._store.connection) as connection:
             current = self._owned(effect_id, owner, connection)
             transient = isinstance(error, TransientError)
@@ -309,7 +311,7 @@ class ExternalEffects:
                 "UPDATE external_effects SET state = ?, next_attempt_at = ?, error_kind = ?, "
                 "error_detail = ?, claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
                 "WHERE id = ?",
-                (state.value, iso(next_at), error.kind, error.message, iso(now), effect_id),
+                (state.value, iso(next_at), error.kind, error_detail, iso(now), effect_id),
             )
             stored = self._require_in(effect_id, connection)
             payload: dict[str, JsonValue] = {

@@ -259,6 +259,47 @@ Publication is the first handler on the generic durable-effects facility. Use
 separate statuses. Tracker and notification handlers will reuse the lifecycle
 when their owning steps arrive; they do not get private retry tables.
 
+## 9. Back up and restore the state record
+
+Take backups through Clawdence rather than copying `state.db` while it is live:
+
+```sh
+clawdence state backup ~/backups/clawdence-$(date +%F).db
+```
+
+SQLite may hold committed pages in a WAL beside the main file; the command uses SQLite's online
+backup operation so those pages are included. It checks the source and completed copy for integrity
+and refuses to overwrite an existing backup.
+
+Exercise recovery into a path that does not exist:
+
+```sh
+clawdence state restore ~/backups/clawdence-2026-08-01.db \
+  --state /tmp/clawdence-restore/state.db
+clawdence runs list --state /tmp/clawdence-restore/state.db
+clawdence effects list --state /tmp/clawdence-restore/state.db
+```
+
+Restore requires exactly the schema version this build understands and refuses an existing
+destination. To replace production state, first verify the clean restore, stop every Clawdence
+process, and move files using your normal recoverable operator procedure; the command will not
+silently overwrite the system of record.
+
+Known credential shapes and values under credential-named fields are replaced with `[redacted]`
+before state is written. If a new key shape gets through, put the exact leaked value in a
+permission-restricted file and use the audited escape hatch:
+
+```sh
+chmod 600 /tmp/missed-secret
+clawdence state redact --secret-file /tmp/missed-secret \
+  --reason "provider introduced a key shape the redactor did not know"
+```
+
+The secret stays out of the command line, shell history, output and audit event. The operation
+rewrites exact matches in content-bearing columns and appends a tombstone recording the operator,
+reason and counts. Delete the temporary secret file through your normal secure procedure after
+the repair.
+
 ## Troubleshooting the two credentials, concretely
 
 - **"`agent` steps ... but no model provider was wired"** — you ran

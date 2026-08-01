@@ -40,7 +40,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
@@ -48,31 +47,10 @@ from typing import Final
 
 from pydantic import JsonValue
 
-from clawdence.ports import REDACTED
+from clawdence.store.redaction import redact_value
 
 #: The one way to switch recording on.
 MODE_ENV: Final = "CLAWDENCE_CASSETTE"
-
-#: Field names whose values are replaced wholesale, matched case-insensitively
-#: on the whole name or as a substring. Deliberately broad: a false positive
-#: costs a redacted field in a fixture, a false negative costs a live key in
-#: git history.
-_SECRET_FIELDS: Final = re.compile(
-    r"(authorization|api[-_]?key|access[-_]?token|bearer|secret|password|credential)",
-    re.IGNORECASE,
-)
-
-#: Values shaped like a credential wherever they appear, including inside prompt
-#: text — which is where a pasted key actually turns up (threat model T11).
-_SECRET_VALUES: Final = re.compile(
-    r"\b("
-    r"sk-[A-Za-z0-9_-]{16,}"  # OpenAI-style
-    r"|sk-ant-[A-Za-z0-9_-]{16,}"  # Anthropic-style
-    r"|gh[pousr]_[A-Za-z0-9]{16,}"  # GitHub
-    r"|xox[abposr]-[A-Za-z0-9-]{10,}"  # Slack
-    r"|AKIA[0-9A-Z]{16}"  # AWS access key id
-    r")\b"
-)
 
 
 class CassetteError(RuntimeError):
@@ -113,16 +91,7 @@ def redact(value: JsonValue) -> JsonValue:
     *looks like* a key is redacted whatever it is called — the second being the
     one that catches a key pasted into a prompt by a user.
     """
-    if isinstance(value, dict):
-        return {
-            key: REDACTED if _SECRET_FIELDS.search(key) else redact(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    if isinstance(value, str):
-        return _SECRET_VALUES.sub(REDACTED, value)
-    return value
+    return redact_value(value)
 
 
 def key_for(request: JsonValue) -> str:

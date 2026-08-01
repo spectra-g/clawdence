@@ -31,14 +31,17 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Self
 
+from pydantic import JsonValue
+
 from clawdence.domain import Run, RunStatus, StepResult, StepStatus
 from clawdence.store import codec
-from clawdence.store.audit import AuditLog, Redactor, unscreened
+from clawdence.store.audit import AuditLog, Redactor
 from clawdence.store.errors import (
     ConcurrentUpdateError,
     DuplicateAttemptError,
     UnknownRunError,
 )
+from clawdence.store.redaction import redact
 from clawdence.store.schema import connect, iso, transaction
 
 #: How many times a writer re-reads and retries before declaring real
@@ -54,13 +57,13 @@ def _no_window() -> None:
 class StateStore:
     """Runs, steps, and the audit log that describes them."""
 
-    __slots__ = ("_audit", "_connection", "_window")
+    __slots__ = ("_audit", "_connection", "_redactor", "_window")
 
     def __init__(
         self,
         connection: sqlite3.Connection,
         *,
-        redactor: Redactor = unscreened,
+        redactor: Redactor = redact,
         conflict_window: Callable[[], None] = _no_window,
     ) -> None:
         """
@@ -71,6 +74,7 @@ class StateStore:
         has actually tested.
         """
         self._connection = connection
+        self._redactor = redactor
         self._audit = AuditLog(connection, redactor=redactor)
         self._window = conflict_window
 
@@ -79,7 +83,7 @@ class StateStore:
         cls,
         path: Path | str,
         *,
-        redactor: Redactor = unscreened,
+        redactor: Redactor = redact,
         conflict_window: Callable[[], None] = _no_window,
     ) -> Self:
         return cls(connect(path), redactor=redactor, conflict_window=conflict_window)
@@ -106,6 +110,18 @@ class StateStore:
     def connection(self) -> sqlite3.Connection:
         """For ``transaction(...)``, so a caller can make writes land together."""
         return self._connection
+
+    def screen(self, value: JsonValue) -> JsonValue:
+        """Screen a JSON value before another store component persists it."""
+        screened, _ = self._redactor(value)
+        return screened
+
+    def screen_text(self, value: str) -> str:
+        """The text-specialised form, with a defensive contract check."""
+        screened = self.screen(value)
+        if not isinstance(screened, str):
+            raise TypeError("a state-store redactor must return text for text input")
+        return screened
 
     # ------------------------------------------------------------------ runs
 
@@ -203,6 +219,7 @@ class StateStore:
 
     def start_step(self, result: StepResult) -> None:
         """Record an attempt as started. Collides rather than duplicates."""
+        result = self._screen_step(result)
         sql, values = codec.insert_statement("steps", codec.step_to_row(result))
         try:
             with transaction(self._connection) as connection:
@@ -220,6 +237,7 @@ class StateStore:
         false guard never ran, and a run record with holes in it cannot answer
         "why is there no PR" months later.
         """
+        result = self._screen_step(result)
         row = codec.step_to_row(result)
         key = row["idempotency_key"]
         changes = {name: value for name, value in row.items() if name != "idempotency_key"}
@@ -254,3 +272,9 @@ class StateStore:
             "SELECT * FROM runs WHERE id = ?", (run_id,)
         ).fetchone()
         return row
+
+    def _screen_step(self, result: StepResult) -> StepResult:
+        data = result.model_dump(mode="json")
+        for field in ("output", "response", "error"):
+            data[field] = self.screen(data[field])
+        return StepResult.model_validate(data)

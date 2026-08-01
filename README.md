@@ -172,9 +172,10 @@ Three properties worth naming:
 - **A step row is written before the step runs.** That row, with the timeout it was started under,
   is what lets a watchdog find work whose process is gone — the case an executor cannot handle,
   because it is the executor that died.
-- **Audit payloads are metadata, not content.** Identifiers, statuses, and error *kinds* — never
-  step output or a stderr tail. Redaction at write time is not built yet, and an append-only table
-  cannot un-write a pasted key, so what is not yet screened is also not yet carried.
+- **Secrets are screened on the way in.** Credential-shaped values in request text, step results,
+  steering, audit payloads, durable effects and provider errors become `[redacted]` before SQLite
+  sees them; credential-named fields are masked regardless of shape. Audit payloads remain
+  metadata rather than content as a second layer of reduction.
 
 External delivery has its own durable state. Once a run has committed, Clawdence records an
 immutable `publish_pull_request` command — pinned repository, branch, hashes, rendered body and
@@ -516,6 +517,8 @@ clawdence runs replay RUN_ID           # rebuild the run from its log and diff i
 clawdence audit RUN_ID                 # the timeline
 clawdence audit --dead-letters         # records that could not join it
 clawdence runs show RUN_ID             # steps, durations, and why one failed
+clawdence state backup ~/backups/clawdence.db
+clawdence state restore ~/backups/clawdence.db --state /clean/path/state.db
 ```
 
 - **A partial reset is the bug, not a smaller reset.** v1's `reset-pipeline.sh` cleared the
@@ -534,6 +537,14 @@ clawdence runs show RUN_ID             # steps, durations, and why one failed
   ledger's own payloads. Half the step record is unobservable by design (S4 keeps output and
   messages out of the log), and the report names those fields rather than quietly not comparing
   them.
+- **Backup is an online SQLite backup, not a copy of `state.db`.** A filesystem copy can omit
+  committed pages still in the WAL. Backup and restore check SQLite integrity and require exactly
+  this build's schema; restore refuses an existing destination so recovery is exercised into a
+  clean environment.
+- **A missed secret has an explicit repair path.** Put the exact value in a private file and run
+  `clawdence state redact --secret-file PATH --reason TEXT`. The value never enters argv or audit;
+  matching content is rewritten to `[redacted]` and a metadata-only tombstone records who repaired
+  it, why, and how many rows changed.
 
 ## Development
 

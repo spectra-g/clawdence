@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import secrets
+import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -108,8 +110,11 @@ from clawdence.store import (
     SqliteLedger,
     StateStore,
     StoreError,
+    backup,
     detect,
+    restore,
     sweep,
+    tombstone_and_rewrite,
 )
 from clawdence.triage import CONFIG_FILENAME
 
@@ -251,6 +256,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     effects_retry.add_argument("effect_id", metavar="EFFECT_ID")
     _add_state_argument(effects_retry)
+
+    state_parser = subcommands.add_parser(
+        "state", help="Back up, restore or repair the state system of record."
+    )
+    state_actions = state_parser.add_subparsers(dest="state_command")
+
+    state_backup = state_actions.add_parser(
+        "backup", help="Take a consistent, schema-checked online backup."
+    )
+    state_backup.add_argument("destination", type=Path, metavar="BACKUP")
+    _add_state_argument(state_backup)
+
+    state_restore = state_actions.add_parser(
+        "restore", help="Restore a checked backup into a clean destination."
+    )
+    state_restore.add_argument("backup", type=Path, metavar="BACKUP")
+    _add_state_argument(state_restore)
+
+    state_redact = state_actions.add_parser(
+        "redact", help="Replace one missed secret and append an audit tombstone."
+    )
+    state_redact.add_argument(
+        "--secret-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Read the exact secret from a file, keeping it out of argv and shell history.",
+    )
+    state_redact.add_argument(
+        "--reason", required=True, metavar="TEXT", help="Operator reason recorded in audit."
+    )
+    state_redact.add_argument(
+        "--as", dest="operator", metavar="WHO", help="Operator identity recorded in audit."
+    )
+    _add_state_argument(state_redact)
 
     reap = subcommands.add_parser(
         "reap",
@@ -631,6 +671,56 @@ def _schema_command(action: str, out: Path) -> int:
         print("\nRun `clawdence schema export` and commit the result.")
         return 1
     print(f"{out} matches the domain model")
+    return 0
+
+
+def _state_backup(state: Path | None, destination: Path) -> int:
+    try:
+        with StateStore.open(state or default_state_path()) as store:
+            report = backup(store, destination)
+    except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+        print(f"backup refused: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"backed up schema {report.schema_version} to {report.destination} ({report.bytes} bytes)"
+    )
+    return 0
+
+
+def _state_restore(state: Path | None, backup_path: Path) -> int:
+    try:
+        report = restore(backup_path, state or default_state_path())
+    except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+        print(f"restore refused: {exc}", file=sys.stderr)
+        return 2
+    print(f"restored schema {report.schema_version} to {report.destination} ({report.bytes} bytes)")
+    return 0
+
+
+def _state_redact(
+    state: Path | None,
+    secret_file: Path,
+    *,
+    reason: str,
+    operator: str | None,
+) -> int:
+    try:
+        secret = secret_file.read_text(encoding="utf-8").rstrip("\r\n")
+        with StateStore.open(state or default_state_path()) as store:
+            report = tombstone_and_rewrite(
+                store,
+                secret,
+                reason=reason,
+                requested_by=operator or getpass.getuser(),
+            )
+    except (OSError, StoreError, sqlite3.DatabaseError) as exc:
+        print(f"redaction rewrite refused: {exc}", file=sys.stderr)
+        return 2
+    tables = ", ".join(f"{name}={count}" for name, count in report.rows.items()) or "none"
+    print(
+        f"rewrote {report.occurrences} occurrence(s) in {report.changed_rows} row(s); "
+        f"tables: {tables}"
+    )
     return 0
 
 
@@ -1540,6 +1630,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.effects_command == "retry":
             return _effects_retry(args.effect_id, args.state)
         parser.parse_args(["effects", "--help"])
+        return 0  # pragma: no cover - --help exits
+
+    if args.command == "state":
+        if args.state_command == "backup":
+            return _state_backup(args.state, args.destination)
+        if args.state_command == "restore":
+            return _state_restore(args.state, args.backup)
+        if args.state_command == "redact":
+            return _state_redact(
+                args.state,
+                args.secret_file,
+                reason=args.reason,
+                operator=args.operator,
+            )
+        parser.parse_args(["state", "--help"])
         return 0  # pragma: no cover - --help exits
 
     if args.command == "reap":

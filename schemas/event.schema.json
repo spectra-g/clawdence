@@ -73,7 +73,8 @@
         "external_effect.retry_scheduled",
         "external_effect.delivered",
         "external_effect.parked",
-        "external_effect.retried"
+        "external_effect.retried",
+        "state.secret_rewritten"
       ],
       "title": "EventKind",
       "type": "string"

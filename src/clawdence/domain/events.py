@@ -66,6 +66,8 @@ class EventKind(StrEnum):
     EXTERNAL_EFFECT_PARKED = "external_effect.parked"
     EXTERNAL_EFFECT_RETRIED = "external_effect.retried"
 
+    STATE_SECRET_REWRITTEN = "state.secret_rewritten"  # noqa: S105 - event name
+
 
 class ActorKind(StrEnum):
     """Whether a human, a model, or the system itself did the thing.

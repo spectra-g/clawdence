@@ -56,6 +56,7 @@ from clawdence.store.errors import (
     ConcurrentUpdateError,
     DuplicateAttemptError,
     MessageRejectedError,
+    StateOperationError,
     StoreError,
     SubmissionRejectedError,
     UnknownConversationError,
@@ -72,7 +73,15 @@ from clawdence.store.intake import (
     Turn,
 )
 from clawdence.store.ledger import SqliteLedger
+from clawdence.store.operations import (
+    DatabaseCopy,
+    RewriteReport,
+    backup,
+    restore,
+    tombstone_and_rewrite,
+)
 from clawdence.store.publication import Publication, Publications, PublicationState
+from clawdence.store.redaction import redact, redact_text, redact_value
 from clawdence.store.schema import IN_MEMORY, SCHEMA_VERSION, connect, migrate, transaction
 from clawdence.store.state import StateStore
 from clawdence.store.watchdog import (
@@ -97,6 +106,7 @@ __all__ = [
     "AuditLog",
     "Cancellations",
     "ConcurrentUpdateError",
+    "DatabaseCopy",
     "DeadLetter",
     "Disposition",
     "DuplicateAttemptError",
@@ -113,9 +123,11 @@ __all__ = [
     "Publications",
     "Redactor",
     "ReplayReport",
+    "RewriteReport",
     "SqliteLedger",
     "Stall",
     "StallKind",
+    "StateOperationError",
     "StateStore",
     "SteeringMessage",
     "StoreControl",
@@ -127,12 +139,18 @@ __all__ = [
     "UnknownRunError",
     "UnknownSubmissionError",
     "UnsupportedDatabaseError",
+    "backup",
     "connect",
     "detect",
     "migrate",
     "new_effect_id",
     "recover",
+    "redact",
+    "redact_text",
+    "redact_value",
+    "restore",
     "sweep",
+    "tombstone_and_rewrite",
     "transaction",
     "unscreened",
 ]
