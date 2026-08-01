@@ -185,13 +185,16 @@ def test_work_takes_one_request_by_default(
     worktree is acquired — and, refused rather than run, it is correctly left
     pending rather than acknowledged (``acknowledge`` only takes a request off
     the queue once it has a run id). So ``--limit`` is checked directly here:
-    exactly one line of output, for the one request `work` actually attempted.
+    the item id of the one request `work` actually attempted appears in the
+    output, and the other pending item's does not.
     """
-    put(db, "The widget adder mishandles floats", ref="a")
-    put(db, "The widget adder mishandles ints too", ref="b")
+    taken = put(db, "The widget adder mishandles floats", ref="a")
+    untouched = put(db, "The widget adder mishandles ints too", ref="b")
 
     assert main(["work", "--config", str(config_path), "--state", str(db)]) == 2
-    assert capsys.readouterr().out.count("repo.widget") == 1
+    out = capsys.readouterr().out
+    assert taken in out
+    assert untouched not in out
     with StateStore.open(db) as store:
         assert len(Intake(store).collect()) == 2
 

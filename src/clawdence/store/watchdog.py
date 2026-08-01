@@ -28,7 +28,7 @@ is not a reason to let it.
 §3.11 asks for it as a *different detector* rather than a shorter budget for the
 two above, because neither of them can see it. The process is running, so
 nothing is orphaned; the step is inside the limit its author declared, so
-nothing is overdue. Warren's incident was a linter accumulating 57 CPU-minutes
+nothing is overdue. The motivating incident was a linter accumulating 57 CPU-minutes
 behind a stuck tool call with the run reporting healthy throughout, and both S4
 detectors would have reported it healthy too. The signal is the timestamp of the
 newest thing the run *said*, which the runner writes through
@@ -85,7 +85,7 @@ DEFAULT_HEARTBEAT_SECONDS: Final = 900.0
 #: design rather than caution: a false positive here kills real work, and the
 #: things that legitimately go quiet — a cold dependency install, a full test
 #: suite on a large repository, a container image pull — are minutes, not most
-#: of an hour. Warren's incident ran for well over this with the run reporting
+#: of an hour. The motivating incident ran for well over this with the run reporting
 #: healthy, so a budget that would have caught it has plenty of room underneath.
 #:
 #: **On by default, and that is the load-bearing part.** A reclaim safety net

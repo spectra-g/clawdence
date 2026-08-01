@@ -53,6 +53,13 @@ def render_text(admission: Admission) -> str:
             "  ! this had already been picked up, so withdrawing it takes it out of "
             "the queue but does not stop work that has started"
         )
+
+    if admission.state is ArrivalState.PENDING:
+        lines += [
+            "",
+            f"  next  clawdence triage {item.source_ref.external_id}  (preview routing), or "
+            f"clawdence work {item.source_ref.external_id}  (run it)",
+        ]
     return "\n".join(lines)
 
 

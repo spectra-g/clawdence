@@ -92,7 +92,7 @@ class TestDetection:
         """§3.11's case, and the one neither S4 detector can see.
 
         The process is alive, the step is a long way inside the timeout its
-        author declared, and nothing has been heard. Warren's incident was this
+        author declared, and nothing has been heard. The motivating incident was this
         exact shape and reported healthy throughout.
         """
         state.create_run(make_run(created=0, updated=0))

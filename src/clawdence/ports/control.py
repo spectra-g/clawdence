@@ -127,7 +127,7 @@ class ControlPort(Protocol):
         Called only when there was something to report. The silence detector
         keys on the absence of these, so a heartbeat sent on a timer regardless
         of whether the agent said anything would make every hung run look
-        healthy — which is exactly the reporting Warren's incident had.
+        healthy — which is exactly the reporting a wedged run produces.
         """
         ...
 

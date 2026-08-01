@@ -243,7 +243,7 @@ def render_run(run: Run, steps: Sequence[StepResult], *, events: int) -> str:
     if not steps:
         lines.append("  no steps recorded")
     lines.append("")
-    lines.append(f"{events} audit record(s) — `clawdence audit --run {run.id}`")
+    lines.append(f"{events} audit record(s) — `clawdence audit {run.id}`")
     return "\n".join(lines)
 
 

@@ -7,7 +7,7 @@ better than editing a tracked ``.gitignore``. It has one hole, and §3.9 names i
 repository that keeps its own ``AGENTS.md`` — which is exactly the kind of
 repository this system is pointed at — gets that file written over by the
 install, sees a modification to a tracked file, and has it swept into the branch
-by ``git add --all``. Warren shipped that bug.
+by ``git add --all``.
 
 The repair is not "do not install over it". It is to **record the bytes**, and at
 collection time put a path back only where what is there is still exactly what we
