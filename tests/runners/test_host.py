@@ -28,6 +28,7 @@ from clawdence.domain import (
 from clawdence.ports import PermanentError, StaticSecrets, TokenPrice
 from clawdence.runners import (
     VERDICT_PATH,
+    AgentCommand,
     HostRunner,
     LogLine,
     PlanDelivery,
@@ -36,6 +37,7 @@ from clawdence.runners import process as process_module
 from clawdence.runners import worktree as wt
 from clawdence.runners.installed import WORK_DIR
 from clawdence.runners.process import kill, kill_and_reap
+from clawdence.vcs.store import mirror_name
 from tests.harness.agent import FakeAgent, missing_command
 from tests.harness.repos import FixtureRepo
 from tests.ports.contract import RunnerContract
@@ -752,6 +754,51 @@ def test_the_plan_can_be_delivered_as_an_argument(
     )
     result = run(HostRunner(agent.command(delivery=PlanDelivery.ARGUMENT)).dispatch(request_for()))
     assert result.outcome is RunnerOutcome.SUCCEEDED
+
+
+def test_codex_can_write_only_this_requests_git_mirror(
+    request_for: RequestFactory, tmp_path: Path
+) -> None:
+    root = tmp_path / "mirrors"
+    command = AgentCommand(
+        argv=("codex", "exec", "--full-auto"),
+        writable_git_root=root,
+    )
+    runner = HostRunner(command)
+    request = request_for(profile=host_profile(id="repo.one"))
+
+    argv = runner._cli_argv(request, "the prompt")
+
+    assert "--full-auto" not in argv
+    assert argv[:4] == ("codex", "--ask-for-approval", "never", "exec")
+    assert ("--sandbox", "workspace-write") == argv[argv.index("--sandbox") :][:2]
+    granted = Path(argv[argv.index("--add-dir") + 1])
+    assert granted == root / mirror_name("repo.one")
+    assert granted.parent == root
+
+
+def test_a_non_codex_host_agent_is_not_given_codex_flags(
+    request_for: RequestFactory, tmp_path: Path
+) -> None:
+    command = AgentCommand(argv=("claude-code",), writable_git_root=tmp_path / "mirrors")
+    argv = HostRunner(command)._cli_argv(request_for(), "the prompt")
+    assert "--add-dir" not in argv
+    assert "--sandbox" not in argv
+
+
+def test_codex_flags_precede_an_argument_delivered_plan(
+    request_for: RequestFactory, tmp_path: Path
+) -> None:
+    command = AgentCommand(
+        argv=("codex", "exec"),
+        delivery=PlanDelivery.ARGUMENT,
+        writable_git_root=tmp_path / "mirrors",
+    )
+
+    argv = HostRunner(command)._cli_argv(request_for(), "a prompt with spaces")
+
+    assert argv[-1] == "a prompt with spaces"
+    assert argv.index("--add-dir") < len(argv) - 1
 
 
 def test_an_mcp_server_without_a_token_needs_no_secret(

@@ -168,6 +168,7 @@ def runner(
         accumulation=accumulation,
         prices=_prices(config),
         include_stderr_tail=config.include_stderr_tail,
+        writable_git_root=repo_store if config.tier is IsolationTier.HOST else None,
     )
 
     if config.tier is IsolationTier.HOST:

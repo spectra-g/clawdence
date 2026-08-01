@@ -21,8 +21,10 @@ from pathlib import Path
 import pytest
 
 from clawdence.cli import main
+from clawdence.domain import WorkItem
 from clawdence.ingest import cli as ingest_cli
 from clawdence.store import Intake, StateStore
+from clawdence.triage import Outcome, Pipeline
 
 AT = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 
@@ -197,6 +199,35 @@ def test_work_takes_one_request_by_default(
     assert untouched not in out
     with StateStore.open(db) as store:
         assert len(Intake(store).collect()) == 2
+
+
+def test_work_retries_publications_before_starting_fresh_work(
+    config_path: Path,
+    db: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put(db, "The widget adder mishandles floats", ref="a")
+    events: list[str] = []
+    original_start = Pipeline.start
+
+    async def resume(
+        self: Pipeline, *, ref: str | None = None, limit: int | None = None
+    ) -> tuple[Outcome, ...]:
+        del self, ref, limit
+        events.append("resume")
+        return ()
+
+    async def start(self: Pipeline, item: WorkItem, *, run_id: str | None = None) -> Outcome:
+        events.append("start")
+        return await original_start(self, item, run_id=run_id)
+
+    monkeypatch.setattr(Pipeline, "resume_publications", resume)
+    monkeypatch.setattr(Pipeline, "start", start)
+
+    assert main(["work", "--config", str(config_path), "--state", str(db)]) == 2
+    capsys.readouterr()
+    assert events == ["resume", "start"]
 
 
 def test_a_deployment_with_no_runner_says_so_rather_than_substituting_one(

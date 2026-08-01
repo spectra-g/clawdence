@@ -12,6 +12,7 @@ The layering, as elsewhere, is one-directional::
 
     errors ─ schema ─ codec
                 └─ audit ─ state ─ control · intake ─ ledger ─ watchdog
+                                  └─ publication "provisional S4b.1 bridge"
 
 ``ledger`` is the seam with the engine: it satisfies ``engine.Ledger``, so the
 executor persists a run without knowing that it does. ``control`` is the same
@@ -20,6 +21,9 @@ a runner can be steered and stopped mid-flight without importing this package.
 ``intake`` is the third (S10) and satisfies ``ports.IngestPort`` — durable
 because the CLI adapter's arrival and the pipeline's collection are two
 different processes, so an in-memory dedupe guard would guard nothing.
+``publication`` is deliberately provisional: it closes the crash window found
+during M1 runner testing, while S4b.1 owns replacing or reshaping it into the
+generic durable-effects mechanism. It must not be copied for another adapter.
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ from clawdence.store.intake import (
     Turn,
 )
 from clawdence.store.ledger import SqliteLedger
+from clawdence.store.publication import Publication, Publications, PublicationState
 from clawdence.store.schema import IN_MEMORY, SCHEMA_VERSION, connect, migrate, transaction
 from clawdence.store.state import StateStore
 from clawdence.store.watchdog import (
@@ -87,6 +92,9 @@ __all__ = [
     "Intake",
     "MessageRejectedError",
     "MessageState",
+    "Publication",
+    "PublicationState",
+    "Publications",
     "Redactor",
     "ReplayReport",
     "SqliteLedger",

@@ -1051,11 +1051,6 @@ def _work_command(
     status = 0
     with StateStore.open(state or default_state_path()) as store:
         intake = Intake(store)
-        admissions = _pending(intake, ref, limit=limit)
-        if not admissions:
-            print(f"nothing submitted under {ref!r}" if ref else "nothing pending")
-            return 2 if ref else 0
-
         pipeline = triage.Pipeline(
             deployment=deployment,
             store=store,
@@ -1065,6 +1060,33 @@ def _work_command(
             runner=runner,
             handlers=_agent_handler(),
         )
+
+        # Publication is the provisional S4b.1 bridge. Drain it before taking fresh work so
+        # a process that died after the agent committed resumes the cheap,
+        # idempotent remote operations instead of dispatching the agent again.
+        resumed = asyncio.run(pipeline.resume_publications(ref=ref, limit=limit))
+        resumed_items = {outcome.item_id for outcome in resumed}
+        for outcome in resumed:
+            triage.acknowledge(intake, outcome)
+            admission = intake.for_work_item(outcome.item_id)
+            outcome_ref = admission.item.source_ref.external_id if admission is not None else ref
+            print(triage.render_outcome(outcome, ref=outcome_ref))
+            if outcome.refusal is not None:
+                status = max(status, 2)
+            elif not outcome.succeeded:
+                status = max(status, 1)
+
+        remaining = max(0, limit - len(resumed))
+        admissions = () if remaining == 0 else _pending(intake, ref, limit=remaining)
+        admissions = tuple(
+            admission for admission in admissions if admission.item.id not in resumed_items
+        )
+        if not admissions:
+            if resumed:
+                return status
+            print(f"nothing submitted under {ref!r}" if ref else "nothing pending")
+            return 2 if ref else 0
+
         for admission in admissions:
             # Printed before the run starts, not just in the outcome at the
             # end, because the run is the expensive part: a request that

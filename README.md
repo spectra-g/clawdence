@@ -176,6 +176,13 @@ Three properties worth naming:
   step output or a stderr tail. Redaction at write time is not built yet, and an append-only table
   cannot un-write a pasted key, so what is not yet screened is also not yet carried.
 
+Publication currently has one extra durability seam discovered during runner testing. Once a run
+has committed, Clawdence records the exact repository, branch and hashes before contacting the
+forge; a later `work` invocation retries that publication before starting another agent. This is a
+provisional M1 bridge, clearly marked in code. The private plan's S4b.1 is next and replaces or
+substantially reworks it into the shared durable-effects facility rather than letting each adapter
+grow its own retry table.
+
 ## The ports
 
 Everything the system talks to — chat, issue trackers, GitHub, the runner, memory, the secret
@@ -449,7 +456,8 @@ forge_token_env: CLAWDENCE_FORGE_TOKEN   # a *name*; never a token
 runner:
   tier: container
   image: ghcr.io/example/runner@sha256:…  # digest-pinned; a tag is refused
-  argv: [codex, exec, --full-auto]
+  # This process is already inside the runner container's hardened boundary.
+  argv: [codex, --dangerously-bypass-approvals-and-sandbox, exec]
   secret_env: {OPENAI_API_KEY: runner-llm-key}   # the runner's own scoped key
 repos:
   - repos/acme-billing.json          # written by `clawdence probe --out`
@@ -489,6 +497,10 @@ commits is refused before an agent step, a container or a test suite has been pa
   no pull request rather than an empty one. A run whose *later* stages failed does publish, with
   the failure named in the body: an agent's product is a proposal entering the normal review path,
   and throwing it away would be deciding the review.
+- **A forge interruption does not rerun the agent.** The completed commit remains in the mirror and
+  its publication is retried before fresh work on the next `clawdence work`. The current
+  publication-specific queue is the immediate bridge; S4b.1 is explicitly next and owns the
+  generic retry, parking, backoff, claiming and operations model.
 - **A request nobody could route stays in the queue.** Acknowledging it would leave a person
   waiting on work that will never start.
 

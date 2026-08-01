@@ -14,12 +14,12 @@ from pathlib import Path
 import pytest
 
 from clawdence.domain import MergeMethod, PullRequestPolicy, RepoProfile
-from clawdence.ports.errors import PermanentError
+from clawdence.ports.errors import PermanentError, TransientError
 from clawdence.ports.secrets import StaticSecrets
 from clawdence.ports.vcs import PullRequestState, StaleMergeError, VcsPort
 from clawdence.vcs import GhUnavailableError, GhVcs, RepoStore, read_template, render_body
 from clawdence.vcs.gh import repo_slug
-from clawdence.vcs.git import git
+from clawdence.vcs.git import GitError, git
 from tests.harness.forge import Forge, build_forge
 from tests.harness.repos import FixtureRepo
 from tests.ports.contract import VcsContract
@@ -74,6 +74,33 @@ def test_a_remote_that_names_no_repository_is_refused(url: str) -> None:
     with pytest.raises(PermanentError) as caught:
         repo_slug(url)
     assert caught.value.kind == "unrecognised-remote"
+
+
+def test_a_disconnect_during_ls_remote_is_a_typed_transient_failure(
+    vcs: GhVcs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def disconnected(*args: object, **kwargs: object) -> str:
+        raise GitError(("ls-remote",), "Received disconnect: Bye Bye")
+
+    monkeypatch.setattr(RepoStore, "remote_git", disconnected)
+
+    with pytest.raises(TransientError) as caught:
+        run(vcs.head(REPO_ID, "main"))
+    assert caught.value.kind == "remote-read-failed"
+
+
+def test_an_ssh_identity_rejection_is_a_typed_permanent_failure(
+    vcs: GhVcs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def denied(*args: object, **kwargs: object) -> str:
+        raise GitError(("ls-remote",), "Permission denied (publickey).")
+
+    monkeypatch.setattr(RepoStore, "remote_git", denied)
+
+    with pytest.raises(PermanentError) as caught:
+        run(vcs.head(REPO_ID, "main"))
+    assert caught.value.kind == "remote-read-denied"
+    assert "configured SSH identity" in caught.value.message
 
 
 # ------------------------------------------------------------ pull requests

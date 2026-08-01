@@ -61,7 +61,7 @@ from clawdence.ports.vcs import Branch, PullRequest, PullRequestState, StaleMerg
 from clawdence.vcs import policy as policy_rules
 from clawdence.vcs.git import GitError
 from clawdence.vcs.policy import BranchProtection, ForgeCapabilities, Violation
-from clawdence.vcs.store import DEFAULT_TOKEN_NAME, RepoStore
+from clawdence.vcs.store import DEFAULT_TOKEN_NAME, RepoStore, remote_error
 
 #: Variables ``gh`` is given from the control plane's own environment. ``HOME``
 #: is the one that matters: without it ``gh`` cannot find the operator's existing
@@ -429,7 +429,12 @@ class GhVcs:
         return profile
 
     async def _ls_remote(self, profile: RepoProfile, cwd: Path, ref: str) -> str | None:
-        raw = await self.store.remote_git(profile, cwd, "ls-remote", "--", "origin", ref)
+        try:
+            raw = await self.store.remote_git(profile, cwd, "ls-remote", "--", "origin", ref)
+        except (GitError, OSError) as exc:
+            raise remote_error(
+                profile, "remote-read", exc, token_name=self.store.token_name
+            ) from exc
         for line in raw.splitlines():
             commit, _, found = line.partition("\t")
             if found.strip() == ref or found.strip().endswith(f"/{ref}"):

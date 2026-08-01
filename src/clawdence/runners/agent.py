@@ -202,6 +202,17 @@ class AgentCommand:
     #: got a turn.
     setup_timeout_seconds: float = 1800.0
 
+    #: Root of Clawdence's local Git mirrors, when the CLI itself applies a
+    #: workspace sandbox. A linked worktree keeps its writable index, ref and
+    #: object database below this root rather than below ``worktree_path``.
+    #:
+    #: The host tier uses this only for Codex, whose ``--add-dir`` flag can grant
+    #: the exact mirror for the repository being dispatched. It deliberately
+    #: stores the root rather than adding it to ``argv`` here: the mirror name is
+    #: a function of the request's repository id, and granting the whole store
+    #: would let one run write every configured repository.
+    writable_git_root: Path | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class Environment:

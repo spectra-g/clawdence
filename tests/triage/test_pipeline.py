@@ -25,10 +25,18 @@ from datetime import UTC, datetime
 
 import pytest
 
-from clawdence.domain import IsolationTier, RepoProfile, RunStatus, WorkItem
+from clawdence.domain import (
+    IsolationTier,
+    PullRequestPolicy,
+    RepoProfile,
+    RunStatus,
+    WorkItem,
+)
 from clawdence.ingest import cli as ingest_cli
+from clawdence.ports import TransientError
+from clawdence.ports.vcs import PullRequest
 from clawdence.runners import HostRunner
-from clawdence.store import Intake, StateStore
+from clawdence.store import Intake, Publications, PublicationState, StateStore
 from clawdence.triage import Deployment, Pipeline, acknowledge, load
 from clawdence.vcs import GhVcs, RepoStore, WorktreeManager
 from clawdence.vcs.git import git
@@ -175,6 +183,81 @@ def test_a_submitted_request_becomes_a_pull_request(
     assert pull.head_branch.startswith("clawdence/")
     assert pull.work_item_id == item_id
 
+    published = run(git(forge.remote, "show", f"refs/heads/{pull.head_branch}:app.py"))
+    assert "float(a)" in published
+
+
+def test_publication_resumes_without_running_the_agent_again(
+    pipeline: Pipeline,
+    state: StateStore,
+    forge: Forge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport failure is an outbox retry, not a second coding run.
+
+    This crosses the same durable boundary as two ``clawdence work`` processes:
+    the worktree is gone before the retry, and the second ``Pipeline`` has no
+    runner at all. The stored commit, work item, workflow and report are enough
+    to finish publication idempotently from the mirror.
+    """
+    original = GhVcs.open_pull_request
+    calls = 0
+
+    async def disconnect_after_push(
+        self: GhVcs,
+        repo_id: str,
+        *,
+        title: str,
+        body: str,
+        head_branch: str,
+        base_branch: str,
+        work_item_id: str | None = None,
+        policy: PullRequestPolicy | None = None,
+    ) -> PullRequest:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TransientError("gh-pr", "the forge disconnected after the push")
+        return await original(
+            self,
+            repo_id,
+            title=title,
+            body=body,
+            head_branch=head_branch,
+            base_branch=base_branch,
+            work_item_id=work_item_id,
+            policy=policy,
+        )
+
+    monkeypatch.setattr(GhVcs, "open_pull_request", disconnect_after_push)
+    item_id = submit(state, "The widget adder should accept floating point numbers.")
+    first = run(pipeline.start(item_for(state, item_id)))
+
+    assert first.run_id is not None
+    assert first.refusal is not None
+    assert "queued for retry" in first.refusal
+    queued = Publications(state).require(first.run_id)
+    assert queued.state is PublicationState.PENDING
+    assert queued.attempts == 1
+    assert run(git(forge.remote, "rev-parse", f"refs/heads/{queued.branch}")) == queued.head_commit
+    attempts = state.steps_for(first.run_id)
+
+    restarted = Pipeline(
+        deployment=pipeline.deployment,
+        store=state,
+        repos=pipeline.repos,
+        worktrees=pipeline.worktrees,
+        vcs=pipeline.vcs,
+        runner=None,
+    )
+    outcomes = run(restarted.resume_publications())
+
+    assert len(outcomes) == 1
+    assert outcomes[0].published is True
+    assert Publications(state).require(first.run_id).state is PublicationState.PUBLISHED
+    assert state.steps_for(first.run_id) == attempts
+    pull = outcomes[0].pull_request
+    assert pull is not None
     published = run(git(forge.remote, "show", f"refs/heads/{pull.head_branch}:app.py"))
     assert "float(a)" in published
 

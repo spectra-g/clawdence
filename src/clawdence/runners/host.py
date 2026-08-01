@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import ClassVar, Final
 
 from clawdence.domain import IsolationTier, RunnerRequest
-from clawdence.runners.agent import AgentRunner, Launch, Phase
+from clawdence.runners.agent import AgentRunner, Launch, Phase, PlanDelivery
+from clawdence.vcs.store import mirror_name
 
 #: Passed through from the control plane's own environment. The engine's
 #: ``ScriptHandler`` allowlist, plus what a build needs to find its toolchain and
@@ -77,3 +78,44 @@ class HostRunner(AgentRunner):
         this tier is already on it.
         """
         return Launch(argv=argv, env=self._environment(request).values, cwd=worktree)
+
+    def _cli_argv(self, request: RunnerRequest, prompt: str) -> tuple[str, ...]:
+        """Give Codex the one external Git directory this worktree writes.
+
+        Clawdence uses linked worktrees. Their checkout is inside the workspace,
+        but their index, branch ref and object database are in the repository's
+        mirror. Codex's workspace sandbox therefore permits ordinary file edits
+        and rejects ``git commit`` unless that mirror is an additional writable
+        root.
+
+        This is intentionally Codex-specific. Other agent CLIs do not accept
+        ``--add-dir``, and passing an OpenAI flag to a generic command would turn
+        a working runner into a startup failure. ``--full-auto`` is removed when
+        present: current Codex keeps it only as a deprecated compatibility path,
+        while the explicit workspace-write mode says which boundary this runner
+        relies on.
+        """
+        argv = super()._cli_argv(request, prompt)
+        root = self._command.writable_git_root
+        if root is None or Path(self._command.argv[0]).name != "codex":
+            return argv
+
+        explicit = tuple(arg for arg in argv if arg != "--full-auto")
+        tail_size = int(self._command.delivery is not PlanDelivery.STDIN)
+        body = list(explicit[:-tail_size] if tail_size else explicit)
+        tail = explicit[-tail_size:] if tail_size else ()
+
+        # Approval policy is a top-level Codex option, so it must precede the
+        # ``exec`` subcommand. A non-interactive runner has nobody who can answer
+        # a prompt; denying escalation is the deterministic equivalent of the
+        # old full-auto behavior inside the explicit sandbox.
+        if not any(
+            arg in ("--ask-for-approval", "-a") or arg.startswith("--ask-for-approval=")
+            for arg in body
+        ):
+            executable = len(request.profile.exec_prefix)
+            body[executable + 1 : executable + 1] = ["--ask-for-approval", "never"]
+        if not any(arg in ("--sandbox", "-s") or arg.startswith("--sandbox=") for arg in body):
+            body.extend(("--sandbox", "workspace-write"))
+        mirror = root / mirror_name(request.profile.id)
+        return (*body, "--add-dir", str(mirror), *tail)

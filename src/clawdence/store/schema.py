@@ -233,6 +233,27 @@ _MIGRATIONS: Final[tuple[str, ...]] = (
 
     CREATE INDEX intake_turns_request ON intake_turns (dedupe_key, seq);
     """,
+    # 4 — provisional M1 publication bridge. S4b.1 deliberately owns replacing
+    # or reshaping this into the generic durable-effects schema; do not add a
+    # second adapter-specific queue beside it.
+    """
+    CREATE TABLE publications (
+        run_id        TEXT    NOT NULL PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
+        work_item_id  TEXT    NOT NULL,
+        repo_id       TEXT    NOT NULL,
+        branch        TEXT    NOT NULL,
+        base_commit   TEXT    NOT NULL,
+        head_commit   TEXT    NOT NULL,
+        item          TEXT    NOT NULL,
+        state         TEXT    NOT NULL,
+        workflow      TEXT    NOT NULL,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        last_error    TEXT,
+        updated_at    TEXT    NOT NULL
+    ) STRICT;
+
+    CREATE INDEX publications_pending ON publications (state, updated_at);
+    """,
 )
 
 #: The schema version this build writes and expects.

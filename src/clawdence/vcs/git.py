@@ -13,8 +13,9 @@ configuration from inside the thing it is inspecting.** A repository can set
 ``core.fsmonitor`` to a command and git runs it; ``core.hooksPath`` names a
 directory of scripts; ``protocol.ext`` lets a URL name a program to speak the
 transport. Every invocation here pins those three off and replaces the
-environment wholesale, so nothing from the operator's shell — a ``GIT_DIR``, a
-credential helper, an ssh agent — reaches a repository we did not write.
+environment wholesale, so nothing from the operator's shell — a ``GIT_DIR`` or
+credential helper — reaches a repository we did not write. Authenticated SSH
+operations make one explicit exception for ``SSH_AUTH_SOCK``.
 
 What is genuinely new is the half the runner never needed:
 
@@ -49,6 +50,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import os
+import re
 import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -102,6 +105,15 @@ BASE_ENV: Final[Mapping[str, str]] = {
 #: token and requires exactly this for an app installation token, so it is the
 #: one value that works for both.
 _TOKEN_USER: Final = "x-access-token"  # noqa: S105 - a username, not a password
+
+_SCP_REMOTE: Final = re.compile(r"^(?:[^/@:]+@)?[^/:]+:.+$")
+
+# OpenSSH bypasses stdin and Git's own prompt switch by opening ``/dev/tty`` for
+# a private-key passphrase. Batch mode is therefore part of the transport
+# contract, not an optional convenience: a control-plane operation either has a
+# non-interactive credential already available or it fails before expensive work
+# begins.
+_SSH_COMMAND: Final = "ssh -o BatchMode=yes"
 
 
 class GitError(RuntimeError):
@@ -203,20 +215,44 @@ def origin_of(remote_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}/"
 
 
+def is_ssh_remote(remote_url: str) -> bool:
+    """Whether ``remote_url`` selects OpenSSH rather than HTTP or a local path."""
+    parts = urlsplit(remote_url)
+    return parts.scheme in ("ssh", "git+ssh") or (
+        not parts.scheme and _SCP_REMOTE.match(remote_url) is not None
+    )
+
+
 @contextlib.contextmanager
-def authenticated(token: Secret | None, *, remote_url: str) -> Iterator[Mapping[str, str]]:
+def authenticated(
+    token: Secret | None,
+    *,
+    remote_url: str,
+    environ: Mapping[str, str] | None = None,
+) -> Iterator[Mapping[str, str]]:
     """An environment that can push to ``remote_url``, for as long as the block.
 
-    Yields ``BASE_ENV`` unchanged when there is no token — an SSH remote, a
-    local path, a public repository being read — so callers do not branch. The
-    token, when there is one, reaches git through a file this writes and removes,
-    never through argv and never through a URL.
+    An SSH remote gets batch-only OpenSSH and, when present, the caller's agent
+    socket. Other tokenless remotes get ``BASE_ENV`` unchanged. A token reaches
+    git through a file this writes and removes, never through argv or a URL.
 
     The file is deleted on the way out even if the body raised. That matters more
     than it looks: the directory is under the system temp root, and a crash that
     left one behind would leave a readable-by-us copy of a forge token sitting in
     ``/tmp`` until the next reboot.
     """
+    if is_ssh_remote(remote_url):
+        source = os.environ if environ is None else environ
+        env = {**BASE_ENV, "GIT_SSH_COMMAND": _SSH_COMMAND}
+        socket = source.get("SSH_AUTH_SOCK")
+        if socket:
+            # The socket is the credential channel, not a credential value. It
+            # reaches only host-side control-plane Git; the runner environment
+            # remains independently allowlisted and never receives it.
+            env["SSH_AUTH_SOCK"] = socket
+        yield env
+        return
+
     if token is None or not token:
         yield BASE_ENV
         return

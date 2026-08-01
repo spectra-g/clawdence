@@ -18,7 +18,7 @@ PARK = "INSERT INTO dead_letters (at, origin, reason, body) VALUES (?, ?, ?, ?)"
 #: downgrade-then-upgrade test below, which is what makes it a test of the
 #: migration this build added rather than of one that has worked for months.
 #: Children first, so the foreign key does not object to the order.
-LATEST_TABLES = ("intake_turns", "intake")
+LATEST_TABLES = ("publications",)
 
 
 def park(connection: sqlite3.Connection) -> None:
@@ -52,6 +52,7 @@ class TestMigrations:
             "cancellations",
             "intake",
             "intake_turns",
+            "publications",
         } <= names
 
     def test_a_database_from_an_older_build_is_migrated_forward(

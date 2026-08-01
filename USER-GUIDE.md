@@ -129,7 +129,7 @@ forge_token_env: GITHUB_TOKEN         # a *name* — the value stays in your she
 
 runner:
   tier: host                         # see §0 — set to `container` once you have an OpenAI API key
-  argv: [codex, exec, --full-auto]   # your actual codex invocation; check `codex exec --help`
+  argv: [codex, exec]                # Clawdence supplies Codex's non-interactive sandbox flags
   conventions_filename: AGENTS.md    # codex's name for the repo-conventions file; CLAUDE.md for claude-code
 
 repos:
@@ -144,6 +144,12 @@ A few things worth knowing about this file before you fill in your own values:
   GitHub repo, `export GITHUB_TOKEN=ghp_...` in your shell and this file
   just says which variable to read. Public repo over `https`, or anything
   over `ssh`: leave this out entirely (`forge_token_env: null`).
+- **SSH remotes are non-interactive.** Clawdence passes only `SSH_AUTH_SOCK`
+  to Git and forces OpenSSH batch mode, so it never asks for a key passphrase
+  halfway through a run. Load the identity before starting work (`ssh-add
+  ~/.ssh/id_ed25519_spectra`, then verify it appears in `ssh-add -l`), or use
+  an HTTPS remote with `forge_token_env`. A missing identity fails during the
+  initial fetch, before the coding agent runs.
 - **No `runner:` section is a legitimate, if inert, configuration.** `work`
   refuses immediately — before a worktree is even acquired — for any request
   that would route to a workflow with a `runner` step, naming the missing
@@ -235,10 +241,23 @@ way you're already typing.
   caught something (a symlink, a vendored directory, an oversized file). The
   work exists locally; it wasn't pushed. This is the one case worth looking
   at by hand — `clawdence runs show RUN_ID` to see the findings.
+- **Publication queued for retry** — the runner finished and its commit is
+  preserved, but Git or GitHub could not finish the branch/push/PR sequence.
+  Do not resubmit the request: after fixing the credential or outage, run
+  `clawdence work` again. Pending publications are drained before a fresh
+  agent is dispatched, so this does not pay for or execute the coding work a
+  second time.
 - **Request still `pending` in `clawdence inbox list`** — it couldn't be
   routed at all. It's *not* silently dropped; it stays in the queue until
   you fix the routing (usually an `aliases`/`keywords` edit) and run `work`
   again.
+
+The publication retry above is intentionally the first, narrow implementation
+of a larger state-store obligation. It is safe for the current one-PR-per-run
+pipeline, but it is not the reusable design for future Slack, tracker or
+multi-PR delivery. The next planned step, S4b.1, replaces or substantially
+reworks it into generic durable external effects with transient backoff,
+permanent-failure parking, expiring claims, audit records and operator retry.
 
 ## Troubleshooting the two credentials, concretely
 

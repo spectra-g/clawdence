@@ -41,13 +41,19 @@ throwing away work that exists because the opinion about it was unfavourable,
 and the whole premise (§1.3) is that an agent's product is a proposal entering
 the normal review path. A human reads the pull request; the run record says the
 review failed.
+
+**Publication recovery is currently a bridge.** The publication intent written
+below closes the immediate crash window found during runner testing, but it is
+not the final external-effects architecture. S4b.1 is next and is expected to
+replace or substantially rework ``store.publication`` into the generic durable
+effects mechanism. Nothing else should grow a private queue by copying it.
 """
 
 from __future__ import annotations
 
 import secrets as _secrets
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -78,9 +84,9 @@ from clawdence.ports.errors import PortError
 from clawdence.ports.runner import RunnerPort
 from clawdence.ports.vcs import PullRequest, VcsPort
 from clawdence.runners import Dispatch, RunnerHandler
-from clawdence.store import Intake, SqliteLedger, StateStore
+from clawdence.store import Intake, Publication, Publications, SqliteLedger, StateStore
 from clawdence.triage.config import ConfigError, Deployment
-from clawdence.triage.routing import Routed, route
+from clawdence.triage.routing import Decision, Routed, route
 from clawdence.vcs import (
     Finding,
     PolicyRefused,
@@ -215,6 +221,51 @@ class Pipeline:
 
         return await self._execute(item, routed, workflow, profile, run_id=run_id)
 
+    async def resume_publications(
+        self, *, ref: str | None = None, limit: int | None = None
+    ) -> tuple[Outcome, ...]:
+        """Retry durable forge work without dispatching the coding agent again.
+
+        An intent is written before the first remote side effect. Branch creation,
+        pushing the same hash and opening-or-finding a pull request are all
+        idempotent, so a process may die after any one of them and this method can
+        safely continue on the next ``work`` invocation.
+        """
+        outcomes: list[Outcome] = []
+        pending = Publications(self.store).pending(limit=None if ref is not None else limit)
+        for publication in pending:
+            item = publication.work_item
+            if ref is not None and item.source_ref.external_id != ref:
+                continue
+            if limit is not None and len(outcomes) >= limit:
+                break
+            report = self._stored_report(publication)
+            routed = self._stored_routing(item, publication, report)
+            try:
+                profile = self.deployment.profile(publication.repo_id)
+            except ConfigError as exc:
+                Publications(self.store).failed(publication.run_id, str(exc))
+                outcomes.append(
+                    Outcome(
+                        item_id=item.id,
+                        routed=routed,
+                        run_id=publication.run_id,
+                        report=report,
+                        refusal=f"the completed run is waiting to publish: {exc}",
+                    )
+                )
+                continue
+            outcomes.append(
+                await self._publish_intent(
+                    publication,
+                    routed,
+                    profile,
+                    report,
+                    inspect_path=self.repos.mirror(profile),
+                )
+            )
+        return tuple(outcomes)
+
     # ------------------------------------------------------------------ steps
 
     async def _execute(
@@ -308,59 +359,94 @@ class Pipeline:
         if head is None or head == lease.base_commit:
             return base
 
-        findings = await audit(lease.path, lease.base_commit, head)
-        if findings:
-            return Outcome(
-                item_id=item.id,
-                routed=routed,
+        publication = Publications(self.store).enqueue(
+            Publication(
                 run_id=lease.run_id,
-                report=report,
+                work_item=item,
+                workflow=report.workflow,
+                repo_id=profile.id,
+                branch=lease.branch,
+                base_commit=lease.base_commit,
+                head_commit=head,
+            )
+        )
+        return await self._publish_intent(
+            publication, routed, profile, report, inspect_path=lease.path
+        )
+
+    async def _publish_intent(
+        self,
+        publication: Publication,
+        routed: Routed,
+        profile: RepoProfile,
+        report: RunReport,
+        *,
+        inspect_path: Path,
+    ) -> Outcome:
+        """One idempotent attempt at a previously recorded publication."""
+        item = publication.work_item
+        queue = Publications(self.store)
+        queue.attempting(publication.run_id)
+        base = Outcome(
+            item_id=item.id,
+            routed=routed,
+            run_id=publication.run_id,
+            report=report,
+        )
+        try:
+            findings = await audit(inspect_path, publication.base_commit, publication.head_commit)
+        except (GitError, OSError) as exc:
+            message = (
+                f"the completed run is waiting to publish because its diff could not be read: {exc}"
+            )
+            queue.failed(publication.run_id, message)
+            return replace(base, refusal=message)
+        if findings:
+            refusal = (
+                "this branch is not reviewable as it stands, so nothing was "
+                "published:\n  " + "\n  ".join(finding.describe() for finding in findings)
+            )
+            queue.refused(publication.run_id, refusal)
+            return replace(
+                base,
                 findings=findings,
-                refusal=(
-                    "this branch is not reviewable as it stands, so nothing was "
-                    "published:\n  " + "\n  ".join(finding.describe() for finding in findings)
-                ),
+                refusal=refusal,
             )
 
         try:
-            await self.vcs.create_branch(profile.id, lease.branch, from_commit=lease.base_commit)
+            await self.vcs.create_branch(
+                profile.id, publication.branch, from_commit=publication.head_commit
+            )
             await self.vcs.push(
                 profile.id,
-                lease.branch,
-                worktree_path=str(lease.path),
-                expect_commit=head,
+                publication.branch,
+                worktree_path=str(inspect_path),
+                expect_commit=publication.head_commit,
             )
             pull = await self.vcs.open_pull_request(
                 profile.id,
                 title=item.title,
                 body=render_body(
                     _summary(item, routed, report),
-                    template=await read_template(self.repos, profile, lease.base_commit),
+                    template=await read_template(self.repos, profile, publication.base_commit),
                 ),
-                head_branch=lease.branch,
+                head_branch=publication.branch,
                 base_branch=profile.default_branch,
                 work_item_id=item.id,
                 policy=profile.pull_request,
             )
         except PortError as exc:
-            # The work is committed on a local branch that ``release`` will not
-            # delete, because it moved. Reported rather than raised for the same
-            # reason: a failed push is a thing to look at, not a thing to lose.
-            return Outcome(
-                item_id=item.id,
-                routed=routed,
-                run_id=lease.run_id,
-                report=report,
-                refusal=f"the run produced {head[:12]} and it could not be published: {exc}",
+            # The durable intent, local branch and objects remain. A later work
+            # invocation resumes here rather than paying for another agent run.
+            refusal = (
+                f"the run produced {publication.head_commit[:12]} and publication is queued "
+                f"for retry: {exc}"
             )
+            queue.failed(publication.run_id, refusal)
+            return replace(base, refusal=refusal)
 
-        return Outcome(
-            item_id=item.id,
-            routed=routed,
-            run_id=lease.run_id,
-            report=report,
-            pull_request=pull,
-        )
+        queue.published(publication.run_id)
+        return replace(base, pull_request=pull)
 
     # --------------------------------------------------------------- plumbing
 
@@ -454,6 +540,31 @@ class Pipeline:
         """
         repo_id = routed.repo.value
         self.store.update_run(run_id, lambda run: run.model_copy(update={"repo_id": repo_id}))
+
+    def _stored_report(self, publication: Publication) -> RunReport:
+        run = self.store.require_run(publication.run_id)
+        attempts = self.store.steps_for(publication.run_id)
+        final = {result.stage_id: result for result in attempts}
+        return RunReport(
+            run=run,
+            workflow=publication.workflow,
+            attempts=attempts,
+            final=final,
+        )
+
+    def _stored_routing(
+        self, item: WorkItem, publication: Publication, report: RunReport
+    ) -> Routed:
+        current = route(
+            item,
+            profiles=self.deployment.profiles,
+            policy=self.deployment.config.routing,
+        )
+        return replace(
+            current,
+            workflow=Decision(report.workflow.name, "pinned by the completed run"),
+            repo=Decision(publication.repo_id, "pinned by the publication intent"),
+        )
 
 
 def acknowledge(intake: Intake, outcome: Outcome) -> None:

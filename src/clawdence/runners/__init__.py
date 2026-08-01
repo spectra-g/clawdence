@@ -73,7 +73,7 @@ is a dependency on them not renaming anything::
 
     runner = ContainerRunner(
         AgentCommand(
-            argv=("codex", "exec", "--full-auto"),
+            argv=("codex", "--dangerously-bypass-approvals-and-sandbox", "exec"),
             delivery=PlanDelivery.STDIN,
             conventions_filename="AGENTS.md",
             secret_env={"OPENAI_API_KEY": "runner-llm-key"},

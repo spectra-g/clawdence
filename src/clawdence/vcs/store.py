@@ -52,7 +52,7 @@ import fcntl
 import hashlib
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -125,6 +125,11 @@ class RepoStore:
     #: Pins the git executable. Defaults to a ``PATH`` lookup.
     git_path: str | None = None
 
+    #: The one caller environment value an SSH transport may inherit is
+    #: ``SSH_AUTH_SOCK``. Injected for tests and deployments that do not use the
+    #: process environment; never forwarded to a runner.
+    environ: Mapping[str, str] | None = None
+
     _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
 
     # ------------------------------------------------------------------ paths
@@ -190,18 +195,7 @@ class RepoStore:
         try:
             await self.remote_git(profile, path, *argv)
         except (GitError, OSError) as exc:
-            # Transient by default: unreachable forges, expired proxies and
-            # rate limits all land here, and every one of them is worth another
-            # attempt. Authentication is the exception — a rejected credential is
-            # rejected again in ten seconds, at the same price.
-            text = str(exc)
-            if any(marker in text for marker in ("Authentication failed", "403", "401")):
-                raise PermanentError(
-                    "fetch-denied",
-                    f"the forge refused the credential for {profile.id}; "
-                    f"{self.token_name or 'no token'} is what was offered",
-                ) from exc
-            raise TransientError("fetch-failed", f"could not fetch {profile.id}: {exc}") from exc
+            raise remote_error(profile, "fetch", exc, token_name=self.token_name) from exc
 
     async def resolve(self, profile: RepoProfile, ref: str) -> str:
         """A ref on the remote, as a full commit id.
@@ -229,8 +223,17 @@ class RepoStore:
         try:
             await self.remote_git(profile, cwd, "push", "--quiet", "origin", refspec)
         except (GitError, OSError) as exc:
-            raise PermanentError(
-                "push-rejected", f"could not push {refspec} to {profile.id}: {exc}"
+            raise remote_error(
+                profile,
+                "push",
+                exc,
+                token_name=self.token_name,
+                permanent_markers=(
+                    "non-fast-forward",
+                    "fetch first",
+                    "protected branch",
+                    "does not match any",
+                ),
             ) from exc
 
     # ----------------------------------------------------------------- plumbing
@@ -244,7 +247,9 @@ class RepoStore:
         one. ``find`` rather than ``resolve``: a public repository over https and
         any repository over ssh need no token, and demanding one would refuse a
         configuration that works."""
-        with authenticated(self._token(), remote_url=profile.remote_url) as env:
+        with authenticated(
+            self._token(), remote_url=profile.remote_url, environ=self.environ
+        ) as env:
             return await git(cwd, *args, path=self.git_path, env=env)
 
     def _token(self) -> Secret | None:
@@ -293,3 +298,46 @@ def _flock(handle: int, path: Path, timeout: float) -> None:
             if time.monotonic() >= deadline:
                 raise LockTimeout(path, timeout) from None
             time.sleep(_LOCK_POLL)
+
+
+_AUTH_DENIED: Final[tuple[str, ...]] = (
+    "authentication failed",
+    "permission denied (publickey",
+    "could not read username",
+    "http 401",
+    "http 403",
+    "returned error: 401",
+    "returned error: 403",
+)
+
+
+def remote_error(
+    profile: RepoProfile,
+    operation: str,
+    exc: BaseException,
+    *,
+    token_name: str | None,
+    permanent_markers: tuple[str, ...] = (),
+) -> PermanentError | TransientError:
+    """Translate transport details at the adapter boundary.
+
+    Authentication and an explicit forge rejection cannot improve by retrying
+    unchanged. Disconnects, DNS failures and timeouts can. Keeping that decision
+    here means callers receive ``PortError`` consistently and never have to
+    interpret Git's prose or accidentally let ``GitError`` escape as a traceback.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if any(marker in lowered for marker in _AUTH_DENIED):
+        return PermanentError(
+            f"{operation}-denied",
+            f"the forge refused the credential for {profile.id}; "
+            f"{token_name or 'the configured SSH identity'} is what was offered",
+        )
+    if any(marker in lowered for marker in permanent_markers):
+        return PermanentError(
+            f"{operation}-rejected", f"the forge rejected {operation} for {profile.id}: {text}"
+        )
+    return TransientError(
+        f"{operation}-failed", f"the remote operation for {profile.id} could not finish: {text}"
+    )

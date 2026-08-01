@@ -32,6 +32,32 @@ def test_no_token_yields_the_plain_environment() -> None:
         assert env == g.BASE_ENV
 
 
+def test_ssh_is_batch_only_and_inherits_only_the_agent_socket() -> None:
+    caller = {
+        "SSH_AUTH_SOCK": "/private/tmp/agent.sock",
+        "GITHUB_TOKEN": "must-not-cross",
+        "AWS_SECRET_ACCESS_KEY": "must-not-cross-either",
+    }
+    with g.authenticated(
+        TOKEN,
+        remote_url="git@github.com:acme/widget.git",
+        environ=caller,
+    ) as env:
+        assert env["SSH_AUTH_SOCK"] == caller["SSH_AUTH_SOCK"]
+        assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+        assert "GITHUB_TOKEN" not in env
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+
+
+def test_ssh_without_a_loaded_agent_still_cannot_prompt() -> None:
+    with g.authenticated(
+        None, remote_url="ssh://git@github.com/acme/widget.git", environ={}
+    ) as env:
+        assert "SSH_AUTH_SOCK" not in env
+        assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+
+
 def test_the_token_reaches_git_through_a_file_and_not_the_environment() -> None:
     """``ps`` is world-readable and an argv is in it. The environment only ever
     carries the *path* to a config file; the credential is in the file.
