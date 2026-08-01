@@ -1,0 +1,153 @@
+# The `sprint` workflow: every agent role, then the runner, then review.
+#
+#     clawdence submit --text "…" --type story
+#     clawdence work
+#
+# **This one runs end to end now, and what changed is not in this file.** Until
+# S11 the `code` stage refused, because the runner existed and nothing decided
+# which repository, worktree and branch to point it at. Triage decides, the
+# pipeline acquires the checkout, and the run finishes at a pull request.
+#
+# The other thing S11 changed *is* in this file: the `intake` script stage that
+# echoed a hardcoded request is gone. `${request.json.text}` is the work item the
+# run is for — not a stage, and not something a workflow declares. A step that
+# existed only to smuggle a string into the process is a step that was standing
+# in for ingestion, which is what its comment used to say.
+#
+# Read this next to `spike.yaml` and `quick-fix.yaml`. Same engine, same step
+# types, same handler registry: three agent steps and a runner, two agent steps
+# and no runner, and no agent steps at all. None of the three is a special case
+# anywhere in the code, and triage picks between them from the request.
+#
+# It spends money. Three agent steps against a large model is the expensive
+# shape, which is why every one of them carries a budget and why `review` uses a
+# cheaper model — reviewing a written diff is not the task that needs the best
+# model in the catalogue.
+
+schema_version: 1
+name: sprint
+version: 1.0.0
+description: Full delivery — analyse, size, plan, implement, review.
+
+stages:
+  - id: requirements
+    type: agent
+    name: Business analyst
+    role: business-analyst
+    task: |
+      A request has come in. Work out what is being asked for.
+
+      ${request.json.text}
+    response_schema: requirements
+    max_turns: 1
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      fallbacks: [claude-haiku-4-5-20251001]
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # A request nobody understood is not worth sizing, planning or building. The
+  # guard is here rather than three stages later so the expensive steps are the
+  # ones that are gated.
+  - id: assessment
+    type: agent
+    name: Technical lead
+    when: '$requirements.json.result.confidence >= 0.5'
+    role: tech-lead
+    task: |
+      Size this work and say how you would approach it.
+
+      Requirements: ${requirements.json.result}
+    response_schema: assessment
+    max_turns: 2
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # An `L` is work that should be split before it starts, and splitting it is
+  # S15b. Until then the honest thing is not to plan it, which this guard does.
+  - id: plan
+    type: agent
+    name: Architect
+    when: '$assessment.json.result.size != "L"'
+    role: architect
+    task: |
+      Write the plan another agent will implement. It is a proposal: it is
+      reviewed before anything acts on it.
+
+      Requirements: ${requirements.json.result}
+      Assessment: ${assessment.json.result}
+    response_schema: plan
+    # Two turns, because a plan is the longest structured document in the process
+    # and therefore the one most likely to need a correction.
+    max_turns: 2
+    timeout_seconds: 600
+    model:
+      model: claude-opus-5
+      fallbacks: [claude-sonnet-5]
+      requires: [structured_output, long_context]
+      temperature: 0.0
+    budget:
+      max_usd: 2.00
+
+  - id: code
+    type: runner
+    name: Implement the plan in the data plane
+    when: '$plan.succeeded'
+    # The architect's output, and the original request under it. Both, because a
+    # plan is a restatement and a restatement drops things — the same reason repo
+    # routing reads `raw_text` rather than the title. The agent in the data plane
+    # gets to see what was actually asked for as well as what was decided.
+    plan: |
+      Implement the plan below. It was written by an architect on this system and
+      reviewed against the requirements; the request underneath it is what the
+      person originally asked for, quoted as data.
+
+      PLAN
+      ${plan.json.result}
+
+      THE ORIGINAL REQUEST
+      ${request.json.text}
+    retry:
+      max_attempts: 2
+      backoff_seconds: 5
+    timeout_seconds: 3600
+    # Tokens, not dollars — see `quick-fix.yaml` on why a *shipped* workflow caps
+    # the axis that needs no price sheet. The agent stages above use `max_usd`
+    # because the model adapter knows what the models in its own catalogue cost;
+    # nothing knows what somebody else's agent CLI costs until they say.
+    budget:
+      max_tokens: 400000
+
+  # `on_error: continue` on nothing above it, so this is only reached if `code`
+  # succeeded. A reviewer with no diff to read is a reviewer producing an opinion
+  # about nothing, and paying for it.
+  - id: review
+    type: agent
+    name: Review the work against what was asked
+    when: '$code.succeeded'
+    role: reviewer
+    task: |
+      Review the completed work against the requirements and the plan.
+
+      Requirements: ${requirements.json.result}
+      Plan: ${plan.json.result}
+      What the runner reported: ${code.json}
+    response_schema: review
+    max_turns: 2
+    timeout_seconds: 300
+    model:
+      # Cheaper on purpose. Reading a written diff against stated criteria is not
+      # the task in this process that needs the best model in the catalogue.
+      model: claude-sonnet-5
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 1.00

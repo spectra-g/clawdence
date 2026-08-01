@@ -1,0 +1,138 @@
+{
+  "findings": [
+    {
+      "evidence": [],
+      "field": "remote_url",
+      "level": "action",
+      "message": "this checkout has no remote named origin, so remote_url is empty. Nothing can clone a repository the profile does not name"
+    },
+    {
+      "evidence": [],
+      "field": "default_branch",
+      "level": "note",
+      "message": "origin/HEAD is not set, so default_branch is the branch currently checked out (main) rather than the remote's default"
+    },
+    {
+      "evidence": [
+        "build.gradle.kts"
+      ],
+      "field": "build_system",
+      "level": "decided",
+      "message": "Gradle, from the build script"
+    },
+    {
+      "evidence": [
+        "build.gradle.kts"
+      ],
+      "field": "test_reporter",
+      "level": "decided",
+      "message": "the test task writes JUnit XML under build/test-results by default"
+    },
+    {
+      "evidence": [
+        "build.gradle.kts"
+      ],
+      "field": "install_command",
+      "level": "note",
+      "message": "the install command runs the root project's `dependencies` task, which resolves the root's configurations and not every subproject's. It warms most of the cache for a multi-project build and not all of it"
+    },
+    {
+      "evidence": [
+        "build.gradle.kts"
+      ],
+      "field": null,
+      "level": "note",
+      "message": "monorepo: 2 workspace member(s) declared by build.gradle.kts (core, adapters/http). Their manifests are read for the Docker inference; the commands above are the root's"
+    },
+    {
+      "evidence": [],
+      "field": "needs_docker",
+      "level": "decided",
+      "message": "no declared testcontainers dependency and no compose file, so the tests are assumed not to need a daemon"
+    },
+    {
+      "evidence": [
+        ".tool-versions"
+      ],
+      "field": "toolchain",
+      "level": "decided",
+      "message": "toolchain pins: gradle=8.11, java=temurin-21.0.5+11"
+    },
+    {
+      "evidence": [],
+      "field": "exec_prefix",
+      "level": "note",
+      "message": "exec_prefix was left empty. Whether these pins can be honoured is a fact about the runner image, not about this repository — set it to something like `mise exec --` only if the image you run has that tool in it"
+    }
+  ],
+  "profile": {
+    "agents_md_path": null,
+    "branch_prefix": "clawdence/",
+    "build_command": [
+      "./gradlew",
+      "--no-daemon",
+      "assemble"
+    ],
+    "build_system": "gradle",
+    "caps": {
+      "cpu_count": null,
+      "disk_mb": null,
+      "memory_mb": null,
+      "pid_limit": null,
+      "wall_clock_seconds": null
+    },
+    "checkout": {
+      "fetch_lfs": false,
+      "partial": true,
+      "sparse_paths": []
+    },
+    "default_branch": "main",
+    "docker_socket_acknowledged": false,
+    "e2e_runner": "skip",
+    "egress": {
+      "allow_git_remote": false,
+      "allow_llm_api": true,
+      "allow_mcp_servers": true,
+      "allow_package_registries": true,
+      "extra_allowed_hosts": [],
+      "unrestricted": false
+    },
+    "exec_prefix": [],
+    "id": "acme-ledger",
+    "install_command": [
+      "./gradlew",
+      "--no-daemon",
+      "dependencies"
+    ],
+    "isolation_tier": "container",
+    "max_concurrent_runs": 1,
+    "mcp_servers": [],
+    "name": "acme-ledger",
+    "needs_docker": false,
+    "pull_request": {
+      "body_template_path": null,
+      "draft": false,
+      "labels": [],
+      "merge_method": "squash",
+      "reviewers": [],
+      "team_reviewers": []
+    },
+    "remote_url": "",
+    "require_full_test_suite": false,
+    "routing": {
+      "aliases": [],
+      "keywords": []
+    },
+    "runner_image": null,
+    "test_command": [
+      "./gradlew",
+      "--no-daemon",
+      "test"
+    ],
+    "test_reporter": "junit-xml",
+    "toolchain": {
+      "gradle": "8.11",
+      "java": "temurin-21.0.5+11"
+    }
+  }
+}

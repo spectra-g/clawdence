@@ -1,0 +1,94 @@
+# The `spike` workflow: explore a question, report, open nothing.
+#
+#     clawdence submit --text "Can a cancel leave a container behind?"
+#     clawdence work
+#
+# Two agent steps and no runner step, and after S11 that absence is load-bearing
+# rather than incidental: the pipeline gives a workflow a checkout only if it has
+# a runner step, so this one never touches the data plane, never creates a
+# branch, and therefore cannot open a pull request. "explore → report, no PR" is
+# enforced by the shape of the file rather than by a flag somewhere.
+#
+# Triage routes a question here. `clawdence submit` with no `--type` leaves the
+# item as `task`, and classification revises it to `spike` when the text reads as
+# a question — which is why the `intake` stage that used to hardcode one is gone.
+#
+# It needs a model provider wired, and it will spend money. With none configured
+# the run fails at the first agent step with an error naming what to wire, which
+# is the deliberate behaviour: a workflow that appeared to consult a model and
+# did not is the most expensive way for an orchestrator to be wrong.
+#
+# `same engine, different YAML` is the point of this file and of `sprint.yaml`
+# beside it. Nothing about the engine knows which roles exist, how many agent
+# steps a process has, or whether it has any.
+
+schema_version: 1
+name: spike
+version: 1.0.0
+description: Answer a question about a codebase. No branch, no pull request.
+
+stages:
+  # The task is a template, and the raw request text goes in framed as data.
+  # `${...}` expands once and is never rescanned, so nothing inside the request
+  # can introduce a second placeholder.
+  - id: understand
+    type: agent
+    name: Work out what is actually being asked
+    role: business-analyst
+    task: |
+      A question has come in about the codebase. Restate it as something
+      answerable, and say what would count as an answer.
+
+      ${request.json.text}
+    response_schema: requirements
+    # One turn. A spike's analyst either understood the question or did not, and
+    # a second turn spends money to be told the same thing.
+    max_turns: 1
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      # Tried in order when the account has no quota for the one above — which is
+      # a different failure from a rate limit, and the distinction v1 got wrong.
+      fallbacks: [claude-haiku-4-5-20251001]
+      requires: [structured_output]
+      # Pinned so that changing the prompt is the only thing that changes the
+      # answer. S21b's evals depend on this.
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # Guarded on a field of the previous step's *validated* result. A question the
+  # analyst could not make sense of is not worth planning against, and the guard
+  # reads `result` rather than `text` because only `result` has been through the
+  # schema.
+  - id: approach
+    type: agent
+    name: Say how it could be answered
+    when: '$understand.json.result.confidence >= 0.5'
+    role: tech-lead
+    task: |
+      Size the work of answering this question and say how you would approach it.
+
+      Requirements: ${understand.json.result}
+    response_schema: assessment
+    max_turns: 2
+    timeout_seconds: 300
+    model:
+      model: claude-sonnet-5
+      requires: [structured_output]
+      temperature: 0.0
+    budget:
+      max_usd: 0.50
+
+  # An ordinary script step, so the report is a file on disk rather than
+  # something only the run record remembers.
+  - id: report
+    type: script
+    name: Write the findings out
+    when: '$approach.succeeded'
+    command:
+      - python3
+      - -c
+      - 'import sys; print(sys.argv[1]); print(sys.argv[2])'
+      - ${understand.json.result}
+      - ${approach.json.result}

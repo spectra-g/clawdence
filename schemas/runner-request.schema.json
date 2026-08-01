@@ -74,6 +74,32 @@
       "title": "BuildSystem",
       "type": "string"
     },
+    "CheckoutPolicy": {
+      "additionalProperties": false,
+      "description": "How much of the repository is fetched, and how much of it lands on disk.\n\n**Partial, not shallow, and the distinction is the whole field.** ``--depth``\nis the obvious way to make a large clone fast and it is the wrong one here:\na shallow repository has no merge base, so \"is this branch behind\" cannot be\nanswered, a rebase cannot be computed, and S13's evidence-to-tree binding has\nnothing to compare against. ``--filter=blob:none`` keeps every commit and\nevery tree and defers only file *contents*, which is the part a first clone\nactually spends its time on, and git fetches what it needs on demand.\n\n**Sparse checkout is per worktree, not per clone.** The object store is\nshared between concurrent runs (``RepoStore``); the set of paths one run\nwants is not. Declaring it here and applying it at checkout keeps that\nstraight.",
+      "properties": {
+        "fetch_lfs": {
+          "default": false,
+          "title": "Fetch Lfs",
+          "type": "boolean"
+        },
+        "partial": {
+          "default": true,
+          "title": "Partial",
+          "type": "boolean"
+        },
+        "sparse_paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Sparse Paths",
+          "type": "array"
+        }
+      },
+      "title": "CheckoutPolicy",
+      "type": "object"
+    },
     "ContractKind": {
       "description": "The four contracts v2.0 ships.\n\n``OUTSIDE_IN_TDD`` is one option among four rather than the welded-in\ndefault it was in v1 — 175 references to it inside the orchestrator is\nwhat made the process impossible to vary per work item.",
       "enum": [
@@ -179,6 +205,69 @@
       "title": "McpServer",
       "type": "object"
     },
+    "MergeMethod": {
+      "description": "How a merge is performed.\n\n``SQUASH`` is the default everywhere it is offered, because a squashed merge\nproduces one commit whose tree is the tree that was verified. A merge commit\nproduces a tree that is the *result* of combining two, which no test ran\nagainst — the same invalidation ``VcsPort.merge``'s ``expect_*`` arguments\nexist to catch, arriving one step later.",
+      "enum": [
+        "squash",
+        "merge",
+        "rebase"
+      ],
+      "title": "MergeMethod",
+      "type": "string"
+    },
+    "PullRequestPolicy": {
+      "additionalProperties": false,
+      "description": "What a pull request from this system looks like in someone else's repo.\n\nCheap to implement and disproportionately important: the difference between\noutput that looks like it belongs in a project and output that looks like bot\nspam is reviewers, labels, and a body that follows the repository's template.",
+      "properties": {
+        "body_template_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Body Template Path"
+        },
+        "draft": {
+          "default": false,
+          "title": "Draft",
+          "type": "boolean"
+        },
+        "labels": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Labels",
+          "type": "array"
+        },
+        "merge_method": {
+          "$ref": "#/$defs/MergeMethod",
+          "default": "squash"
+        },
+        "reviewers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reviewers",
+          "type": "array"
+        },
+        "team_reviewers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Team Reviewers",
+          "type": "array"
+        }
+      },
+      "title": "PullRequestPolicy",
+      "type": "object"
+    },
     "RepoProfile": {
       "additionalProperties": false,
       "description": "Everything the system knows about one repository.",
@@ -195,13 +284,11 @@
           "default": null,
           "title": "Agents Md Path"
         },
-        "aliases": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Aliases",
-          "type": "array"
+        "branch_prefix": {
+          "default": "clawdence/",
+          "pattern": "^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)*/$",
+          "title": "Branch Prefix",
+          "type": "string"
         },
         "build_command": {
           "default": [],
@@ -225,10 +312,23 @@
             "wall_clock_seconds": null
           }
         },
+        "checkout": {
+          "$ref": "#/$defs/CheckoutPolicy",
+          "default": {
+            "fetch_lfs": false,
+            "partial": true,
+            "sparse_paths": []
+          }
+        },
         "default_branch": {
           "default": "main",
           "title": "Default Branch",
           "type": "string"
+        },
+        "docker_socket_acknowledged": {
+          "default": false,
+          "title": "Docker Socket Acknowledged",
+          "type": "boolean"
         },
         "e2e_runner": {
           "$ref": "#/$defs/E2EPolicy",
@@ -272,13 +372,11 @@
           "$ref": "#/$defs/IsolationTier",
           "default": "container"
         },
-        "keywords": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Keywords",
-          "type": "array"
+        "max_concurrent_runs": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max Concurrent Runs",
+          "type": "integer"
         },
         "mcp_servers": {
           "default": [],
@@ -297,6 +395,17 @@
           "title": "Needs Docker",
           "type": "boolean"
         },
+        "pull_request": {
+          "$ref": "#/$defs/PullRequestPolicy",
+          "default": {
+            "body_template_path": null,
+            "draft": false,
+            "labels": [],
+            "merge_method": "squash",
+            "reviewers": [],
+            "team_reviewers": []
+          }
+        },
         "remote_url": {
           "title": "Remote Url",
           "type": "string"
@@ -305,6 +414,25 @@
           "default": false,
           "title": "Require Full Test Suite",
           "type": "boolean"
+        },
+        "routing": {
+          "$ref": "#/$defs/RoutingSignals",
+          "default": {
+            "aliases": [],
+            "keywords": []
+          }
+        },
+        "runner_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runner Image"
         },
         "test_command": {
           "default": [],
@@ -418,6 +546,30 @@
       "title": "ResumeVerb",
       "type": "string"
     },
+    "RoutingSignals": {
+      "additionalProperties": false,
+      "description": "Repo routing signal (S11). Matched against a work item's *raw* text.\n\nA dedicated object rather than two top-level fields so the two stay\nadjacent wherever this profile is read or written — sorted-key JSON\nserialization otherwise scatters them alphabetically among a dozen\nunrelated fields, which is exactly the wrong shape for two values that\nonly mean something together.",
+      "properties": {
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "keywords": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        }
+      },
+      "title": "RoutingSignals",
+      "type": "object"
+    },
     "TestReporter": {
       "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
       "enum": [
@@ -500,7 +652,7 @@
   "$id": "https://clawdence.dev/schemas/runner-request.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "What the control plane hands a runner.",
+  "description": "What the control plane hands a runner. **Intent, not addressing.**",
   "properties": {
     "base_commit": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
@@ -557,6 +709,11 @@
       "pattern": "^[a-z][a-z0-9_-]*$",
       "title": "Stage Id",
       "type": "string"
+    },
+    "trusted_provenance": {
+      "default": false,
+      "title": "Trusted Provenance",
+      "type": "boolean"
     },
     "work_item_id": {
       "maxLength": 128,

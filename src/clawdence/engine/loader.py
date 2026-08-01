@@ -10,9 +10,10 @@ before the executor sees it:
 * the declared ``schema_version`` is one this build understands;
 * the domain model accepts it — types, ranges, ``extra="forbid"``, unique ids;
 * every ``$stage.facet`` reference in a condition names a stage declared
-  **earlier** in the file;
-* every ``${...}`` placeholder in an argv element, env value, ``cwd``, ``stdin``
-  or approval prompt does the same;
+  **earlier** in the file, or the reserved ``request``;
+* every ``${...}`` placeholder in an argv element, env value, ``cwd``, ``stdin``,
+  agent task, runner plan or approval prompt does the same;
+* no stage is called ``request``, and nothing reads a facet of it but ``json``;
 * no placeholder appears in ``command[0]``.
 
 The earlier-only rule is stricter than "the stage exists" and deliberately so.
@@ -37,8 +38,14 @@ import yaml
 from pydantic import ValidationError
 
 from clawdence.domain import Stage, Workflow
-from clawdence.domain.workflow import WORKFLOW_SCHEMA_VERSION, ApprovalStage, ScriptStage
-from clawdence.engine import conditions, interpolation
+from clawdence.domain.workflow import (
+    WORKFLOW_SCHEMA_VERSION,
+    AgentStage,
+    ApprovalStage,
+    RunnerStage,
+    ScriptStage,
+)
+from clawdence.engine import conditions, interpolation, refs
 from clawdence.engine.errors import (
     ConditionSyntaxError,
     InterpolationError,
@@ -162,14 +169,35 @@ def validate_references(workflow: Workflow, *, origin: str = "<workflow>") -> No
     over workflows built any way at all, and because a caller constructing a
     ``Workflow`` in Python deserves the same check a YAML author gets.
     """
-    declared: set[str] = set()
+    # Seeded, not empty: ``request`` is the work item the run is for, and it is
+    # available before the first stage because it is what started the run.
+    declared: set[str] = {refs.REQUEST}
     for stage in workflow.stages:
+        if stage.id == refs.REQUEST:
+            raise WorkflowLoadError(
+                f"declares a stage called {refs.REQUEST!r}, which is the name of the work "
+                f"item this run is for",
+                origin=origin,
+                stage_id=stage.id,
+                hint=(
+                    f"every '${{{refs.REQUEST}.json...}}' below it would silently read the "
+                    f"stage's output instead of the request; rename the stage"
+                ),
+            )
         for reference, where in _references(stage, origin):
             if reference.stage_id == stage.id:
                 raise WorkflowLoadError(
                     f"{where} refers to {reference.stage_id!r}, which is the stage itself",
                     origin=origin,
                     stage_id=stage.id,
+                )
+            if reference.stage_id == refs.REQUEST and reference.facet is not refs.Facet.JSON:
+                raise WorkflowLoadError(
+                    f"{where} reads {reference.facet.value!r} of {refs.REQUEST!r}, which is "
+                    f"a work item rather than a step and so never ran, succeeded or failed",
+                    origin=origin,
+                    stage_id=stage.id,
+                    hint=f"'${{{refs.REQUEST}.json.text}}' is the request itself",
                 )
             if reference.stage_id not in declared:
                 raise WorkflowLoadError(
@@ -242,6 +270,11 @@ def _templates(stage: Stage) -> Iterator[tuple[str, str]]:
             yield stage.cwd, "cwd"
         if stage.stdin is not None:
             yield stage.stdin, "stdin"
+    elif isinstance(stage, AgentStage):
+        yield stage.task, "task"
+    elif isinstance(stage, RunnerStage):
+        if stage.plan is not None:
+            yield stage.plan, "plan"
     elif isinstance(stage, ApprovalStage):
         yield stage.prompt, "prompt"
 

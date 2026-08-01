@@ -1,0 +1,134 @@
+{
+  "findings": [
+    {
+      "evidence": [],
+      "field": "remote_url",
+      "level": "action",
+      "message": "this checkout has no remote named origin, so remote_url is empty. Nothing can clone a repository the profile does not name"
+    },
+    {
+      "evidence": [],
+      "field": "default_branch",
+      "level": "note",
+      "message": "origin/HEAD is not set, so default_branch is the branch currently checked out (main) rather than the remote's default"
+    },
+    {
+      "evidence": [
+        "pom.xml"
+      ],
+      "field": "build_system",
+      "level": "decided",
+      "message": "Maven, from the project object model"
+    },
+    {
+      "evidence": [
+        "pom.xml"
+      ],
+      "field": "test_reporter",
+      "level": "decided",
+      "message": "Surefire writes JUnit XML to target/surefire-reports on every run, so the reporter needs no flag and no plugin"
+    },
+    {
+      "evidence": [
+        "pom.xml",
+        "docker-compose.yml"
+      ],
+      "field": "needs_docker",
+      "level": "decided",
+      "message": "the tests need a Docker daemon: pom.xml, docker-compose.yml"
+    },
+    {
+      "evidence": [],
+      "field": "isolation_tier",
+      "level": "action",
+      "message": "these tests need a Docker daemon, and this profile does not grant one. The probe proposes `container`, which has no daemon in it, because the tier that does — `container+docker:socket` — mounts the host's socket and is equivalent to giving the agent host root. Granting it is two edits, both yours: set isolation_tier to `container+docker:socket` and docker_socket_acknowledged to true. The profile will not validate with one and not the other"
+    },
+    {
+      "evidence": [
+        ".java-version"
+      ],
+      "field": "toolchain",
+      "level": "decided",
+      "message": "toolchain pins: java=21"
+    },
+    {
+      "evidence": [],
+      "field": "exec_prefix",
+      "level": "note",
+      "message": "exec_prefix was left empty. Whether these pins can be honoured is a fact about the runner image, not about this repository — set it to something like `mise exec --` only if the image you run has that tool in it"
+    }
+  ],
+  "profile": {
+    "agents_md_path": null,
+    "branch_prefix": "clawdence/",
+    "build_command": [
+      "./mvnw",
+      "-B",
+      "-ntp",
+      "-DskipTests",
+      "package"
+    ],
+    "build_system": "maven",
+    "caps": {
+      "cpu_count": null,
+      "disk_mb": null,
+      "memory_mb": null,
+      "pid_limit": null,
+      "wall_clock_seconds": null
+    },
+    "checkout": {
+      "fetch_lfs": false,
+      "partial": true,
+      "sparse_paths": []
+    },
+    "default_branch": "main",
+    "docker_socket_acknowledged": false,
+    "e2e_runner": "skip",
+    "egress": {
+      "allow_git_remote": false,
+      "allow_llm_api": true,
+      "allow_mcp_servers": true,
+      "allow_package_registries": true,
+      "extra_allowed_hosts": [],
+      "unrestricted": false
+    },
+    "exec_prefix": [],
+    "id": "acme-orders",
+    "install_command": [
+      "./mvnw",
+      "-B",
+      "-ntp",
+      "dependency:go-offline"
+    ],
+    "isolation_tier": "container",
+    "max_concurrent_runs": 1,
+    "mcp_servers": [],
+    "name": "acme-orders",
+    "needs_docker": true,
+    "pull_request": {
+      "body_template_path": null,
+      "draft": false,
+      "labels": [],
+      "merge_method": "squash",
+      "reviewers": [],
+      "team_reviewers": []
+    },
+    "remote_url": "",
+    "require_full_test_suite": false,
+    "routing": {
+      "aliases": [],
+      "keywords": []
+    },
+    "runner_image": null,
+    "test_command": [
+      "./mvnw",
+      "-B",
+      "-ntp",
+      "test"
+    ],
+    "test_reporter": "junit-xml",
+    "toolchain": {
+      "java": "21"
+    }
+  }
+}

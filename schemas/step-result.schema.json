@@ -152,6 +152,19 @@
     "status": {
       "$ref": "#/$defs/StepStatus"
     },
+    "timeout_seconds": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Timeout Seconds"
+    },
     "type": {
       "$ref": "#/$defs/StepType"
     }

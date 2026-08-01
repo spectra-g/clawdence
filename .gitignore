@@ -22,6 +22,12 @@ settings.yaml
 settings.yml
 secrets.*
 credentials.*
+# ...but source modules with those names are code, not configuration.
+# `src/clawdence/ports/secrets.py` was silently excluded until this was added,
+# and an ignored source file is a package that imports fine locally and is
+# broken for everybody else.
+!secrets.py
+!credentials.py
 .clawd/
 .clawdence/
 

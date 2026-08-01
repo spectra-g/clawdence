@@ -1,0 +1,131 @@
+{
+  "findings": [
+    {
+      "evidence": [],
+      "field": "remote_url",
+      "level": "action",
+      "message": "this checkout has no remote named origin, so remote_url is empty. Nothing can clone a repository the profile does not name"
+    },
+    {
+      "evidence": [],
+      "field": "default_branch",
+      "level": "note",
+      "message": "origin/HEAD is not set, so default_branch is the branch currently checked out (main) rather than the remote's default"
+    },
+    {
+      "evidence": [
+        "uv.lock"
+      ],
+      "field": "build_system",
+      "level": "decided",
+      "message": "Python with uv"
+    },
+    {
+      "evidence": [],
+      "field": "build_command",
+      "level": "note",
+      "message": "no build command: a Python project has no build step between installing and testing, so an empty build_command here is the shape of the language rather than something the probe failed to find"
+    },
+    {
+      "evidence": [
+        "pyproject.toml"
+      ],
+      "field": "test_command",
+      "level": "decided",
+      "message": "pytest, from [tool.pytest] in pyproject.toml"
+    },
+    {
+      "evidence": [],
+      "field": "needs_docker",
+      "level": "decided",
+      "message": "no declared testcontainers dependency and no compose file, so the tests are assumed not to need a daemon"
+    },
+    {
+      "evidence": [
+        ".python-version"
+      ],
+      "field": "toolchain",
+      "level": "decided",
+      "message": "toolchain pins: python=3.12"
+    },
+    {
+      "evidence": [],
+      "field": "exec_prefix",
+      "level": "note",
+      "message": "exec_prefix was left empty. Whether these pins can be honoured is a fact about the runner image, not about this repository — set it to something like `mise exec --` only if the image you run has that tool in it"
+    },
+    {
+      "evidence": [
+        "AGENTS.md"
+      ],
+      "field": "agents_md_path",
+      "level": "decided",
+      "message": "this repository has a conventions file, and the runner installs it into the worktree so the agent is told the local rules rather than inferring them"
+    }
+  ],
+  "profile": {
+    "agents_md_path": "AGENTS.md",
+    "branch_prefix": "clawdence/",
+    "build_command": [],
+    "build_system": "uv",
+    "caps": {
+      "cpu_count": null,
+      "disk_mb": null,
+      "memory_mb": null,
+      "pid_limit": null,
+      "wall_clock_seconds": null
+    },
+    "checkout": {
+      "fetch_lfs": false,
+      "partial": true,
+      "sparse_paths": []
+    },
+    "default_branch": "main",
+    "docker_socket_acknowledged": false,
+    "e2e_runner": "skip",
+    "egress": {
+      "allow_git_remote": false,
+      "allow_llm_api": true,
+      "allow_mcp_servers": true,
+      "allow_package_registries": true,
+      "extra_allowed_hosts": [],
+      "unrestricted": false
+    },
+    "exec_prefix": [],
+    "id": "acme-etl",
+    "install_command": [
+      "uv",
+      "sync",
+      "--frozen"
+    ],
+    "isolation_tier": "container",
+    "max_concurrent_runs": 1,
+    "mcp_servers": [],
+    "name": "acme-etl",
+    "needs_docker": false,
+    "pull_request": {
+      "body_template_path": null,
+      "draft": false,
+      "labels": [],
+      "merge_method": "squash",
+      "reviewers": [],
+      "team_reviewers": []
+    },
+    "remote_url": "",
+    "require_full_test_suite": false,
+    "routing": {
+      "aliases": [],
+      "keywords": []
+    },
+    "runner_image": null,
+    "test_command": [
+      "uv",
+      "run",
+      "pytest"
+    ],
+    "test_reporter": "none",
+    "toolchain": {
+      "python": "3.12"
+    }
+  }
+}

@@ -155,6 +155,16 @@ class AgentStage(StageBase):
     role: str
     prompt_version: str | None = None
 
+    #: What this step is asked to do, as a template — ``${intake.json.text}``,
+    #: ``${ba.json.result.summary}``. Required, and in the workflow rather than in
+    #: the handler, because "what is this agent being asked" is the process, and
+    #: the process is data (S12, added rev 13). The role prompt says *who* the
+    #: model is; this says what it is looking at. It is delivered framed as
+    #: quoted material, never concatenated into the role prompt, because the
+    #: values it expands are request text, memory and discovery notes — all of
+    #: which an attacker may have influenced (§3.9, and S10b at the other end).
+    task: str
+
     model: ModelSelector
 
     #: Explicit, not discovered by trial. v1's budgets were BA 1, Tech Lead 1,
@@ -182,6 +192,20 @@ class RunnerStage(StageBase):
     """Execute repo code in the data plane."""
 
     type: Literal[StepType.RUNNER] = StepType.RUNNER
+
+    #: What the agent in the data plane is told to build, as a template —
+    #: ``${plan.json.result}`` after a planning stage, ``${request.json.text}``
+    #: in a workflow that has none. The runner half of ``AgentStage.task``, and
+    #: it is here for the same reason (S11, added rev 14): the plan a step is
+    #: given is *the process*, and the process is data. Left on the handler it
+    #: would be one template per composition root, so a workflow that plans and
+    #: one that goes straight to code could not both be wired by the same
+    #: pipeline — which is exactly what triage does with ``sprint`` and
+    #: ``quick-fix``.
+    #:
+    #: Absent means the handler's own default, which is what an ad-hoc
+    #: ``clawdence run`` gets.
+    plan: str | None = None
 
     #: Overrides the repo profile's tier when set. Narrowing only — the engine
     #: refuses a widening override for untrusted work.

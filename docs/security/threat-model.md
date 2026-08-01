@@ -8,11 +8,41 @@ code. This document says what can go wrong, what stops it, and what we have deci
 It is written *before* the execution machinery exists, deliberately. A threat model produced after
 the fact describes a design; this one is meant to constrain it.
 
-> **Read this first.** As of today the project ships a domain model and a CLI. There is no
-> workflow engine, no runner, no ingestion, and no isolation. Almost every control below is
-> **Designed**, not **Built**. Do not point this at anything you care about, and do not expose it
-> to input from people you do not trust, until the ingress and egress controls are built and this
-> notice is gone.
+> **Read this first.** As of today the project ships a domain model, a CLI, a workflow engine that
+> executes `script` and `agent` steps, a state store, the ports every integration will sit behind —
+> with in-memory implementations plus **one real adapter**, a model provider — and **three runner
+> tiers**: `host`, which has no isolation at all, `container`, which has the plane split, and
+> `container+docker:socket`, which has the plane split and then hands out the means to undo it.
+> There is **no egress policy** and no ingestion beyond the CLI. `runner` and `approval` steps
+> still refuse. Many controls below are **Designed**, not **Built**. Do not point this at anything
+> you care about, and do not expose it to input from people you do not trust, until the ingress and
+> egress controls are built and this notice is gone.
+>
+> **An agent step now sends text to a third party.** Request text, retrieved context and every
+> prior step's output leave the control plane in a prompt, over TLS, to a provider that logs.
+> Nothing about that is a new *threat* — it is the point of the system — but it is a new data flow,
+> and the controls on it are narrow and worth stating: the request carries no credential the caller
+> did not put in it, the adapter refuses to send over plaintext to anything but loopback, and
+> provider error text is never copied into an error message or an audit record because it quotes
+> the request back (T11).
+>
+> The `container` tier makes the plane split real — one bind mount, every capability dropped, a
+> read-only root, no Docker socket, resource caps the kernel enforces — and the claims that are
+> only meaningful from inside a container are asserted from inside a real one (`make docker-tests`).
+> **What it does not do is bound the network.** It runs on an ordinary bridge and does not consult
+> `RepoProfile.egress` at all, so an agent that has been persuaded to exfiltrate can still reach
+> the internet. That is the single largest gap in this document today.
+>
+> The `container+docker:socket` tier exists because a repository whose integration tests need a
+> daemon cannot be verified without one, and it is the only place in this system where a control
+> is deliberately made defeatable. It is off unless four separate things say otherwise (T6), and
+> none of them make it *safe* — they make it deliberate. Read T6 before configuring it.
+>
+> The `host` runner exists for local development and says so in three places: the plan calls it
+> "never a default", `Ports` does not wire it, and it refuses any repository profile that asks for
+> a stronger tier rather than quietly downgrading. Its mitigations are the ones that do not need an
+> isolation boundary — an environment allowlist, a re-derived diff, a size-capped verdict, resource
+> and budget caps that kill the process.
 
 ---
 
@@ -26,6 +56,7 @@ the fact describes a design; this one is meant to constrain it.
 | **A4** | Integrity of merged code | The system's output lands in real repositories. Code merged on the strength of evidence that does not apply is a supply-chain compromise of the operator's own product. |
 | **A5** | The operator's money | LLM spend is unbounded without caps, and the coding runner dominates it — roughly 91% of token spend in the predecessor system, with a single work item reaching 3.68M tokens. |
 | **A6** | Truthfulness of the audit trail | If the record of what happened can be forged or is silently incomplete, none of the above can be investigated after the fact. |
+| **A7** | The standard the work is measured against | The workflow definitions, the verification contracts, the approval policy and the trigger configuration. These decide what "done" means and when the system acts. An attacker who edits them does not need to defeat any other control — they move the bar instead. |
 
 ## 2. Trust zones
 
@@ -71,23 +102,29 @@ worst realistic outcome, not the average one.
 |---|---|---|---|---|
 | **T1** | Prompt injection via repository content | **High** | A2, A4 | Designed |
 | **T2** | Prompt injection via request text | **High** | A2, A4, A5 | Designed |
-| **T3** | Secret exfiltration by the runner | Medium | **A1, A2** | Designed |
-| **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | Designed |
+| **T3** | Secret exfiltration by the runner | Medium | **A1, A2** | Partly built — plane split built, egress designed |
+| **T4** | Malicious dependency executed during install or test | Medium | A2, A3 | **Built** (container tier) |
 | **T5** | Model-generated destructive command | **High** | A2, A3 | Partly accepted |
-| **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Designed + policy |
-| **T7** | Resource exhaustion of the host | **High** | A3 | Designed |
+| **T6** | Host escape via the Docker socket | Medium | **A1, A2, A3** | Partly built — socket tier gated four ways; rootless DinD absent |
+| **T7** | Resource exhaustion of the host | **High** | A3 | Partly built — caps, reaper and concurrency cap built; disk quota still absent |
 | **T8** | Financial exhaustion | **High** | A5 | Built (schema) + designed |
 | **T9** | Unauthorised submission | **High** | A5, A4 | Designed |
 | **T10** | Webhook forgery | Medium | A5, A4 | Designed |
-| **T11** | Secrets written into the audit trail | **High** | A1, A6 | Designed |
-| **T12** | Poisoned runner base image | Low | **A1, A2, A3** | Designed |
-| **T13** | Worktree path treated as trusted input | Low | A3 | Designed |
+| **T11** | Secrets written into the audit trail | **High** | A1, A6 | Partly built + designed |
+| **T12** | Poisoned runner base image | Low | **A1, A2, A3** | Partly built — digest pinning enforced |
+| **T13** | Worktree path treated as trusted input | Low | A3 | Partly built |
 | **T14** | Memory poisoning via discovery notes | Medium | A2, A4 | Designed |
 | **T15** | Approval bypass or self-approval | Medium | A4 | Built (schema) + designed |
 | **T16** | Command injection via workflow arguments | Medium | A2, A3 | **Built** |
-| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema) |
+| **T17** | Merging code whose evidence does not apply | **High** | **A4** | **Built** (schema + port + adapter) |
 | **T18** | MCP credential over-exposure | Medium | scoped | Partly accepted |
 | **T19** | Unauthenticated control surface | Medium | A4, A5 | Designed |
+| **T20** | Sensitive data at rest in the state store | Medium | A1, A6 | Partly built + partly accepted |
+| **T21** | Credentials recorded into committed test fixtures | Medium | A1, A6 | **Built** |
+| **T22** | Agent output alters the standard it is measured against | **High** | **A7**, A4 | **Accepted, unmitigated** |
+| **T23** | Mid-run steering as an unauthenticated instruction channel | Medium | A2, A4 | Partly built — bounded and recorded; authorisation designed |
+| **T24** | The forge credential — leaked from the control plane, or sent to a host nobody chose | Medium | **A1**, A4 | **Built** |
+| **T25** | Request text steering triage — a stranger's issue choosing the repository work lands in | Medium | A2, A4 | **Built** (closed set + refuse-on-ambiguity) |
 
 **Disposition** means: *Built* — implemented and tested today. *Designed* — the control is
 specified and scheduled but does not exist yet. *Accepted* — we are not mitigating it, and §6 says
@@ -137,9 +174,29 @@ package registries, and configured MCP servers, and denies everything else inclu
 remote. There is a documented `unrestricted` escape hatch which is off by default; enabling it
 removes this control entirely and the documentation says so.
 
-There is an automated assertion planned for this specific claim: from inside a runner, the
-control-plane credentials must be provably absent and the other configured repositories provably
-unreachable. It is a test, not a review checklist.
+Both halves of the first claim are now asserted automatically, and on the `container` tier they are
+asserted from inside a real container. The runner builds the agent's environment from an allowlist
+rather than filtering one down and refuses outright to start with a control-plane variable in it; a
+live test runs `env` inside the container and checks that the chat, tracker, VCS and cloud
+credentials are absent. The second half — the other configured repositories being unreachable — is
+now checked the same way: a sibling repository is created on the host, and reading it from inside
+the container fails, because there is no mount that would make it reachable rather than a permission
+check that could be wrong.
+
+The credentials the runner *is* meant to have are passed to the container **by name, not by value**:
+`-e NAME=value` puts a secret in the engine client's command line, which anything on the host can
+read, while `-e NAME` has the engine take it from the client's environment, which it cannot. A live
+test asserts both — that the value never appears in the client's argv, and that it still arrives.
+
+What is **not** mitigated yet is the egress half, and the container tier does not pretend otherwise:
+it runs on a normal bridge network and `RepoProfile.egress` is not consulted at all. A repository
+configured with `allow_git_remote: false` today has a container that can still reach a git remote.
+S7b is where that field starts meaning something.
+
+Two exceptions are honest rather than hidden. A repository that configures an MCP server hands the
+runner a bearer token, resolved by name and injected per run; and the runner is given a *scoped*
+model API key of its own, which is a credential even though it is not the control plane's. The
+boundary is "no control-plane secrets", not "no secrets".
 
 ### T4 · Malicious dependency executed during install or test
 
@@ -149,6 +206,12 @@ inside the runner, so this adversary starts with the runner's full privileges.
 This is why the runner's privileges are the security boundary rather than the runner's behaviour:
 we assume arbitrary code executes there and design for it. T3's egress allowlist, T7's resource
 caps, and the plane split are all sized for an adversary that is already inside.
+
+**Built on the container tier**, and the flags are the mitigation rather than a description of one:
+every capability dropped, `no-new-privileges` so a setuid binary in the image cannot escalate past
+it, a read-only root filesystem, a `/tmp` that is a `nosuid,nodev,noexec` tmpfs, and the container
+running as the invoking user rather than root. Live tests read `/proc/self/status` and attempt a
+write outside the worktree, so these are checked as kernel behaviour rather than as argv.
 
 **Residual:** a dependency that exfiltrates through an allowed destination — a package registry
 that accepts publishes, for instance — is not stopped by an allowlist that permits that registry.
@@ -168,7 +231,7 @@ Work in progress lost to a bad command is recreated by re-running. We do not att
 which commands the model may issue inside its sandbox, because a command allowlist broad enough to
 build real software is broad enough to destroy the sandbox.
 
-### T6 · Host escape via the Docker socket
+### T6 · Host escape via the Docker socket — **partly built**
 
 Some repositories need Docker for their tests — testcontainers, in practice. The cheap way to
 provide it is to mount `/var/run/docker.sock` into the runner.
@@ -191,8 +254,44 @@ ingestion, not a later refinement. If it is not ready, the honest fallback is to
 testcontainers for trusted work only and say so — not to ship socket mode and describe the result
 as safe.
 
-**Known gap:** containers spawned by testcontainers are *siblings* on the host daemon, so they sit
-outside the runner's network policy even in the permitted case. Stated, not solved.
+**Built (S8).** `container+docker:socket` exists as a separate runner class,
+`runners.dockerd.DockerSocketRunner`, and the policy above is the code rather than a paragraph
+next to it. Reaching the daemon requires **four** independent things, each refused by a different
+layer:
+
+1. `RepoProfile.docker_socket_acknowledged` — the profile does not validate without it, so the
+   opt-in is taken at configuration time by whoever writes the profile. This is what "loudly
+   warned at configuration time" turned into: the validator's message is the warning, and there is
+   no way to select the tier without reading it.
+2. `RunnerRequest.trusted_provenance` — deny-by-default, derived from `Submitter.trusted`. This is
+   the row of the table above that matters: what the repository *needs* and what this request may
+   *have* are separate facts, so a repository that opted in once does not thereby opt in every
+   source that later routes to it. Untrusted work is **refused, not downgraded** — running a
+   testcontainers suite without a daemon would report a missing capability as the agent's failure.
+3. A `DockerSocketRunner` has to be constructed and wired. `ContainerRunner` refuses the tier
+   outright, so no amount of profile editing turns the default runner into this one.
+4. Testcontainers' own reaper stays on. `TESTCONTAINERS_RYUK_DISABLED` is set to `false` per run
+   and a request whose environment sets it true is refused, because Ryuk is the only thing that
+   knows which of the host's containers belong to a given session.
+
+The socket reaches the **agent phase only**. The setup phase runs the repository's
+`install_command` — arbitrary code from a lockfile, which is the least trusted thing in the run —
+and gets no daemon. On top of Ryuk, the tier sweeps sibling sessions that appeared during a run,
+including on the abort path, so a killed run does not wait on somebody else's reconnection
+timeout; a session that overlapping runs could each claim is deliberately left to Ryuk rather than
+guessed at.
+
+**Rootless DinD is still not built**, and `IsolationTier.CONTAINER_DOCKER_DIND_ROOTLESS` remains a
+value no runner accepts. Public ingestion (S10b) does not exist either, so today the system is in
+the position this section names as the honest fallback: testcontainers for trusted work only,
+enforced by gate 2 rather than by documentation.
+
+**Known gaps, unchanged.** Containers spawned by testcontainers are *siblings* on the host daemon,
+so they sit outside the runner's network policy even in the permitted case. And nothing above
+mitigates the escape itself — an agent that has been persuaded to run
+`docker run --net=host -v /:/host` still can. Every control in this section is about *who may
+reach the daemon*, not about what they can do once there, because there is nothing to be done
+about the second while the socket is mounted.
 
 ### T7 · Resource exhaustion of the host
 
@@ -205,6 +304,26 @@ for dead containers, stale worktrees, and orphaned image layers. Failures are di
 cause — timeout, OOM kill, disk full, non-zero exit, empty diff, tests failed, budget exceeded,
 network denied — because a retry policy that cannot tell an OOM kill from a flaky test will treat
 them identically, which is how a resource problem becomes an infinite loop.
+
+**Built** for CPU, memory, process count and wall clock on the container tier, with live tests that
+exhaust memory and fork past the ceiling and check that the run is killed rather than the host.
+**The reaper is built** (`runners/reaper.py`, `clawdence reap`): containers are still removed by the
+run that created them, and the sweep collects what a *crashed* control plane left behind —
+containers carrying our run-id label, stale worktrees, and dependency caches nothing has used. It
+is guarded on both sides, because the dangerous failure is deleting live work rather than missing
+dead work: nothing belonging to a run the state store says is running is touched, and nothing
+inside a grace period is either. It deliberately does not prune images — this system builds none,
+so the layers on the host belong to the operator's own registry pulls.
+
+**Concurrency is now bounded rather than accidental.** `runners/scheduler.py` caps runs in flight
+across the fleet and per repository (`RepoProfile.max_concurrent_runs`, default 1), which is what
+turns "N containers at once" from a resource risk into a configured number.
+
+One gap is named rather than implied. **Disk is largely uncapped**: `ResourceCaps.disk_mb` reaches
+the engine only where the storage driver supports a quota, which is not the common case, and the
+worktree and dependency cache are host bind mounts that no container flag bounds — `/tmp` is a
+sized tmpfs and that is all. The reaper is a retention policy, not a quota: it reclaims after the
+fact and cannot stop one run filling a disk.
 
 ### T8 · Financial exhaustion
 
@@ -236,18 +355,142 @@ An unsigned webhook endpoint is an open invitation to spend someone else's money
 configuration flag to disable it. Ingestion is idempotent on a source-stable key, so replaying a
 captured delivery produces one work item rather than N.
 
-### T11 · Secrets written into the audit trail
+### T11 · Secrets written into the audit trail — **partially built**
 
 The audit trail carries chat text, issue bodies, plans, and logs. Any of those can contain a key
 somebody pasted. The trail is append-only, so **there is no deleting it afterwards**.
 
-**Mitigations:** redaction happens at write time, not at read time. Records carry a flag recording
-that the redaction pass ran, so a record written by a path that skipped screening is findable
-rather than indistinguishable from a clean one. A rare, audited tombstone-and-rewrite escape hatch
-exists for when redaction misses, because it will.
+**Planned mitigations:** redaction happens at write time, not at read time. Records carry a flag
+recording that the redaction pass ran, so a record written by a path that skipped screening is
+findable rather than indistinguishable from a clean one. A rare, audited tombstone-and-rewrite
+escape hatch exists for when redaction misses, because it will.
+
+**What the state store actually does today (S4), pending redaction (S4b):**
+
+- **Audit payloads are metadata, not content.** What the engine writes is identifiers, statuses,
+  attempt numbers and error *kinds* — never step output, never a stderr tail, never a prompt. This
+  is a real reduction, not a deferral: the payloads worth redacting are not in the append-only
+  table yet, so the window in which redaction is missing is a window in which little of value
+  passes through it. The rule has to hold as later steps add payloads, and the one that is easiest
+  to get wrong is the error message, which is why the engine records `error.kind` and drops
+  `error.message` on the way in.
+- **The `redacted` flag is written `false`, honestly.** Nothing screens payloads yet, so nothing
+  claims to have. The seam that S4b fills is a one-argument substitution, and when it lands the
+  flag starts telling the truth without any other change.
 
 Commit-time and full-history secret scanning is in place in this repository from the first commit,
 for the same reason at a different layer.
+
+### T20 · Sensitive data at rest in the state store — **partially built**
+
+Distinct from T11 and newer than it. The state store records what each step *produced*: captured
+stdout and stderr, parsed output, agent responses. That is the run's evidence and the system cannot
+do its job without keeping it — but a build log can contain a token the build printed, and the
+default location is a file in the operator's home directory that lives as long as they do.
+
+**Mitigations:** the `runs` and `steps` tables are the source of truth and are **not** append-only,
+which is the deliberate consequence of ADR-0005 that matters here — a row holding
+something it should not can be deleted or rewritten, unlike an audit entry. Capture is capped at
+64 KiB per stream, so a step cannot put an entire build log in the record. The database is a file
+under the operator's own account and inherits its permissions.
+
+**Not mitigated:** the file is not encrypted at rest, and there is no retention policy — both
+follow from R7, that the operator's own machine is trusted. Backup and restore, which will move
+this data off that machine and make its handling somebody's explicit decision, is S4b's.
+
+### T21 · Credentials recorded into committed test fixtures — **built**
+
+New with the test harness (S5) and specific to it. Agent tests replay recorded LLM interactions,
+and those recordings are committed. A raw recording contains the request headers, which carry the
+API key, and the prompt text, which is where a *user's* pasted key ends up. `git rm` does not
+remove either from history.
+
+**Mitigations:** redaction happens on the way *in*, before anything is written — both fields named
+like a credential (`authorization`, `api_key`, `bearer`, …) and values shaped like one anywhere in
+the payload, including inside prompt text. The same `REDACTED` marker as the rest of the system, so
+one grep answers "did we leak here". Recording is reachable only by setting `CLAWDENCE_CASSETTE`,
+so no default or missing file can put the suite into a mode that writes new material. The error
+raised on a cassette miss prints part of the request to identify it, and redacts that too.
+
+Commit-time and full-history gitleaks scanning is the second layer, as for T11.
+
+### T24 · The forge credential — **built**
+
+New at S15 and the first credential the control plane uses to *write* somewhere outside itself. A
+push token is not like the model provider's key: the worst a leaked model key does is bill someone,
+and the worst a leaked push token does is put a commit on a repository under a name people trust.
+Three specific paths, and all three are ways a token escapes without anybody making a mistake:
+
+- **A command line is public.** `ps` is readable by every user on the box, so
+  `git -c http.extraHeader=Authorization: Basic …` publishes the credential to anyone logged in.
+- **A remote URL is persistent.** `https://x-access-token:TOKEN@github.com/…` is the well-known
+  recipe, and `git clone` writes the remote URL into the clone's own `.git/config` — so the token
+  outlives the process that used it and is sitting in a file when the next person looks.
+- **A header goes wherever git goes.** An unscoped `http.extraHeader` is attached to *every*
+  request, and git makes requests to hosts the repository names: a submodule URL is content
+  somebody else wrote, so an unscoped credential plus an attacker-authored `.gitmodules` is our
+  token, sent to their server.
+
+**Mitigations:** the token reaches git through a config file this process writes at mode 0600 and
+removes on the way out — including when the operation raised — named by `GIT_CONFIG_GLOBAL`, which
+was already pointed at `/dev/null`, so the operator's own configuration stays as ignored as it was.
+It never enters an argv and never enters a URL. The header is scoped to one origin, parsed rather
+than prefix-matched (`https://github.com` without a trailing slash also matches
+`https://github.com.evil.example`). Submodules are never fetched. `credential.helper` is cleared so
+nothing consults a keychain on our behalf and nothing can prompt. `gh` gets a built environment
+with a fixed allowlist and at most one credential in it, for the same reason script steps do.
+
+The credential is addressed by *name* everywhere above this line — `RepoStore.token_name` is a
+`SecretProvider` key, resolved at the moment an operation starts, never held on the object — so a
+traceback that prints a frame's locals prints a name.
+
+**Residual:** a token in a file for the length of one git invocation is still a token in a file. On
+a single-tenant machine the set of people who can read `/tmp` as this user is the set who can
+already read the process's memory (R7).
+
+### T25 · Request text steering triage — **built**
+
+New at S11, and it exists because that step made two statements that read as contradicting each
+other. `domain.work_item` says `raw_text` "never selects the workflow, the repo, or the isolation
+tier". S11's brief says repository routing must read the **raw request text** — the
+`slackMessageRaw` lesson, because v1 routed off a paraphrased title and the paraphrase dropped
+product names. Both stand, and the reconciliation is what the text is allowed to *be*:
+
+**a selector over a closed set the operator configured, never a source of new options.** The
+candidates are the repository profiles named in the configuration file. A request can raise one
+configured repository above another; it cannot name one that is not there, cannot introduce a
+workflow, and cannot touch an isolation tier — the tier comes from the profile, which a person
+wrote and which `RepoProfile` will not even validate for the socket tiers without a second field
+acknowledging what they cost.
+
+The threat that survives that framing is narrower and real: a GitHub issue on a public repository
+is a stranger's text, and a stranger who knows which repositories an installation is configured for
+can write an issue that mentions one of them. What they get is work *proposed* against a repository
+the operator had already trusted this system with, arriving as a pull request a human reviews.
+
+**Mitigations.**
+
+- **The candidate set is closed and comes from configuration**, so the blast radius is bounded by
+  what the operator listed. Nothing a submitter writes adds a row.
+- **Ambiguity refuses rather than guessing.** A winner has to score above zero *and* beat the
+  runner-up outright; a tie is reported with both scores and routed nowhere. Guessing between two
+  plausible repositories is the failure mode that would make a mention-stuffing issue effective.
+- **Overrides are envelope fields, never parsed out of the body.** `workflow_override` and `repos`
+  are set by an ingestion adapter from what it was handed — `clawdence submit --workflow`, a CLI
+  flag — and no code reads the request text looking for directives. An adapter for an untrusted
+  source simply does not set them.
+- **A workflow name is validated as one path component.** It is the one routed string that reaches
+  a filesystem, and the closed-set argument does not cover it: `../../etc/passwd` as a
+  `workflow_override` would be a request choosing which file the control plane executes.
+- **Every decision is recorded** as `WORK_ITEM_ROUTED` with the candidates, their scores and the
+  terms that matched — metadata only, never `raw_text` — so a routing that looks wrong is
+  diagnosable and correctable by editing a profile.
+
+**Residual:** an attacker who can submit *and* knows the configured aliases can direct their
+request at a specific one of the operator's repositories. This is mitigated at the other end rather
+than here — the work arrives as a pull request against a branch under `clawdence/`, and S10b is
+where "may this person submit at all" is decided for public sources. Until S10b exists, public
+ingestion is not enabled (§4's first rule).
 
 ### T12 · Poisoned runner base image
 
@@ -257,6 +500,14 @@ A compromised one is a compromise of every run.
 **Mitigations:** images pinned by digest rather than tag, scanned in CI, containing the toolchain
 and the runner CLI and nothing else. Users can supply their own, which many will need to — and
 that shifts this risk to them, which is the honest description of what it does.
+
+The pinning half is **built and enforced**: the container runner refuses a reference without a
+digest at dispatch rather than resolving a tag, because a tag is a mutable pointer and running one
+means executing whatever was pushed over it since the last run. `allow_unpinned_image=True` is the
+documented way out, for local development against an image that has no digest yet. Overriding the
+image is a three-level choice — the repository's `runner_image`, then a per-build-system default,
+then the runner's own — which is what a corporate adopter with a mandated base image needs. What is
+**not** built: this project publishes no images, so there is nothing to scan in CI yet.
 
 ### T13 · Worktree path treated as trusted input
 
@@ -311,7 +562,7 @@ Three further properties are enforced by the engine rather than by the type:
   a credential-shaped variable does not reach the child, and that the allowlist itself names nothing
   credential-shaped.
 
-### T17 · Merging code whose evidence does not apply — **built (schema)**
+### T17 · Merging code whose evidence does not apply — **built (schema + port)**
 
 The subtle one, and the highest blast radius against A4. Tests pass at commit X. A conflict forces
 a rebase onto an advanced base. The merge lands tree Y, which nothing ever verified. Nobody
@@ -322,8 +573,17 @@ green check.
 the tree it was produced against, and it is invalid for any other tree. Abbreviated hashes are
 refused, because two abbreviations of different lengths can name the same commit and that makes the
 comparison unreliable. Any tree mutation — rebase, force-push, base advance — invalidates prior
-evidence and requires re-verification before merge. Enforcement in the merge path is still to
-build; the type makes the unsafe state unrepresentable rather than merely discouraged.
+evidence and requires re-verification before merge. The type makes the unsafe state
+unrepresentable rather than merely discouraged.
+
+**Enforced at the merge boundary (S5).** `VcsPort.merge` takes `expect_head` and `expect_base` as
+**required** arguments and refuses with `StaleMergeError` when either has moved. Required rather
+than optional is the control: an optional safety check is one that gets omitted under deadline
+pressure and reads as a reasonable diff, while a required one means the caller had to produce two
+hashes and therefore had to look at its evidence. The contract suite checks both refusals for
+every adapter, so the real GitHub adapter (S15) inherits the obligation rather than reimplementing
+it. What is still to build is the pipeline that *calls* merge with the hashes from a
+`VerificationResult` — the boundary is closed, the caller does not exist yet.
 
 ### T18 · MCP credential over-exposure
 
@@ -337,6 +597,15 @@ written into, so a profile committed to disk or printed by a probe cannot carry 
 **Partly accepted:** whatever an MCP token grants, a compromised runner gets. Scope those tokens
 narrowly. §6.
 
+**What the ports layer adds (S5).** Secrets are resolved by name, as late as possible, by
+`SecretProvider` — and what comes back is a `Secret`, not a `str`. Its `repr` and `str` both name
+the secret instead of showing it, so a credential cannot reach a log line, an f-string or a
+traceback without somebody calling `.reveal()`, which is one short grep to audit. The default
+provider holds nothing, so an unconfigured system fails at the first step that needs a key rather
+than inheriting whatever is in the ambient environment. `EnvSecrets` takes an allowlist of names,
+because without one it is `os.environ` and any caller that chooses the name it asks for — including
+one whose name came out of a workflow file — can read `AWS_SECRET_ACCESS_KEY`.
+
 ### T19 · Unauthenticated control surface
 
 The predecessor's observability server had no authentication, no rate limiting, permissive CORS,
@@ -347,6 +616,91 @@ disclosure surface into an **unauthenticated write surface controlling code that
 **Mitigation:** authentication ships in the same change as the controls, never after. Not a
 follow-up item, not a configuration option.
 
+### T22 · Agent output alters the standard it is measured against — **accepted, unmitigated**
+
+Every other threat here is about what an **adversary** does to the system. This one is about what
+the system's own output is allowed to change **about the system**, and it is specific to a factory
+whose product is commits, pointed at repositories — one of which will eventually be this one.
+
+The assets are the workflow definitions, the verification contracts, the approval policy and the
+trigger configuration (A7). An agent that can edit those does not have to produce code that passes
+review; it can produce a change that makes review pass. The shapes this takes are ordinary rather
+than exotic, which is what makes it worth writing down:
+
+- a contract requiring passing tests is edited to require a build;
+- an approval gate's approver constraint is widened, or the gate is removed from the workflow;
+- a trigger is added, so the system schedules its own future work;
+- the guard that would have caught any of the above is itself the thing edited.
+
+It is not prompt injection (T1, T2) — no adversary is needed, and a model that is merely
+over-eager gets there. It is not approval bypass (T15) — the approval is granted correctly, against
+a standard that has already moved.
+
+**Intended mitigation, when the steps exist:** agent output is a proposal in the normal review
+path, never applied directly, and **no run can satisfy the gate that merges its own proposal**. The
+guard covers changes to itself, so removing it is a change that is also visible in review. S12
+(agent steps) is where output first becomes a diff and S17 (approval gates) is where the gate
+becomes real; both trace here.
+
+**Disposition today: accepted, partially mitigated — the first half of the control is now
+structural.** S12 has shipped and the disposition changes with it, as this entry said it would have
+to. Two things are true and they are worth keeping apart.
+
+*What arrived.* An agent step now produces output, and that output can be interpolated into a
+runner step's plan. So text a model wrote can reach a process that edits a repository, which is one
+link in the chain this threat describes.
+
+*What did not.* An agent step still cannot write anything. `clawdence.agent.AgentHandler` is
+constructed with a model port, a prompt registry, a schema registry and a tool surface, and with
+nothing else — no state store, no workflow loader, no VCS adapter, no filesystem. Its return value
+is a `HandlerOutcome` the engine records. That is the enforcement, and it is deliberately a matter
+of what the object was *given* rather than a check it performs: there is no code path by which an
+agent's output arrives already applied, so there is nothing for a future change to forget to call.
+A test asserts the constructor surface for that reason, so widening it is a visible diff rather
+than a quiet one. The tool surface is empty for the same reason and refuses a declared tool by
+name — an agent step runs in Zone 2, and a model-directed file read there is a read inside the
+process holding every credential in the system.
+
+*What is still accepted.* Nothing produces a **diff** yet: that is the `runner` step, which still
+refuses because nothing chooses a repository (S11, S15). And the second half of the intended
+mitigation — *no run may satisfy the gate that merges its own proposal* — does not exist, because
+approval gates do not exist (S17). The absence of a diff remains an absence of capability rather
+than a control, and the day S15 lands this entry has to be read again.
+
+### T23 · Mid-run steering as an unauthenticated instruction channel
+
+§3.11 opened a channel *into* a run that is already going: a message lands in a per-run inbox, the
+runner claims it, and it becomes a file the agent reads on its next turn. That is a new path by
+which text reaches an agent's context **after** the plan was assembled and reviewed, and a new verb
+— cancel — that stops work from outside the process doing it.
+
+It is a smaller version of T2 rather than a new shape. The differences that matter:
+
+- **The plan is built once; a steering message arrives later.** Anything that inspected the prompt
+  before the run started did not see it. That is inherent to the feature and is the reason the
+  message is delimited and labelled with its sender and time, and the reason the plan text states
+  the one limit on it: a steering message may narrow or redirect the task, and **may not lift a
+  constraint**. An agent asked to lift one is told to record it in the verdict rather than act.
+- **It is an instruction, not data.** Unlike T2's request text and unlike carried stubs, the agent
+  is *meant* to comply — so the framing that holds for those ("this is data") is not available here.
+  What holds instead is everything downstream of the prompt, unchanged: the runner still has no
+  push credentials, still has one worktree, and still cannot reach another repository. A steering
+  message can misdirect the work; it cannot widen the blast radius of the work.
+- **There is no authorisation on it today.** `Inbox.send` and `Cancellations.request` make no
+  decision about who may call them, exactly as T19 describes for the control surface. The
+  operator-facing verbs and their authorisation are S17b's, and the same rule applies: the
+  authorisation ships in the change that exposes the verb, not after it.
+
+**What is built:** the message is length-capped (refused rather than truncated, because half an
+instruction can invert it), stripped of its own delimiter so it cannot append to the constraints,
+recorded durably with sender and timestamp, and delivered at most once — so "what was this run
+told, by whom, and when" is answerable from the `steering` table after the fact. Delivery is
+per-run, so one run cannot read another's inbox.
+
+**Residual:** anybody who can call the store can redirect a run in flight, until S17b. On a
+single-tenant machine that is the same set of people who can already start one (R7), which is why
+this is Medium rather than High — and it stops being true the moment a remote surface reaches it.
+
 ---
 
 ## 5. Isolation tiers, traced to threats
@@ -356,8 +710,8 @@ should not exist.
 
 | Tier | Addresses | Does **not** address | Use when |
 |---|---|---|---|
-| `host` — subprocess, no isolation | nothing | T3, T4, T5, T7 | Local development only. Never a default, never for work from anyone else. |
-| `container` — ephemeral, worktree bind-mount, **no Docker socket** | T4, T5, T7, and T3 once the egress allowlist is enforced | T13 by construction (the mount is the point) | **The default.** Covers most repositories. |
+| `host` — subprocess, no isolation — **built** | nothing | T3, T4, T5, T7 | Local development only. Never a default, never for work from anyone else. |
+| `container` — ephemeral, worktree bind-mount, **no Docker socket** — **built** | T4, T5, T7, and the *host* half of T3 | T13 by construction (the mount is the point); the *network* half of T3, until S7b — it runs on a normal bridge and does not consult `RepoProfile.egress` | **The default.** Covers most repositories. |
 | `container+docker:socket` | T4 and T7 only | **T3, T5, T6 — and it voids the egress allowlist and the plane split** | Trusted submitter, operator's own repository, opt-in, loudly warned. **Forbidden for publicly ingested work.** |
 | `container+docker:dind-rootless` | T4, T5, T6, T7, T3 | sibling containers remain outside the runner's network policy | Repositories needing testcontainers where the work is not fully trusted. |
 | `microvm` | T3, T4, T5, T6, T7, with a kernel boundary rather than a namespace one | — | **Deferred.** The interface is open so this can land later without reshaping anything above it; there is no implementation today. |
@@ -384,6 +738,7 @@ what it does.
 | **R6** | Single-machine, single-tenant only | Multi-tenant and multi-machine are stated non-goals. There is no tenant isolation because there are no tenants. | A hosted mode, which is not planned. |
 | **R7** | The operator's own machine is trusted | The control plane, the state store, and the runners share a host. A compromised host is a total compromise. | Nothing. This is the deployment model. |
 | **R8** | Denial of service against the system itself | Rate limits and budgets bound the damage; they do not prevent a determined submitter from making the system unavailable to its operator. | Nothing planned. Availability is not a security goal here. |
+| **R9** | The system's own output changing the standard it is judged by (T22) | Partially mitigated as of S12: an agent step is structurally incapable of writing anything, because the handler is given no store, no loader and no VCS. **S15 has since made a diff possible** — a checkout, a branch, a push and a pull request all exist — so the remaining gap is now real rather than theoretical: nothing refuses a pull request that edits this system's own workflow definitions or verification contracts, because there is no approval gate yet to refuse it. What S15 does add is that the output is a *proposal* in the literal sense: it lands on a branch, in a pull request, and no code path merges one without a caller supplying evidence hashes. | The self-approval refusal, which has to exist in the same change as the gate (S17). |
 
 ---
 
@@ -395,21 +750,45 @@ The honest summary. Most of this is not built.
 |---|---|---|
 | Argv-only script commands; single-pass expansion; uninterpolatable `command[0]` | T16 | **Built** |
 | Declared-environment-plus-allowlist for script subprocesses | T3, T16 | **Built** |
-| Evidence bound to a tree hash | T17 | **Built** (schema); merge-path enforcement to come |
+| Evidence bound to a tree hash | T17 | **Built** (schema) |
+| `merge` requires the verified head and base, and refuses when either moved | T17 | **Built** (port and `gh` adapter); the base is re-read from the remote on every fetch, never taken from the pull request's own `baseRefOid`, and the head match is handed to the forge as well so the compare-and-swap is atomic |
+| Forge token never in an argv, never in a remote URL; 0600 config file, removed on exit | **T24**, T3 | **Built** |
+| Credential header scoped to one parsed origin; submodules never fetched; credential helpers cleared | **T24** | **Built** |
+| Pre-publish diff audit — symlinks, submodule pointers, vendored directories, oversized files | T5, T13 | **Built**; reports, and the caller refuses |
+| No force-push, ever; a branch that cannot fast-forward is a conflict | A4 | **Built** |
+| Signed-commit repositories refused at configuration time rather than at merge | **T24**, T15 | **Built**; a signing key in the control plane would let the process every model's output passes through mark commits as verified |
+| Branch names built from a closed alphabet rather than sanitised | T16 | **Built**; issue titles reach a ref name and an argv, and `[a-z0-9-]` has nothing to escape |
+| Repository routing selects from a configured set; ambiguity refuses; overrides come from the envelope | **T25**, T1 | **Built**; request text can reorder the operator's repositories and can never extend them |
+| A routed workflow name is one path component, checked | **T25**, T16 | **Built**; it is the one routed string that reaches a filesystem |
+| `Secret` wrapper — no credential becomes a `str` without `.reveal()` | T3, T18 | **Built** |
+| Name-allowlisted environment secrets; nothing-holding default provider | T3, T18 | **Built** |
+| Redaction on write for recorded test fixtures | T21 | **Built** |
+| Suite runs with TCP and DNS blocked; a cassette miss is an error | T21, T8 | **Built** |
 | Budgets that can only abort | T8 | **Built** (schema); ledger and enforcement to come |
 | Approver identity constraints | T15 | **Built** (schema); gate implementation to come |
 | Credential-free runner request; env-var-name-only MCP config | T3, T18 | **Built** (schema) |
 | Untrusted-by-default submitters | T9 | **Built** (schema) |
 | Commit-time and full-history secret scanning | T11 | **Built** |
-| Plane split — scoped credentials, one worktree | T3, T4, T5 | Designed |
-| Container isolation, resource caps, disk reaper | T4, T5, T7 | Designed |
-| Egress allowlist | **T1, T2, T3** | Designed |
+| Metadata-only audit payloads; honestly-false `redacted` flag | T11 | **Built** |
+| Bounded capture; deletable state tables (not append-only) | T20 | **Built** |
+| Plane split — scoped credentials, one worktree | T3, T4, T5 | **Built**, and asserted from inside a real container |
+| Container isolation — one mount, all capabilities dropped, no new privileges, read-only root, no Docker socket | T4, T5 | **Built** |
+| Resource caps — CPU, memory, pids, wall clock | T7 | **Built**; disk only where the storage driver supports a quota |
+| Credentials passed to the container by name, never through a command line | T3, T18 | **Built** |
+| Digest-pinned runner image, refused unless pinned | T12 | **Built** |
+| Disk reaper for crashed runs, stale worktrees, cold caches | T7 | **Built**; guarded on the live-run set and a grace period. Images deliberately not pruned |
+| Bounded concurrency — fleet cap plus per-repository cap | T7 | **Built** |
+| Dependency caching between runs | T7 | **Built**; a host directory per repo, bind-mounted at path identity, so a partly-filled cache cannot become an unbounded one on the host's root filesystem |
+| Egress allowlist | **T1, T2, T3** | Designed (S7b) — **not enforced by the container tier today** |
 | Socket-mode provenance gating; rootless DinD | T6 | Designed |
 | Submitter authorization, rate limits, size caps | T9, T8 | Designed |
 | Webhook signature verification | T10 | Designed |
-| Redaction at write time | T11 | Designed |
-| Digest-pinned, CI-scanned base images | T12 | Designed |
-| Untrusted-output handling for runner paths | T13 | Designed |
+| Redaction at write time | T11 | Designed (seam built, S4b fills it) |
+| Backup and restore of the state store | T20 | Designed |
+| CI-scanned base images | T12 | Designed — nothing is published yet, so there is nothing to scan |
+| Untrusted-output handling for runner paths | T13 | **Partially built** — the worktree path is refused as a mount if it is a filesystem root or a top-level directory, and refused outright if it contains a character the engine's mount parser reads as structure |
+| Bounded, delimited, at-most-once steering messages, recorded with sender and time | T23 | **Built** |
+| Authorisation on who may steer or cancel a run | T23, T19 | Designed (S17b) |
 | Injection discipline for retrieved context | T14 | Designed |
 | Authentication on the control surface | T19 | Designed |
 | A named, non-skippable security regression suite | all | Designed |
@@ -431,6 +810,8 @@ cannot, and nothing built before them should be exposed to input from strangers.
   are the current basis for "what can run"; a fifth needs its own analysis.
 - Any change that lets request text influence workflow, repository, or isolation selection. That
   would collapse T2's mitigation entirely.
+- **An agent step that can write a diff.** T22 is accepted today only because nothing can, and the
+  control it needs has to land in the same change rather than after it.
 
 ## 9. Reporting a problem
 

@@ -331,3 +331,77 @@ class TestValidateReferencesDirectly:
         )
         with pytest.raises(WorkflowLoadError, match="declared later"):
             validate_references(wf)
+
+
+class TestTheRequest:
+    """``request`` is the work item the run is for, and it is not a stage.
+
+    S11 added it because a process has to be able to see what it was asked to do,
+    and until then a workflow could only get one by having a ``script`` stage echo
+    a hardcoded string — which is what ``examples/`` shipped and what their
+    comments admitted to.
+    """
+
+    def test_it_is_available_before_any_stage_has_run(self) -> None:
+        """The one reference that names nothing declared earlier and is still
+        valid, because it was there before the first stage started."""
+        workflow = load(
+            """
+            name: demo
+            version: 1.0.0
+            stages:
+              - id: build
+                type: script
+                command: [echo, "${request.json.text}"]
+            """
+        )
+        assert workflow.stages[0].command[1] == "${request.json.text}"  # type: ignore[union-attr]
+
+    def test_a_stage_may_not_be_called_request(self) -> None:
+        """Shadowing it would silently change what every reference below it meant."""
+        with pytest.raises(WorkflowLoadError, match="which is the name of the work item"):
+            load(
+                """
+                name: demo
+                version: 1.0.0
+                stages:
+                  - id: request
+                    type: script
+                    command: ["/bin/true"]
+                """
+            )
+
+    def test_only_the_json_facet_is_readable(self) -> None:
+        """A work item never ran, so it did not succeed or fail.
+
+        ``$request.succeeded`` would resolve to something, and whatever that
+        something was would be a guard that silently always fires or never does.
+        """
+        with pytest.raises(WorkflowLoadError, match="never ran, succeeded or failed"):
+            load(
+                """
+                name: demo
+                version: 1.0.0
+                stages:
+                  - id: build
+                    type: script
+                    when: '$request.succeeded'
+                    command: ["/bin/true"]
+                """
+            )
+
+    def test_a_runner_plan_is_checked_like_every_other_template(self) -> None:
+        """``RunnerStage.plan`` arrived with S11 and is in the closed list of
+        interpolable fields, so a typo in it fails at load rather than at
+        dispatch — after a worktree has been checked out."""
+        with pytest.raises(WorkflowLoadError, match="which no stage declares"):
+            load(
+                """
+                name: demo
+                version: 1.0.0
+                stages:
+                  - id: code
+                    type: runner
+                    plan: 'build ${nonesuch.json.text}'
+                """
+            )

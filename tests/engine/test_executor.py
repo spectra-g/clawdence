@@ -249,7 +249,9 @@ class TestOnError:
 
 class TestStepResults:
     def test_type_is_carried_from_the_stage(self) -> None:
-        stage = AgentStage(id="a", role="ba", model=ModelSelector(model="claude-opus-5"))
+        stage = AgentStage(
+            id="a", role="ba", task="do it", model=ModelSelector(model="claude-opus-5")
+        )
         report = go(workflow(stage), StubHandler())
         assert report.final["a"].type is StepType.AGENT
 
@@ -263,3 +265,55 @@ class TestStepResults:
         report = go(workflow(script("a", when="false")), StubHandler())
         assert report.final["a"].started_at is None
         assert report.final["a"].finished_at is None
+
+
+class TestTheRequest:
+    """``execute(request=...)`` — the work item the run is for (S11).
+
+    Passed rather than stored, because a run's request is fixed for its life: an
+    amendment arriving mid-flight re-queues the item rather than changing what
+    the stage running right now was asked to do.
+    """
+
+    def test_a_stage_can_read_the_request_that_started_the_run(self) -> None:
+        stub = StubHandler()
+        report = go(
+            workflow(script("a", "echo", "${request.json.text}")),
+            stub,
+            request={"text": "fix the reaper"},
+        )
+        assert report.succeeded is True
+
+    def test_a_guard_can_branch_on_it(self) -> None:
+        """Which is what makes one workflow serve two kinds of request."""
+        stub = StubHandler()
+        report = go(
+            workflow(
+                script("a", when='$request.json.type == "bug"'),
+                script("b", when='$request.json.type == "spike"'),
+            ),
+            stub,
+            request={"type": "bug"},
+        )
+        assert stub.calls == ["a"]
+        assert report.final["b"].status is StepStatus.SKIPPED
+
+    def test_an_ad_hoc_run_has_none_and_that_is_not_an_error(self) -> None:
+        """``clawdence run`` against a file has no work item behind it.
+
+        The absence resolves to ``MISSING``, not to a crash and not to ``null`` —
+        ``refs`` keeps those two apart deliberately, so a guard written for a
+        pipeline run simply does not fire outside one. That is the safe
+        direction: the alternative is a workflow silently taking the
+        request-shaped branch on a run that has no request.
+        """
+        report = go(
+            workflow(
+                script("a", when='$request.json.type == "bug"'),
+                script("b"),
+            ),
+            StubHandler(),
+        )
+        assert report.final["a"].status is StepStatus.SKIPPED
+        assert report.final["b"].status is StepStatus.SUCCEEDED
+        assert report.succeeded is True

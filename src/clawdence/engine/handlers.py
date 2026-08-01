@@ -3,13 +3,17 @@
 The executor owns control flow and knows nothing about step types; handlers own
 step types and know nothing about control flow. That split is what lets S12
 (agent), S6 (runner) and S17 (approval) each arrive as one registration without
-reopening the executor.
+reopening the executor — and S6 did arrive exactly that way, as
+``clawdence.runners.RunnerHandler``.
 
-M1 ships one real handler. The other three fail loudly with an error naming the
-step that will implement them, rather than succeeding vacuously — a stub that
-returns success makes a workflow look like it ran, which is the most expensive
-possible way to be wrong about an orchestrator. ``StubHandler`` exists for tests
-and for S3c's dry-run, and has to be registered deliberately.
+The default registry ships one handler and takes the others as keyword arguments,
+because the things they need live outside the engine: an agent step needs a model
+provider (S12), a runner step needs a repository, a worktree and a branch (S11,
+S15). What is *not* supplied fails loudly with an error naming the step that will
+supply it, rather than succeeding vacuously — a stub that returns success makes a
+workflow look like it ran, which is the most expensive possible way to be wrong
+about an orchestrator. ``StubHandler`` exists for tests and for S3c's dry-run, and
+has to be registered deliberately.
 
 Script steps get an environment they were **given**, not the one the control
 plane happens to hold. The control plane holds every provider key in the
@@ -84,18 +88,28 @@ class StepHandler(Protocol):
 
 
 class UnimplementedHandler:
-    """Refuses, naming the step that will make it work."""
+    """Refuses, naming the step that will make it work.
 
-    __slots__ = ("_owner", "_step_type")
+    ``why`` exists because "not implemented" stopped being the whole truth for
+    ``runner`` steps at S6: the runner is built and tested, and what is missing
+    is the part that decides which repository, worktree and branch to point it
+    at. Saying "not implemented" there would send somebody looking for code that
+    is already written.
+    """
 
-    def __init__(self, step_type: StepType, owner: str) -> None:
+    __slots__ = ("_owner", "_step_type", "_why")
+
+    def __init__(
+        self, step_type: StepType, owner: str, *, why: str = "are not implemented yet"
+    ) -> None:
         self._step_type = step_type
         self._owner = owner
+        self._why = why
 
     async def __call__(self, ctx: StepContext) -> HandlerOutcome:
         raise StepFailure(
             "step-type-not-implemented",
-            f"{self._step_type.value!r} steps are not implemented yet — {self._owner} adds them",
+            f"{self._step_type.value!r} steps {self._why} — {self._owner} adds them",
             retryable=False,
         )
 
@@ -289,13 +303,48 @@ class HandlerRegistry:
         return handler
 
 
-def default_registry(environ: Mapping[str, str] | None = None) -> HandlerRegistry:
-    """The M1 registry: script runs, the rest say who will implement them."""
+def default_registry(
+    environ: Mapping[str, str] | None = None,
+    *,
+    agent: StepHandler | None = None,
+    runner: StepHandler | None = None,
+    approval: StepHandler | None = None,
+) -> HandlerRegistry:
+    """The M1 registry: script runs, and the rest refuse unless supplied.
+
+    The keyword arguments are how a composed system wires the handlers whose
+    dependencies live outside the engine — ``clawdence.agent.AgentHandler`` needs
+    a model port, ``clawdence.runners.RunnerHandler`` needs a runner and a
+    dispatch. Passed in rather than imported, because the engine depending on
+    either package would invert the layering that lets a step type arrive as one
+    registration.
+
+    Omitting one keeps the refusal, and the refusal names the step that will
+    supply what is missing. That default is the load-bearing part: a stub
+    returning success would make a workflow look like it ran, which is the most
+    expensive possible way to be wrong about an orchestrator.
+    """
     return HandlerRegistry(
         {
             StepType.SCRIPT: ScriptHandler(environ),
-            StepType.AGENT: UnimplementedHandler(StepType.AGENT, "S12"),
-            StepType.RUNNER: UnimplementedHandler(StepType.RUNNER, "S6"),
-            StepType.APPROVAL: UnimplementedHandler(StepType.APPROVAL, "S17"),
+            StepType.AGENT: agent
+            or UnimplementedHandler(
+                StepType.AGENT,
+                "S12",
+                why=(
+                    "have an implementation (clawdence.agent.AgentHandler) but no model "
+                    "provider was wired into this registry"
+                ),
+            ),
+            StepType.RUNNER: runner
+            or UnimplementedHandler(
+                StepType.RUNNER,
+                "a `runner:` section in config.yaml",
+                why=(
+                    "have an implementation (clawdence.runners.RunnerHandler) but this "
+                    "registry was built without one wired in"
+                ),
+            ),
+            StepType.APPROVAL: approval or UnimplementedHandler(StepType.APPROVAL, "S17"),
         }
     )

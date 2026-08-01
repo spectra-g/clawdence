@@ -112,6 +112,34 @@ class TestInjectionResistance:
         assert expand("${a.json.text}", a={"text": "one\ntwo"}) == "one\ntwo"
 
 
+class TestWrapping:
+    """``wrap`` marks a substituted value alone — never the surrounding
+    template, which is the caller's own words and not something this function
+    should treat as data. ``runners.handler`` is the one caller that passes
+    this, to fence a plan's untrusted spans without also fencing the workflow
+    author's own instructions around them."""
+
+    def test_wrap_applies_to_the_substituted_value_only(self) -> None:
+        wrapped = interp.expand(
+            "before ${a.json.text} after",
+            resolver_for(a={"text": "middle"}),
+            wrap=lambda value: f"<<{value}>>",
+        )
+        assert wrapped == "before <<middle>> after"
+
+    def test_wrap_is_not_applied_when_there_is_no_placeholder(self) -> None:
+        wrapped = interp.expand("plain text", resolver_for(), wrap=lambda value: f"<<{value}>>")
+        assert wrapped == "plain text"
+
+    def test_each_placeholder_is_wrapped_independently(self) -> None:
+        wrapped = interp.expand(
+            "${a.json.x}-${a.json.y}",
+            resolver_for(a={"x": "1", "y": "2"}),
+            wrap=lambda value: f"[{value}]",
+        )
+        assert wrapped == "[1]-[2]"
+
+
 class TestEscaping:
     def test_double_dollar_is_a_literal_brace(self) -> None:
         assert expand("$${a.json.x}", a={"x": 1}) == "${a.json.x}"

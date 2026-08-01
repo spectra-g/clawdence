@@ -48,6 +48,46 @@ with them.
 
 GitHub Actions are pinned by commit SHA with the tag in a trailing comment. Keep both in sync.
 
+## Writing an adapter
+
+Everything the system talks to goes through a port in
+[`src/clawdence/ports/`](src/clawdence/ports/), and every adapter has to pass the contract suite
+in `tests/ports/contract.py`. Subclass the contract for your port, name the subclass `Test…`, and
+override the one fixture that builds your adapter:
+
+```python
+class TestMyTracker(TrackerContract):
+    @pytest.fixture
+    def tracker(self) -> TrackerPort:
+        return MyTracker(...)
+```
+
+```sh
+make contract-tests    # every adapter, wherever it lives
+```
+
+The contract does not weaken to accommodate a slower implementation. An obligation that holds only
+for the fakes is an obligation nothing real meets. If your adapter genuinely cannot satisfy one —
+as `NullTracker` cannot, because it stores nothing — say so in its docstring and hold it to
+`NullAdapterContract` instead.
+
+## Tests do not touch the network
+
+The suite runs with TCP and DNS blocked. If you need a socket, mark the test
+`@pytest.mark.allow_network` and justify it in the docstring — the exceptions are meant to be
+countable. Everything else uses a fake from `clawdence.ports`, a fixture repository from
+`tests.harness.repos`, or a cassette.
+
+LLM interactions are recorded. Replay is the default and **a cassette miss is an error, never a
+live call** — so a changed prompt fails with instructions rather than quietly spending money.
+Re-record deliberately:
+
+```sh
+make record    # CLAWDENCE_CASSETTE=record; needs credentials, costs money
+```
+
+Cassettes are committed and redacted on write. Review the diff before committing one.
+
 ## The domain model and `schemas/`
 
 `src/clawdence/domain/` is the single source for both the Python types and the JSON Schema in

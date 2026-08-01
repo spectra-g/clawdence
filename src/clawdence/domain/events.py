@@ -59,6 +59,13 @@ class EventKind(StrEnum):
     HALTED_FOR_HUMAN = "halted_for_human"
     DEGRADED = "degraded"
 
+    EXTERNAL_EFFECT_ENQUEUED = "external_effect.enqueued"
+    EXTERNAL_EFFECT_CLAIMED = "external_effect.claimed"
+    EXTERNAL_EFFECT_RETRY_SCHEDULED = "external_effect.retry_scheduled"
+    EXTERNAL_EFFECT_DELIVERED = "external_effect.delivered"
+    EXTERNAL_EFFECT_PARKED = "external_effect.parked"
+    EXTERNAL_EFFECT_RETRIED = "external_effect.retried"
+
 
 class ActorKind(StrEnum):
     """Whether a human, a model, or the system itself did the thing.
