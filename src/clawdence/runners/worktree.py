@@ -40,12 +40,14 @@ from pathlib import Path
 
 from clawdence.domain import DiffStat
 from clawdence.vcs.git import (
+    BASE_ENV,
     DEFAULT_IDENTITY,
     GitError,
     GitIdentity,
     exclude,
     git,
     head,
+    with_identity,
 )
 
 __all__ = [
@@ -192,24 +194,21 @@ async def commit_all(
     reports what it did, and ``diff_stat`` against the base is what decides
     whether the run produced anything.
 
-    Identity travels as ``-c`` overrides rather than ``git config`` writes,
-    because writing config mutates the repository to record who we are, and the
-    worktree is somebody else's repository.
+    Identity travels in the one-process environment rather than through a
+    ``git config`` write, because writing config mutates the repository to
+    record who we are, and the worktree is somebody else's repository.
     """
     if not await pending_changes(worktree):
         return None
     await git(worktree, "add", "--all")
     await git(
         worktree,
-        "-c",
-        f"user.name={identity.name}",
-        "-c",
-        f"user.email={identity.email}",
         "commit",
         "--no-verify",
         "--no-gpg-sign",
         "--message",
         message,
+        env=with_identity(BASE_ENV, identity),
     )
     return await head(worktree)
 

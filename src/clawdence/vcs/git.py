@@ -101,6 +101,31 @@ BASE_ENV: Final[Mapping[str, str]] = {
     "GIT_OPTIONAL_LOCKS": "0",
 }
 
+
+def with_identity(
+    environment: Mapping[str, str] = BASE_ENV,
+    identity: GitIdentity = DEFAULT_IDENTITY,
+) -> dict[str, str]:
+    """Add a deterministic Git identity without overriding an explicit one.
+
+    Git synthesises an identity from the OS account when neither config nor
+    environment supplies one. That happens to work on many developer machines,
+    but CI service accounts commonly have an empty full name and ``commit-tree``
+    then fails with ``empty ident name``. Global config cannot be the fallback:
+    this module deliberately disables it as part of its hardening.
+
+    Author values already selected by a caller win. Missing committer values
+    follow that author, which is Git's normal default and preserves callers that
+    deliberately attribute a commit to an identity other than the runner.
+    """
+    selected = dict(environment)
+    selected.setdefault("GIT_AUTHOR_NAME", identity.name)
+    selected.setdefault("GIT_AUTHOR_EMAIL", identity.email)
+    selected.setdefault("GIT_COMMITTER_NAME", selected["GIT_AUTHOR_NAME"])
+    selected.setdefault("GIT_COMMITTER_EMAIL", selected["GIT_AUTHOR_EMAIL"])
+    return selected
+
+
 #: Username half of the basic-auth pair. GitHub ignores it for a personal access
 #: token and requires exactly this for an app installation token, so it is the
 #: one value that works for both.
@@ -146,8 +171,10 @@ async def git(
     developer machine, where pinning it is friction with no reader.
 
     ``env`` replaces the environment rather than extending it, and defaults to
-    ``BASE_ENV``. Callers that need a remote pass ``authenticated(...)``'s value,
-    which is ``BASE_ENV`` with one variable changed.
+    ``BASE_ENV``. A missing author/committer gets ``DEFAULT_IDENTITY`` because
+    global config is deliberately unavailable; explicit values are preserved.
+    Callers that need a remote pass ``authenticated(...)``'s value, which is
+    ``BASE_ENV`` with one variable changed.
 
     ``stdin`` is for the batch plumbing — ``cat-file --batch-check`` answers a
     hundred questions in one process, and asking them one at a time is a hundred
@@ -155,13 +182,14 @@ async def git(
     from an inherited terminal is a run that hangs.
     """
     argv = (path or "git", *HARDENING, *args)
+    selected_env = with_identity(BASE_ENV if env is None else env)
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=dict(BASE_ENV if env is None else env),
+        env=selected_env,
     )
     raw_out, raw_err = await process.communicate(None if stdin is None else stdin.encode("utf-8"))
     if process.returncode != 0:

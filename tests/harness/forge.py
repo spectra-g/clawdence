@@ -63,6 +63,7 @@ adapter runs ``gh`` with an environment it built itself, and whether a
 ``python3`` happens to be on that PATH is not what these tests are about.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -77,8 +78,24 @@ def die(message, code=1):
 
 
 def git(*args):
+    env = dict(os.environ)
+    env.update(
+        GIT_AUTHOR_NAME="Clawdence Forge",
+        GIT_AUTHOR_EMAIL="forge@clawdence.invalid",
+        GIT_AUTHOR_DATE="2026-01-01T00:00:00+00:00",
+        GIT_COMMITTER_NAME="Clawdence Forge",
+        GIT_COMMITTER_EMAIL="forge@clawdence.invalid",
+        GIT_COMMITTER_DATE="2026-01-01T00:00:00+00:00",
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_SYSTEM="/dev/null",
+        GIT_TERMINAL_PROMPT="0",
+    )
     done = subprocess.run(
-        ["git", "--git-dir", str(REMOTE), *args], capture_output=True, text=True, check=False
+        ["git", "--git-dir", str(REMOTE), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return done.stdout.strip() if done.returncode == 0 else None
 

@@ -267,6 +267,10 @@ def test_the_merge_method_comes_from_the_profile(
     )
     assert merged.state is PullRequestState.MERGED
     assert "(merge)" in run(git(forge.remote, "log", "-1", "--format=%s", "refs/heads/main"))
+    assert (
+        run(git(forge.remote, "log", "-1", "--format=%an <%ae>", "refs/heads/main"))
+        == "Clawdence Forge <forge@clawdence.invalid>"
+    )
 
 
 # ------------------------------------------------------------------- wiring

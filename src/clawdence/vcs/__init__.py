@@ -63,6 +63,7 @@ from clawdence.vcs.git import (
     GitIdentity,
     authenticated,
     origin_of,
+    with_identity,
 )
 from clawdence.vcs.hygiene import (
     DEFAULT_MAX_FILE_BYTES,
@@ -151,4 +152,5 @@ __all__ = [
     "render_body",
     "repo_slug",
     "slugify",
+    "with_identity",
 ]

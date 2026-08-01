@@ -161,6 +161,34 @@ def test_the_operators_own_git_config_is_ignored() -> None:
     assert g.BASE_ENV["GIT_TERMINAL_PROMPT"] == "0"
 
 
+def test_commit_plumbing_has_an_identity_without_git_config(origin: FixtureRepo) -> None:
+    """CI accounts often have no full name for Git to infer.
+
+    Global and system config are deliberately disabled, so the wrapper itself
+    supplies the honest non-person identity used by low-level ``commit-tree``
+    calls as well as ordinary commits.
+    """
+    parent = run(g.git(origin.path, "rev-parse", "HEAD"))
+    tree = run(g.git(origin.path, "rev-parse", "HEAD^{tree}"))
+    commit = run(g.git(origin.path, "commit-tree", tree, "-p", parent, "-m", "plumbing"))
+
+    assert (
+        run(g.git(origin.path, "show", "-s", "--format=%an <%ae>|%cn <%ce>", commit))
+        == "Clawdence runner <runner@clawdence.invalid>|"
+        "Clawdence runner <runner@clawdence.invalid>"
+    )
+
+
+def test_an_explicit_author_also_becomes_the_committer() -> None:
+    selected = g.with_identity(
+        {**g.BASE_ENV, "GIT_AUTHOR_NAME": "Chosen", "GIT_AUTHOR_EMAIL": "chosen@example.invalid"}
+    )
+
+    assert selected["GIT_AUTHOR_NAME"] == "Chosen"
+    assert selected["GIT_COMMITTER_NAME"] == "Chosen"
+    assert selected["GIT_COMMITTER_EMAIL"] == "chosen@example.invalid"
+
+
 def test_the_hardening_names_every_config_that_executes_something() -> None:
     """Each of these is a way repository-local configuration gets git to run a
     program: two run one outright, and the third lets a URL name one."""
