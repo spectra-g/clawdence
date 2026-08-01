@@ -17,6 +17,7 @@ from clawdence.domain import (
 from clawdence.engine import StepContext, StepFailure
 from clawdence.ports import FakeRunner, PermanentError, TransientError
 from clawdence.runners import Dispatch, RunnerHandler
+from clawdence.runners.plan import FENCE, FENCE_END
 from tests.engine.factories import RUN_ID, resolver_for, run
 from tests.ports import factories as make
 from tests.runners.conftest import host_profile
@@ -94,7 +95,23 @@ def test_the_plan_is_interpolated_from_an_earlier_stage() -> None:
     runner = FakeRunner(default=make.runner_result())
     step = handler(runner, plan="${plan.json.text}")
     run(step(context(RunnerStage(id="code"), plan={"text": "rewrite the parser"})))
-    assert runner.dispatched[0].plan == "rewrite the parser"
+    plan = runner.dispatched[0].plan
+    assert "rewrite the parser" in plan
+    assert FENCE in plan
+    assert FENCE_END in plan
+
+
+def test_only_the_substituted_value_is_marked_untrusted() -> None:
+    """The template around a placeholder is the workflow author's own
+    instructions, not something to fence alongside whatever an earlier stage
+    produced."""
+    runner = FakeRunner(default=make.runner_result())
+    step = handler(runner, plan="Do the smallest thing that satisfies:\n${plan.json.text}")
+    run(step(context(RunnerStage(id="code"), plan={"text": "add logging"})))
+    plan = runner.dispatched[0].plan
+    assert plan.startswith("Do the smallest thing that satisfies:\n")
+    assert FENCE in plan
+    assert "add logging" in plan
 
 
 def test_an_unresolvable_plan_is_permanent() -> None:

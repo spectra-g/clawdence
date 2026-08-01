@@ -27,7 +27,7 @@ Escaping: ``$${`` is a literal ``${``.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from clawdence.engine.errors import InterpolationError
 from clawdence.engine.refs import MISSING, Reference, Resolved, Resolver
@@ -53,13 +53,22 @@ def references(template: str) -> tuple[Reference, ...]:
     return tuple(reference for _, _, reference in _placeholders(template))
 
 
-def expand(template: str, resolver: Resolver) -> str:
-    """Replace every placeholder with the string form of what it names."""
+def expand(template: str, resolver: Resolver, *, wrap: Callable[[str], str] | None = None) -> str:
+    """Replace every placeholder with the string form of what it names.
+
+    ``wrap``, when given, is applied to each substituted value alone — never to
+    the surrounding template text. The template is the caller's own words; what
+    a placeholder resolves to is whatever an earlier stage produced, and only
+    the runner's plan builder has a reason to tell those apart (marking the
+    latter as untrusted content without also marking the former, which is not
+    an equivalent claim to make about a workflow author's own instructions).
+    """
     out: list[str] = []
     cursor = 0
     for start, end, reference in _placeholders(template):
         out.append(template[cursor:start].replace(_ESCAPED_OPEN, _OPEN))
-        out.append(_stringify(resolver.resolve(reference), reference))
+        value = _stringify(resolver.resolve(reference), reference)
+        out.append(value if wrap is None else wrap(value))
         cursor = end
     out.append(template[cursor:].replace(_ESCAPED_OPEN, _OPEN))
     return "".join(out)

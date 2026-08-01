@@ -355,9 +355,25 @@ class AgentRunner(ABC):
         if tier is not self.tier:
             raise PermanentError(
                 "isolation-tier-mismatch",
-                f"{request.profile.name!r} asks for {tier.value!r} isolation and this runner "
-                f"provides {self.tier.value!r} — refusing rather than quietly substituting one "
-                f"for the other",
+                f"the repository profile for {request.profile.name!r} sets isolation_tier to "
+                f"{tier.value!r}, but this deployment's runner.tier (in the deployment config) "
+                f"is {self.tier.value!r} — refusing rather than quietly running it under "
+                f"stronger or weaker containment than its profile asks for. The two must agree: "
+                f"either change runner.tier to {tier.value!r} in the deployment config"
+                + (
+                    " (a container tier also needs runner.image set)"
+                    if tier is not IsolationTier.HOST
+                    else ""
+                )
+                + f", or change isolation_tier to {self.tier.value!r} in this repository's "
+                f"profile"
+                + (
+                    " — which means its agent runs unsandboxed, as the control-plane user, "
+                    "on this machine"
+                    if self.tier is IsolationTier.HOST
+                    else ""
+                )
+                + ".",
             )
 
         if request.budget.max_usd is not None and self._command.prices is None:
@@ -500,11 +516,21 @@ class AgentRunner(ABC):
         repository's. That is the price of the conventions file being installed
         at all, and it is paid only on repositories that track a file at the
         same path.
+
+        ``agents_md_path`` is repo-relative — it names a path inside the
+        checkout, the same way ``profile.install_command`` names a command run
+        inside it, not a path on the control plane's own filesystem. It has to
+        be resolved against *this run's* worktree rather than the runner
+        process's working directory: those are different directories on every
+        run, and reading it relative to the latter is reading whatever
+        unrelated file happens to sit at that path in wherever the operator
+        invoked ``clawdence`` from — silently installing nothing, or worse,
+        installing something that is not this repository's.
         """
         source_path = request.profile.agents_md_path
         if source_path is None:
             return None
-        source = Path(source_path)
+        source = installed.worktree / source_path
         if not source.is_file():
             return None
 
@@ -680,7 +706,7 @@ class AgentRunner(ABC):
 
         timed_out = False
         try:
-            await asyncio.wait_for(self._drive(process, feed, watcher), timeout=limit)
+            await asyncio.wait_for(self._drive(process, feed, watcher, phase), timeout=limit)
         except TimeoutError:
             timed_out = True
             await self._halt(request, phase, process)
@@ -749,8 +775,8 @@ class AgentRunner(ABC):
         reported is the arrival time of the newest line, not now, and a poll that
         has heard nothing new since the last one reports nothing at all. A timer
         that beat regardless would make a wedged run look healthy for as long as
-        it stayed wedged, which is the exact reporting Warren's incident had and
-        the reason §3.11 asks for a second detector rather than a second budget.
+        it stayed wedged, which is the exact failure mode §3.11 asks for a second
+        detector to catch, rather than a second budget.
 
         **A control plane that cannot be reached does not fail a run.** Steering
         is an improvement on a run that is otherwise working; killing work in
@@ -794,6 +820,7 @@ class AgentRunner(ABC):
         process: asyncio.subprocess.Process,
         feed: str | None,
         watcher: _Watcher,
+        phase: Phase,
     ) -> None:
         """Write the prompt and read both streams, all at once.
 
@@ -802,9 +829,15 @@ class AgentRunner(ABC):
         child reads it, and a child that does not read until it has printed
         something blocks on the write. Sequential code deadlocks on a long plan
         and works on every short one, which is the worst way for a bug to behave.
+
+        ``phase`` is carried onto every line this reads, not just kept beside
+        the call. A repository's own install command prints its own success
+        banner — Maven says ``BUILD SUCCESS`` for a dependency-resolution goal
+        that never touched the agent — and a sink that cannot tell setup output
+        from agent output reads that banner as the coding CLI's.
         """
         readers = [
-            pump(reader, name, on_line=watcher.line, clock=self._clock)
+            pump(reader, name, on_line=watcher.line, clock=self._clock, phase=phase.value)
             for reader, name in ((process.stdout, Stream.STDOUT), (process.stderr, Stream.STDERR))
             if reader is not None
         ]
@@ -1109,8 +1142,16 @@ class AgentRunner(ABC):
         This string is persisted with the step result. Stderr is where a
         provider's echo of a rejected request ends up, and an echoed request
         contains whatever was in it — so the tail is opt-in, and off.
+
+        The first part explains the outcome rather than just naming it, for the
+        band where the name alone does not say what to conclude: the process
+        exited cleanly, so the question is what it left behind, and "dropped
+        commit" or "empty diff" is a verdict a reader has to already know this
+        taxonomy to parse. The caller prefixes this with ``runner-{outcome}``
+        (``handler.py``), so repeating the bare enum value here would say the
+        same thing twice and explain nothing extra.
         """
-        parts = [outcome.value]
+        parts = [_EXPLANATIONS.get(outcome, outcome.value)]
         if completion.startup_error is not None:
             parts.append(completion.startup_error)
         elif completion.setup_error is not None:
@@ -1139,6 +1180,30 @@ class AgentRunner(ABC):
 #: Contracts whose definition of done is passing tests. For these, and only
 #: these, an absent verdict means the same thing as a failing one.
 _NEEDS_EVIDENCE: Final = frozenset({ContractKind.OUTSIDE_IN_TDD, ContractKind.TEST_AFTER})
+
+#: Explanations for band 5 — see ``outcome.classify`` — where the process
+#: exited zero and the outcome is a judgement about what it produced rather
+#: than a report of what went wrong. Every other band's name (``timed-out``,
+#: ``budget-exceeded``, ``oom-killed``, ...) already says what happened; these
+#: four don't, without already knowing the taxonomy that names them.
+_EXPLANATIONS: Final[Mapping[RunnerOutcome, str]] = {
+    RunnerOutcome.DROPPED_COMMIT: (
+        "the agent finished and left changes in the tree but never ran `git commit` "
+        "on them; clawdence committed them anyway so the work is not lost — that commit "
+        "is what any pull request here is built from — but an agent that does not commit "
+        "its own work cannot be trusted to have considered it finished, so this is "
+        "flagged rather than treated as a plain success. Read the diff yourself"
+    ),
+    RunnerOutcome.EMPTY_DIFF: (
+        "the agent left the working tree clean and committed nothing — as far as git is "
+        "concerned, this run made no changes"
+    ),
+    RunnerOutcome.BLOCKED: (
+        "the agent (or its setup step) reported it could not proceed, and retrying with "
+        "the same request is expected to fail the same way"
+    ),
+    RunnerOutcome.TESTS_FAILED: "the evidence attached to this run says the tests do not pass",
+}
 
 #: Outcomes that leave a tree worth naming. ``DROPPED_COMMIT`` is here because
 #: the runner's safety commit means the work exists: the agent never claimed it,

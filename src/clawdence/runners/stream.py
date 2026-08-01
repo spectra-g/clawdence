@@ -67,6 +67,19 @@ class LogLine:
     text: str
     at: datetime
 
+    #: Which of a run's two processes this came from — ``"setup"`` or
+    #: ``"agent"`` (``runners.agent.Phase``'s values, taken as a plain string
+    #: rather than the enum itself: that enum lives in ``agent``, which imports
+    #: this module, and a run's two phases are the same shape of fact wherever
+    #: they are read from). ``None`` for a line nobody attributed to a phase,
+    #: which every caller but the runner is.
+    #:
+    #: Without this a sink cannot say which process is talking, and a
+    #: repository's own install output — which prints its own "BUILD SUCCESS"
+    #: banner for a dependency-resolution goal that never touched the agent —
+    #: reads exactly like the agent's own work.
+    phase: str | None = None
+
 
 #: Where live output goes. Called once per line, in arrival order.
 #:
@@ -84,7 +97,8 @@ def write_to(target: TextIO, *, prefix: str = "") -> LogSink:
     """
 
     def sink(line: LogLine) -> None:
-        target.write(f"{prefix}{line.text}\n")
+        tag = f"[{line.phase}] " if line.phase else ""
+        target.write(f"{prefix}{tag}{line.text}\n")
         target.flush()
 
     return sink
@@ -233,6 +247,7 @@ async def pump(
     on_line: Callable[[LogLine], None],
     clock: Clock = utc_now,
     chunk_size: int = 4096,
+    phase: str | None = None,
 ) -> None:
     """Read a subprocess stream to EOF, delivering it a line at a time.
 
@@ -256,23 +271,26 @@ async def pump(
             index = buffer.find(b"\n")
             if index != -1 and index <= MAX_LINE_BYTES:
                 raw, buffer = bytes(buffer[:index]), buffer[index + 1 :]
-                on_line(_line(raw, stream, clock))
+                on_line(_line(raw, stream, clock, phase=phase))
             elif len(buffer) > MAX_LINE_BYTES:
                 # A newline exists but is past the limit, or there is none at
                 # all. Either way the cap wins: the alternative is holding an
                 # unbounded line in memory in the hope that one turns up.
                 raw, buffer = bytes(buffer[:MAX_LINE_BYTES]), buffer[MAX_LINE_BYTES:]
-                on_line(_line(raw, stream, clock, truncated=True))
+                on_line(_line(raw, stream, clock, truncated=True, phase=phase))
             else:
                 break
     if buffer:
-        on_line(_line(bytes(buffer), stream, clock))
+        on_line(_line(bytes(buffer), stream, clock, phase=phase))
 
 
-def _line(raw: bytes, stream: Stream, clock: Clock, *, truncated: bool = False) -> LogLine:
+def _line(
+    raw: bytes, stream: Stream, clock: Clock, *, truncated: bool = False, phase: str | None = None
+) -> LogLine:
     text = raw.decode("utf-8", errors="replace").rstrip("\r")
     return LogLine(
         stream=stream,
         text=text + " […]" if truncated else text,
         at=clock(),
+        phase=phase,
     )

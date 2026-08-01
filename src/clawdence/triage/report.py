@@ -25,7 +25,7 @@ from clawdence.triage.routing import Routed
 _BULLET = "·"
 
 
-def render_routing(routed: Routed, *, title: str | None = None) -> str:
+def render_routing(routed: Routed, *, title: str | None = None, ref: str | None = None) -> str:
     """One work item's routing, decision first."""
     lines = [f"{routed.work_item_id}  {title}" if title else routed.work_item_id, ""]
 
@@ -46,6 +46,8 @@ def render_routing(routed: Routed, *, title: str | None = None) -> str:
 
     if not routed.routed:
         lines += ["", "  Nothing was started. Nothing has been written."]
+    elif ref is not None:
+        lines += ["", f"  next      clawdence work {ref}"]
     return "\n".join(lines)
 
 
@@ -130,11 +132,15 @@ def render_repo(profile: RepoProfile) -> str:
     return "\n".join(lines)
 
 
-def render_outcome(outcome: Outcome) -> str:
+def render_outcome(outcome: Outcome, *, ref: str | None = None) -> str:
     """What happened to one request, in the order a reader wants it.
 
     The pull request first when there is one, because that is the answer; the
-    refusal first when there is not, because that is the answer instead.
+    refusal first when there is not, because that is the answer instead. A
+    reader who hits a failure should not have to already know that ``runs
+    show`` exists, or that a run which started at all is acknowledged and
+    will not be retried by running ``work`` again — both are said here,
+    at the point they become true.
     """
     routed = outcome.routed
     head = (
@@ -151,6 +157,10 @@ def render_outcome(outcome: Outcome) -> str:
         lines.append(f"  run           {outcome.run_id}")
     if outcome.report is not None and outcome.report.failed_stages:
         lines.append(f"  failed        {', '.join(outcome.report.failed_stages)}")
+        for stage_id in outcome.report.failed_stages:
+            result = outcome.report.final.get(stage_id)
+            if result is not None and result.error is not None:
+                lines.append(f"                {result.error.kind}: {result.error.message}")
     if outcome.refusal is not None:
         lines += ["", f"  {outcome.refusal}"]
     elif outcome.report is not None and outcome.pull_request is None:
@@ -160,4 +170,17 @@ def render_outcome(outcome: Outcome) -> str:
             "  runner step that is the expected shape; for one with a runner step it",
             "  means the agent concluded there was nothing to change.",
         ]
+
+    next_lines: list[str] = []
+    if outcome.run_id is not None and not outcome.succeeded:
+        next_lines = [
+            f"  next          clawdence runs show {outcome.run_id}",
+            "                this request is already acknowledged — a run started, so "
+            "`clawdence work` will not pick it up again even after you fix the cause "
+            "above; submit a new request to retry",
+        ]
+    elif outcome.refusal is not None and outcome.run_id is None and ref is not None:
+        next_lines = [f"  next          fix the above, then `clawdence work {ref}` again"]
+    if next_lines:
+        lines += ["", *next_lines]
     return "\n".join(lines)

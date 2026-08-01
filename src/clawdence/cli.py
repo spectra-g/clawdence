@@ -96,6 +96,7 @@ from clawdence.runners import (
     Cache,
     Reaper,
     Reclaimed,
+    write_to,
 )
 from clawdence.store import (
     Admission,
@@ -996,7 +997,11 @@ def _triage_command(
     else:
         print(
             "\n\n".join(
-                triage.render_routing(routed, title=admission.item.title)
+                triage.render_routing(
+                    routed,
+                    title=admission.item.title,
+                    ref=admission.item.source_ref.external_id,
+                )
                 for routed, admission in zip(decisions, admissions, strict=True)
             )
         )
@@ -1030,7 +1035,12 @@ def _work_command(
         secrets_provider = triage.secrets_for(deployment)
         repo_store = triage.repo_store(deployment, secrets_provider)
         runner = (
-            triage.runner(deployment.config.runner, secrets_provider)
+            triage.runner(
+                deployment.config.runner,
+                secrets_provider,
+                sink=write_to(sys.stdout, prefix="  │ "),
+                repo_store=deployment.repo_store,
+            )
             if deployment.config.runner is not None
             else None
         )
@@ -1056,9 +1066,35 @@ def _work_command(
             handlers=_agent_handler(),
         )
         for admission in admissions:
-            outcome = asyncio.run(pipeline.start(admission.item))
+            # Printed before the run starts, not just in the outcome at the
+            # end, because the run is the expensive part: a request that
+            # routed by elimination rather than by content — the "only
+            # repository configured" case — is a mistake worth seeing before
+            # minutes are spent on it, not after.
+            routed = triage.route(
+                admission.item,
+                profiles=deployment.profiles,
+                policy=deployment.config.routing,
+            )
+            print(triage.render_routing(routed, title=admission.item.title, ref=None))
+            print()
+
+            # Minted only once routing has somewhere to send it — an unrouted
+            # item opens no run (see ``Pipeline.start``), and printing "starting
+            # run.xxx" right under "Nothing was started" would say both at once.
+            run_id = f"run.{secrets.token_hex(6)}" if routed.routed else None
+            if run_id is not None:
+                # Minted before the potentially long-running call below, so
+                # there is something to watch it with immediately rather than
+                # only after it finishes — a runner step can run for minutes,
+                # and `work` prints nothing else in that time.
+                print(
+                    f"{admission.item.id}  starting {run_id}\n"
+                    f"  clawdence runs show {run_id}   (in another terminal, to watch progress)"
+                )
+            outcome = asyncio.run(pipeline.start(admission.item, run_id=run_id))
             triage.acknowledge(intake, outcome)
-            print(triage.render_outcome(outcome))
+            print(triage.render_outcome(outcome, ref=admission.item.source_ref.external_id))
             if outcome.refusal is not None:
                 status = max(status, 2)
             elif not outcome.succeeded:

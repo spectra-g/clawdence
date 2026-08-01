@@ -16,8 +16,27 @@ filesystem the process runs on. The plan's verification asks for that to be
 asserted from *inside* a container rather than from the argv we built, which is
 what ``tests/runners/test_container_live.py`` does. The second mount, added with
 S7's caching, is this repository's own package-manager cache — artefacts this
-system downloaded on its behalf, not another checkout — and it is the one thing
-in the container that outlives the run on purpose.
+system downloaded on its behalf, not another checkout — and it, and the mirror
+below, are the only things in the container that outlive the run on purpose.
+
+**The mirror, when this deployment is told where one lives.** ``vcs.worktrees``
+checks the worktree out with ``git worktree add``, which is what lets a commit
+made here update ``refs/heads/<branch>`` with no push and no second copy of the
+object store — but a linked worktree's own ``.git`` is a pointer, not a
+directory: ``HEAD``, the index, and the ref itself physically live under
+``<mirror>/.git/worktrees/<run-id>``, and every object a commit creates lands in
+``<mirror>/.git/objects``, deliberately kept outside the worktree bind mount so
+the reaper never finds it (``vcs.worktrees``'s module docstring). Mount only the
+worktree and the cache, as the first cut of this runner did, and ``git commit``
+has nowhere to write those three things — it fails inside the container exactly
+as it would inside any sandbox that takes "stay inside the worktree" literally,
+which is what the constraint in ``runners.plan`` tells the agent to do. The
+mirror mount closes that: same repository, same object store the worktree
+already reads from, and — unlike the cache — nothing this container did not
+already have full read access to through the worktree's own shared history.
+What widens is what the agent may *corrupt*, not what it may *see*; a run has
+always been free to destroy its own worktree (§3.1's accepted risk), and this
+extends that to the one other place a commit in it has to write.
 
 **Two containers, not one.** A run installs the repository's dependencies before
 it runs an agent, and it does so in a container of its own: same image, same
@@ -104,6 +123,7 @@ from clawdence.runners.engine import (
 from clawdence.runners.installed import HOME_DIR, Installed
 from clawdence.runners.outcome import Completion
 from clawdence.runners.stream import LogSink
+from clawdence.vcs.store import mirror_name
 
 #: Canonical host-side home for worktrees, from §3.3. Nothing here enforces it —
 #: the runner mounts whatever path it is given, at that same path — but S11
@@ -165,6 +185,7 @@ class ContainerRunner(AgentRunner):
         "_images",
         "_network",
         "_read_only_rootfs",
+        "_repo_store",
         "_tmpfs_mb",
         "_user",
     )
@@ -189,6 +210,7 @@ class ContainerRunner(AgentRunner):
         tmpfs_mb: int = 512,
         allow_unpinned_image: bool = False,
         cache: Cache | None = None,
+        repo_store: Path | None = None,
     ) -> None:
         super().__init__(
             command,
@@ -208,6 +230,12 @@ class ContainerRunner(AgentRunner):
         self._read_only_rootfs = read_only_rootfs
         self._tmpfs_mb = tmpfs_mb
         self._allow_unpinned_image = allow_unpinned_image
+        # ``vcs.WorktreeManager``'s own root (``Paths.repo_store``). Optional
+        # because a caller that never wires it — most of this module's own test
+        # suite, which runs agents that never call ``git commit`` at all — gets
+        # exactly today's two mounts; a deployment built through
+        # ``triage.wiring`` gets the third.
+        self._repo_store = repo_store
         # Files land on a host bind mount, so they land owned by whoever the
         # container ran as. Root-owned files in a worktree the control plane then
         # runs git in is not a theoretical tidiness problem: it is the next run
@@ -368,20 +396,22 @@ class ContainerRunner(AgentRunner):
     # -------------------------------------------------------------- plumbing
 
     def _mounts(self, request: RunnerRequest, worktree: Path) -> tuple[Mount, ...]:
-        """The worktree, and the dependency cache if this repository has one.
+        """The worktree, the dependency cache if this repository has one, and
+        the repository's own mirror if this deployment says where it lives.
 
-        Two mounts is still "one mount plus the cache" rather than a widening of
-        §3.1's boundary, and the difference is what is on the other end: the
-        cache directory holds artefacts this system downloaded on this
-        repository's behalf, it is not another repository, and it contains
-        nothing the control plane would mind the agent reading. What it *is* is
-        writable and shared between runs of the same repo, which is why
-        ``RepoProfile.max_concurrent_runs`` defaults to one.
+        Mounted at the same absolute path it has on the host, like the worktree
+        and the cache — not tidiness. The worktree's ``.git`` is a pointer
+        ``vcs.worktrees`` wrote with that host path baked into it (§3.3's path
+        identity, one more time): a different path inside the container and git
+        cannot follow the pointer at all, which reads as "not a git repository"
+        rather than as a permission problem.
         """
         mounts = [Mount(source=worktree)]
         plan = self._cache_plan(request)
         if plan is not None:
             mounts.append(Mount(source=plan.directory))
+        if self._repo_store is not None:
+            mounts.append(Mount(source=self._repo_store / mirror_name(request.profile.id)))
         return tuple(mounts)
 
     def _never_started(self, completion: Completion) -> Completion:

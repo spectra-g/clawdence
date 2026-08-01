@@ -215,6 +215,7 @@ class DockerSocketRunner(ContainerRunner):
         tmpfs_mb: int = 512,
         allow_unpinned_image: bool = False,
         cache: Cache | None = None,
+        repo_store: Path | None = None,
         socket_path: str = DOCKER_SOCKET,
         host_alias: str = HOST_ALIAS,
         socket_group: str | None = None,
@@ -237,6 +238,7 @@ class DockerSocketRunner(ContainerRunner):
             tmpfs_mb=tmpfs_mb,
             allow_unpinned_image=allow_unpinned_image,
             cache=cache,
+            repo_store=repo_store,
         )
         self._socket = Path(socket_path)
         self._host_alias = host_alias

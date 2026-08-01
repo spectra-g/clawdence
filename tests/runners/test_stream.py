@@ -115,6 +115,29 @@ def test_write_to_flushes_every_line() -> None:
     assert target.getvalue() == "runner| working\n"
 
 
+def test_write_to_tags_the_phase_when_one_is_given() -> None:
+    """Without this, a repository's own install output — which prints its own
+    success banner for a step that never touched the agent — reads exactly
+    like the agent's own work."""
+    target = io.StringIO()
+    sink = write_to(target, prefix="runner| ")
+    sink(LogLine(stream=Stream.STDOUT, text="BUILD SUCCESS", at=AT, phase="setup"))
+    assert target.getvalue() == "runner| [setup] BUILD SUCCESS\n"
+
+
+def test_pump_attributes_every_line_to_the_phase_it_was_given() -> None:
+    lines: list[LogLine] = []
+
+    async def drive() -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"one\ntwo\n")
+        reader.feed_eof()
+        await pump(reader, Stream.STDOUT, on_line=lines.append, clock=lambda: AT, phase="agent")
+
+    run(drive())
+    assert [line.phase for line in lines] == ["agent", "agent"]
+
+
 # --------------------------------------------------------------------------- #
 # TokenTally
 # --------------------------------------------------------------------------- #

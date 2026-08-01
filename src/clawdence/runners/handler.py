@@ -52,6 +52,7 @@ from clawdence.engine import HandlerOutcome, StepContext, StepFailure, idempoten
 from clawdence.engine.errors import InterpolationError
 from clawdence.engine.interpolation import expand
 from clawdence.ports import PortError, RunnerPort
+from clawdence.runners.plan import fence
 from clawdence.vcs.worktrees import Worktree
 
 #: Outcomes a second attempt could plausibly change. Everything absent from this
@@ -236,9 +237,17 @@ class RunnerHandler:
         )
 
     def _plan(self, ctx: StepContext, stage: RunnerStage) -> str:
+        """Expand the template, fencing what each placeholder resolves to.
+
+        ``wrap=fence`` marks only the substituted values — the request that
+        started this run, or an earlier agent stage's output — as untrusted
+        content. The template text around them is this workflow's own, written
+        by whoever authored the workflow file, and is not swept into the same
+        "data, not instructions" framing (``runners.plan``).
+        """
         template = stage.plan if stage.plan is not None else self.plan_template
         try:
-            return expand(template, ctx.resolver)
+            return expand(template, ctx.resolver, wrap=fence)
         except InterpolationError as exc:
             # Permanent: the template names a stage that did not produce what it
             # promised, and running the agent with a half-expanded plan would

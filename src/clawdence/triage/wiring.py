@@ -28,6 +28,7 @@ import os
 from collections.abc import Mapping
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 
 from clawdence.domain import IsolationTier
 from clawdence.ports.model import TokenPrice
@@ -38,6 +39,7 @@ from clawdence.runners import (
     AgentCommand,
     ContainerRunner,
     HostRunner,
+    LogSink,
     PlanDelivery,
 )
 from clawdence.triage.config import ConfigError, Deployment, RunnerConfig
@@ -118,6 +120,8 @@ def runner(
     secrets: SecretProvider,
     *,
     environ: Mapping[str, str] | None = None,
+    sink: LogSink | None = None,
+    repo_store: Path | None = None,
 ) -> RunnerPort:
     """The data plane, per the ``runner:`` section.
 
@@ -128,6 +132,23 @@ def runner(
     somebody else's. The socket tiers are reachable only through a repository
     profile that acknowledges them (``RepoProfile`` validates that), so naming one
     here would be the deployment-wide setting §3.2 says must not exist.
+
+    ``sink`` is how a caller watches the agent work as it happens rather than
+    only at the end (``runners.stream``'s reason for existing at all — v1's
+    single most-felt operational problem was a run that showed nothing until
+    it finished). ``None`` here is not "no sink": ``AgentRunner`` always keeps
+    the last ``DEFAULT_TAIL_LINES`` regardless, since a failure report needs
+    something to quote even when nobody was watching live.
+
+    ``repo_store`` is ``Paths.repo_store`` — the caller's, not derived here,
+    because deriving it would mean guessing at a config section this function
+    does not otherwise touch. It is what lets a container tier mount a
+    repository's mirror alongside its worktree, which is what makes ``git
+    commit`` reach the ``.git/worktrees/<run-id>`` a linked worktree's own
+    ``.git`` file points at (``runners.container``). Passing ``None`` — the
+    default — is not a refusal; it is exactly what this function did before the
+    mount existed, kept as the fallback for a caller with no ``paths:`` section
+    to read one from.
     """
     try:
         delivery = PlanDelivery(config.delivery)
@@ -150,7 +171,7 @@ def runner(
     )
 
     if config.tier is IsolationTier.HOST:
-        return HostRunner(command, secrets=secrets, environ=environ)
+        return HostRunner(command, secrets=secrets, environ=environ, sink=sink)
 
     if config.tier is not IsolationTier.CONTAINER:
         raise ConfigError(
@@ -173,6 +194,8 @@ def runner(
         secrets=secrets,
         environ=environ,
         allow_unpinned_image=config.allow_unpinned_image,
+        sink=sink,
+        repo_store=repo_store,
     )
 
 

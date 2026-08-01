@@ -46,6 +46,7 @@ from clawdence.runners import (
     container_name,
 )
 from clawdence.runners import process as process_module
+from clawdence.vcs.store import mirror_name
 from tests.harness.agent import FakeAgent
 from tests.harness.engine import FakeEngine, container_environment, passthrough_names
 from tests.harness.repos import FixtureRepo
@@ -253,6 +254,21 @@ def test_the_worktree_keeps_its_path_inside(
     call = fake_engine.only_run()
     assert call.value("--workdir") == str(repo.path)
     assert f"target={repo.path}" in call.values("--mount")[0]
+
+
+def test_the_mirror_is_mounted_when_this_deployment_says_where_it_lives(
+    request_for: RequestFactory, repo: FixtureRepo, fake_engine: FakeEngine, tmp_path: Path
+) -> None:
+    """Without this mount, ``git commit`` has nowhere to write the ``HEAD``,
+    index and ref a linked worktree keeps in its mirror's own ``.git`` — it
+    fails inside the container exactly as it would inside any sandbox that
+    takes "stay inside the worktree" literally."""
+    profile = container_profile()
+    mirror = tmp_path / mirror_name(profile.id)
+    mirror.mkdir()
+    run(runner_for(fake_engine, repo_store=tmp_path).dispatch(request_for(profile=profile)))
+    mounts = fake_engine.only_run().values("--mount")
+    assert f"type=bind,source={mirror},target={mirror}" in mounts
 
 
 def test_no_docker_socket_reaches_the_container(
