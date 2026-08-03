@@ -94,7 +94,15 @@ class StepResult(DomainModel):
 
     id: StepResultId
     run_id: RunId
+    #: The concrete execution node. At top level this is the declaration id;
+    #: inside fan-out, parallel branches, loops and sub-workflows it is a
+    #: deterministic opaque slug, so two copies of ``code`` are distinct rows.
     stage_id: StageId
+    #: The id written in the workflow. Kept separately for nested executions so
+    #: an opaque execution id never makes the audit trail opaque to a person.
+    definition_id: StageId | None = None
+    #: Human-readable route from the root workflow to this execution.
+    scope: tuple[str, ...] = ()
     type: StepType
     status: StepStatus
 

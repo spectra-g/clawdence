@@ -1,0 +1,35 @@
+# S3b in one executable file: runtime-sized fan-out, a concurrency cap, a
+# per-repository serial key, and the implicit barrier before `join`.
+
+schema_version: 1
+name: composition
+version: 1.0.0
+description: Build three runtime-discovered items, at most two at once, then join.
+
+stages:
+  - id: decompose
+    type: script
+    command:
+      - python
+      - -c
+      - >-
+        import json; print(json.dumps({"items": [{"name": "api", "repo": "service"},
+        {"name": "worker", "repo": "service"}, {"name": "docs", "repo": "website"}]}))
+
+  - id: build
+    type: for_each
+    items: $decompose.json.parsed.items
+    max_parallel: 2
+    # Items for one repository never overlap. A task waiting for this key does
+    # not occupy one of the two global slots, so work for another repo can run.
+    serial_key: '${item.json.repo}'
+    stages:
+      - id: build-item
+        type: script
+        command: [python, -c, 'import sys; print("built " + sys.argv[1])', '${item.json.name}']
+
+  # Sequential execution after `for_each` is the join/barrier: this cannot
+  # start until every item has settled.
+  - id: join
+    type: script
+    command: [python, -c, 'import sys; print("joined " + sys.argv[1] + " items")', '${build.json.count}']

@@ -285,6 +285,15 @@ _MIGRATIONS: Final[tuple[str, ...]] = (
     CREATE INDEX external_effects_run
         ON external_effects (run_id, created_at, id);
     """,
+    # 6 — S3b: a stage declaration can execute more than once in different
+    # fan-out/loop scopes. ``stage_id`` remains the concrete unique node (and
+    # therefore preserves migration 1's uniqueness constraint); these columns
+    # make the authored id and its route inspectable without decoding it.
+    """
+    ALTER TABLE steps ADD COLUMN definition_id TEXT;
+    ALTER TABLE steps ADD COLUMN scope TEXT NOT NULL DEFAULT '[]';
+    UPDATE steps SET definition_id = stage_id WHERE definition_id IS NULL;
+    """,
 )
 
 #: The schema version this build writes and expects.

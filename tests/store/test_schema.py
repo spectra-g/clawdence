@@ -18,7 +18,8 @@ PARK = "INSERT INTO dead_letters (at, origin, reason, body) VALUES (?, ?, ?, ?)"
 #: downgrade-then-upgrade test below, which is what makes it a test of the
 #: migration this build added rather than of one that has worked for months.
 #: Children first, so the foreign key does not object to the order.
-LATEST_TABLES = ("external_effects",)
+LATEST_TABLES: tuple[str, ...] = ()
+LATEST_STEP_COLUMNS = ("definition_id", "scope")
 
 
 def park(connection: sqlite3.Connection) -> None:
@@ -59,8 +60,7 @@ class TestMigrations:
     def test_a_database_from_an_older_build_is_migrated_forward(
         self, connections: ConnectionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The newest migration's tables arrive on a database that already has
-        runs in it — currently S10's ``intake``, as it was S6c's ``steering``.
+        """The newest migration's schema arrives on a database with existing rows.
 
         Written as a real downgrade-then-upgrade rather than a hand-carved older
         file: what a migration has to survive is a database that was *written*
@@ -72,8 +72,31 @@ class TestMigrations:
         path = tmp_path / "state.db"
         first = connections(path)
         park(first)
+        first.execute(
+            "INSERT INTO runs (id, work_item_id, workflow, workflow_version, status, budget, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("run.old", "wi.old", "demo", "1.0.0", "running", "{}", iso(at(0)), iso(at(0))),
+        )
+        first.execute(
+            "INSERT INTO steps (id, run_id, stage_id, type, status, attempt, idempotency_key, "
+            "output, response, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sr.old",
+                "run.old",
+                "build",
+                "script",
+                "succeeded",
+                1,
+                "run.old:build:1",
+                "null",
+                "null",
+                "null",
+            ),
+        )
         for table in LATEST_TABLES:
             first.execute(f"DROP TABLE {table}")
+        for column in LATEST_STEP_COLUMNS:
+            first.execute(f"ALTER TABLE steps DROP COLUMN {column}")
         first.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
         first.close()
 
@@ -83,6 +106,12 @@ class TestMigrations:
         assert parked(second) == 1
         for table in LATEST_TABLES:
             assert second.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0  # noqa: S608
+        columns = {row[1] for row in second.execute("PRAGMA table_info(steps)")}
+        assert set(LATEST_STEP_COLUMNS) <= columns
+        upgraded = second.execute(
+            "SELECT definition_id, scope FROM steps WHERE id = 'sr.old'"
+        ).fetchone()
+        assert tuple(upgraded) == ("build", "[]")
 
     def test_migrating_again_changes_nothing(self, db: sqlite3.Connection) -> None:
         park(db)

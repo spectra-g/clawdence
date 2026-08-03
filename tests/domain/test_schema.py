@@ -77,7 +77,16 @@ def test_stage_union_is_discriminated_by_type() -> None:
     schema = gen.schema_for(Workflow)
     discriminator = schema["properties"]["stages"]["items"]["discriminator"]
     assert discriminator["propertyName"] == "type"
-    assert set(discriminator["mapping"]) == {"script", "agent", "runner", "approval"}
+    assert set(discriminator["mapping"]) == {
+        "script",
+        "agent",
+        "runner",
+        "approval",
+        "for_each",
+        "parallel",
+        "workflow",
+        "repeat",
+    }
 
 
 def test_rendered_schema_is_deterministic() -> None:

@@ -14,9 +14,10 @@ attempt was started under, is what the watchdog reads and what resume finds
 abandoned.
 
 ``next_attempt`` exists for the same reason. Attempt numbers are global to a
-(run, stage) rather than local to one execution of the process, because they are
-half of the idempotency key: a resumed run that restarted its counter at 1 would
-collide with the row the previous incarnation already wrote.
+``(run, concrete execution node)`` rather than local to one process. At root
+the node id is the authored stage id; composition derives a stable id from its
+fan-out/branch/iteration scope. A resumed run that restarted its counter at 1
+would collide with the row the previous incarnation already wrote.
 """
 
 from __future__ import annotations

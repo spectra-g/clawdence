@@ -45,7 +45,11 @@
         "script",
         "agent",
         "runner",
-        "approval"
+        "approval",
+        "for_each",
+        "parallel",
+        "workflow",
+        "repeat"
       ],
       "title": "StepType",
       "type": "string"
@@ -61,6 +65,21 @@
       "minimum": 1,
       "title": "Attempt",
       "type": "integer"
+    },
+    "definition_id": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Definition Id"
     },
     "error": {
       "anyOf": [
@@ -128,6 +147,14 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
       "title": "Run Id",
       "type": "string"
+    },
+    "scope": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Scope",
+      "type": "array"
     },
     "stage_id": {
       "maxLength": 64,

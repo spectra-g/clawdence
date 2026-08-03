@@ -35,7 +35,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from clawdence.domain._base import DomainModel
 from clawdence.domain.budget import Budget
@@ -52,6 +52,10 @@ class StepType(StrEnum):
     AGENT = "agent"
     RUNNER = "runner"
     APPROVAL = "approval"
+    FOR_EACH = "for_each"
+    PARALLEL = "parallel"
+    WORKFLOW = "workflow"
+    REPEAT = "repeat"
 
 
 class OnError(StrEnum):
@@ -236,10 +240,102 @@ class ApprovalStage(StageBase):
     timeout_seconds_override: float | None = Field(default=None, gt=0)
 
 
+class ForEachStage(StageBase):
+    """Run one pipeline for every value produced at runtime.
+
+    ``items`` is an exact ``$stage.json.path`` reference, rather than a string
+    template.  Keeping the value as JSON is what lets a decomposer return
+    objects and the branch read fields from them without a serialise/parse
+    round-trip. ``serial_key`` is evaluated in the item context and limits one
+    item with the same key to be in flight at once; a repository id is the
+    usual value, but the engine does not need repository knowledge.
+    """
+
+    type: Literal[StepType.FOR_EACH] = StepType.FOR_EACH
+    items: str
+    stages: tuple[Stage, ...] = Field(min_length=1)
+    item_var: Slug = "item"
+    index_var: Slug = "index"
+    max_parallel: int = Field(default=1, ge=1, le=64)
+    serial_key: str | None = None
+
+    @model_validator(mode="after")
+    def _variables_are_distinct(self) -> ForEachStage:
+        if self.item_var == self.index_var:
+            raise ValueError("item_var and index_var must be different")
+        return self
+
+
+class ParallelBranch(DomainModel):
+    """One named branch in a static parallel barrier."""
+
+    id: Slug
+    stages: tuple[Stage, ...] = Field(min_length=1)
+
+
+class ParallelStage(StageBase):
+    """Run declared branches concurrently, then expose one joined result."""
+
+    type: Literal[StepType.PARALLEL] = StepType.PARALLEL
+    branches: tuple[ParallelBranch, ...] = Field(min_length=1)
+    max_parallel: int = Field(default=64, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def _branch_ids_are_unique(self) -> ParallelStage:
+        ids = [branch.id for branch in self.branches]
+        if len(ids) != len(set(ids)):
+            raise ValueError("parallel branch ids must be unique")
+        return self
+
+
+class SubWorkflowStage(StageBase):
+    """Invoke a named workflow definition with explicit JSON inputs."""
+
+    type: Literal[StepType.WORKFLOW] = StepType.WORKFLOW
+    workflow: Slug
+    inputs: dict[Slug, JsonValue] = Field(default_factory=dict)
+
+
+class RepeatStage(StageBase):
+    """Repeat a pipeline until its post-iteration condition becomes true.
+
+    The current one-based counter is ``$iteration.json`` and the preceding
+    iteration's stage outputs are ``$previous.json.<stage>``. Exhausting the
+    bound is always a failure: a configurable force-proceed path would make a
+    retry cap decorative.
+    """
+
+    type: Literal[StepType.REPEAT] = StepType.REPEAT
+    stages: tuple[Stage, ...] = Field(min_length=1)
+    until: Condition
+    max_iterations: int = Field(ge=1, le=32)
+    on_exhausted: Literal["fail"] = "fail"
+
+
 Stage = Annotated[
-    ScriptStage | AgentStage | RunnerStage | ApprovalStage,
+    ScriptStage
+    | AgentStage
+    | RunnerStage
+    | ApprovalStage
+    | ForEachStage
+    | ParallelStage
+    | SubWorkflowStage
+    | RepeatStage,
     Field(discriminator="type"),
 ]
+
+
+class WorkflowDefinition(DomainModel):
+    """A reusable pipeline embedded in one versioned workflow document."""
+
+    inputs: tuple[Slug, ...] = ()
+    stages: tuple[Stage, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _input_names_are_unique(self) -> WorkflowDefinition:
+        if len(self.inputs) != len(set(self.inputs)):
+            raise ValueError("sub-workflow input names must be unique")
+        return self
 
 
 class Workflow(DomainModel):
@@ -251,6 +347,11 @@ class Workflow(DomainModel):
     description: str | None = None
 
     stages: tuple[Stage, ...] = Field(min_length=1)
+
+    #: Reusable pipelines live in the same versioned document as their caller.
+    #: That makes the complete call graph available at load time, so a cycle is
+    #: rejected before any stage starts and a run pins one version of all of it.
+    sub_workflows: dict[Slug, WorkflowDefinition] = Field(default_factory=dict)
 
     #: Defaults applied to every stage that does not override them.
     default_budget: Budget | None = None
@@ -269,3 +370,13 @@ class Workflow(DomainModel):
                 raise ValueError(f"duplicate stage id: {stage.id!r}")
             seen.add(stage.id)
         return self
+
+
+# Pydantic resolves the recursive ``Stage`` union after all composition models
+# exist. Keeping the rebuilds here makes importing the domain package enough;
+# callers never need to know that a workflow is recursive.
+ForEachStage.model_rebuild()
+ParallelBranch.model_rebuild()
+RepeatStage.model_rebuild()
+WorkflowDefinition.model_rebuild()
+Workflow.model_rebuild()

@@ -28,12 +28,16 @@ from clawdence.domain import (
     Event,
     EventKind,
     FailingAssertion,
+    ForEachStage,
     IngestSource,
     IsolationTier,
     McpServer,
     ModelCapability,
     ModelSelector,
     OnError,
+    ParallelBranch,
+    ParallelStage,
+    RepeatStage,
     RepoProfile,
     ResourceCaps,
     ResumeVerb,
@@ -52,12 +56,14 @@ from clawdence.domain import (
     StepStatus,
     StepType,
     Submitter,
+    SubWorkflowStage,
     TestEvidence,
     TestReporter,
     TokenUsage,
     VerificationContract,
     VerificationResult,
     Workflow,
+    WorkflowDefinition,
     WorkItem,
     WorkItemType,
 )
@@ -251,6 +257,34 @@ WORKFLOW_STAGES = (
         response_schema="review-decision.v1",
         timeout_seconds_override=86_400.0,
     ),
+    ForEachStage(
+        id="stories",
+        items="$plan.json.stories",
+        item_var="story",
+        index_var="story_index",
+        max_parallel=2,
+        serial_key="${story.json.repo}",
+        stages=(ScriptStage(id="build-story", command=("build", "${story.json.title}")),),
+    ),
+    ParallelStage(
+        id="checks",
+        max_parallel=2,
+        branches=(
+            ParallelBranch(id="tests", stages=(ScriptStage(id="test", command=("pytest",)),)),
+            ParallelBranch(id="lint", stages=(ScriptStage(id="lint", command=("ruff", "check")),)),
+        ),
+    ),
+    RepeatStage(
+        id="repair",
+        stages=(ScriptStage(id="verify", command=("verify", "${iteration.json}")),),
+        until="$verify.succeeded",
+        max_iterations=3,
+    ),
+    SubWorkflowStage(
+        id="publish",
+        workflow="publication",
+        inputs={"branch": "fix/proration"},
+    ),
 )
 
 WORKFLOW = Workflow(
@@ -259,6 +293,12 @@ WORKFLOW = Workflow(
     version="1.2.0",
     description="Code, verify, PR. No planning agents.",
     stages=WORKFLOW_STAGES,
+    sub_workflows={
+        "publication": WorkflowDefinition(
+            inputs=("branch",),
+            stages=(ScriptStage(id="push", command=("git", "push", "${branch.json}")),),
+        )
+    },
     default_budget=BUDGET,
 )
 
@@ -279,6 +319,8 @@ STEP_RESULT = StepResult(
     id="sr-01J8ZQ4T-implement-1",
     run_id="run-01J8ZQ",
     stage_id="implement",
+    definition_id="implement",
+    scope=("stories[0]",),
     type=StepType.RUNNER,
     status=StepStatus.FAILED,
     attempt=2,

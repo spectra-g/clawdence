@@ -56,7 +56,12 @@ def render_text(report: RunReport) -> str:
 
 def _line(result: StepResult) -> str:
     attempt = f" (attempt {result.attempt})" if result.attempt > 1 else ""
-    return f"  {_MARKS[result.status]:>4}  {result.stage_id}  [{result.type.value}]{attempt}"
+    if result.scope:
+        declared = result.definition_id if result.definition_id is not None else result.stage_id
+        label = f"{' / '.join(result.scope)} / {declared}"
+    else:
+        label = result.stage_id
+    return f"  {_MARKS[result.status]:>4}  {label}  [{result.type.value}]{attempt}"
 
 
 def _detail(result: StepResult) -> str:

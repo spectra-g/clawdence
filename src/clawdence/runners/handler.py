@@ -232,7 +232,7 @@ class RunnerHandler:
             # The derivation the ledger uses, so a redelivered dispatch collides
             # with the row the previous incarnation wrote rather than running the
             # work — and charging for it — twice.
-            idempotency_key=idempotency_key(ctx.run_id, stage.id, ctx.attempt),
+            idempotency_key=idempotency_key(ctx.run_id, ctx.idempotency_stage_id, ctx.attempt),
             created_at=self.clock(),
         )
 

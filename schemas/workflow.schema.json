@@ -348,6 +348,168 @@
       "title": "ContextOverflowPolicy",
       "type": "string"
     },
+    "ForEachStage": {
+      "additionalProperties": false,
+      "description": "Run one pipeline for every value produced at runtime.\n\n``items`` is an exact ``$stage.json.path`` reference, rather than a string\ntemplate.  Keeping the value as JSON is what lets a decomposer return\nobjects and the branch read fields from them without a serialise/parse\nround-trip. ``serial_key`` is evaluated in the item context and limits one\nitem with the same key to be in flight at once; a repository id is the\nusual value, but the engine does not need repository knowledge.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "index_var": {
+          "default": "index",
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Index Var",
+          "type": "string"
+        },
+        "item_var": {
+          "default": "item",
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Item Var",
+          "type": "string"
+        },
+        "items": {
+          "title": "Items",
+          "type": "string"
+        },
+        "max_parallel": {
+          "default": 1,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Parallel",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "serial_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Serial Key"
+        },
+        "stages": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentStage",
+                "approval": "#/$defs/ApprovalStage",
+                "for_each": "#/$defs/ForEachStage",
+                "parallel": "#/$defs/ParallelStage",
+                "repeat": "#/$defs/RepeatStage",
+                "runner": "#/$defs/RunnerStage",
+                "script": "#/$defs/ScriptStage",
+                "workflow": "#/$defs/SubWorkflowStage"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ScriptStage"
+              },
+              {
+                "$ref": "#/$defs/AgentStage"
+              },
+              {
+                "$ref": "#/$defs/RunnerStage"
+              },
+              {
+                "$ref": "#/$defs/ApprovalStage"
+              },
+              {
+                "$ref": "#/$defs/ForEachStage"
+              },
+              {
+                "$ref": "#/$defs/ParallelStage"
+              },
+              {
+                "$ref": "#/$defs/SubWorkflowStage"
+              },
+              {
+                "$ref": "#/$defs/RepeatStage"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Stages",
+          "type": "array"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "for_each",
+          "default": "for_each",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "items",
+        "stages"
+      ],
+      "title": "ForEachStage",
+      "type": "object"
+    },
+    "JsonValue": {},
     "ModelCapability": {
       "enum": [
         "tool_calling",
@@ -424,6 +586,302 @@
       ],
       "title": "OnError",
       "type": "string"
+    },
+    "ParallelBranch": {
+      "additionalProperties": false,
+      "description": "One named branch in a static parallel barrier.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "stages": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentStage",
+                "approval": "#/$defs/ApprovalStage",
+                "for_each": "#/$defs/ForEachStage",
+                "parallel": "#/$defs/ParallelStage",
+                "repeat": "#/$defs/RepeatStage",
+                "runner": "#/$defs/RunnerStage",
+                "script": "#/$defs/ScriptStage",
+                "workflow": "#/$defs/SubWorkflowStage"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ScriptStage"
+              },
+              {
+                "$ref": "#/$defs/AgentStage"
+              },
+              {
+                "$ref": "#/$defs/RunnerStage"
+              },
+              {
+                "$ref": "#/$defs/ApprovalStage"
+              },
+              {
+                "$ref": "#/$defs/ForEachStage"
+              },
+              {
+                "$ref": "#/$defs/ParallelStage"
+              },
+              {
+                "$ref": "#/$defs/SubWorkflowStage"
+              },
+              {
+                "$ref": "#/$defs/RepeatStage"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Stages",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "stages"
+      ],
+      "title": "ParallelBranch",
+      "type": "object"
+    },
+    "ParallelStage": {
+      "additionalProperties": false,
+      "description": "Run declared branches concurrently, then expose one joined result.",
+      "properties": {
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/ParallelBranch"
+          },
+          "minItems": 1,
+          "title": "Branches",
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "max_parallel": {
+          "default": 64,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Parallel",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "parallel",
+          "default": "parallel",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "branches"
+      ],
+      "title": "ParallelStage",
+      "type": "object"
+    },
+    "RepeatStage": {
+      "additionalProperties": false,
+      "description": "Repeat a pipeline until its post-iteration condition becomes true.\n\nThe current one-based counter is ``$iteration.json`` and the preceding\niteration's stage outputs are ``$previous.json.<stage>``. Exhausting the\nbound is always a failure: a configurable force-proceed path would make a\nretry cap decorative.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "max_iterations": {
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Iterations",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "on_exhausted": {
+          "const": "fail",
+          "default": "fail",
+          "title": "On Exhausted",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "stages": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentStage",
+                "approval": "#/$defs/ApprovalStage",
+                "for_each": "#/$defs/ForEachStage",
+                "parallel": "#/$defs/ParallelStage",
+                "repeat": "#/$defs/RepeatStage",
+                "runner": "#/$defs/RunnerStage",
+                "script": "#/$defs/ScriptStage",
+                "workflow": "#/$defs/SubWorkflowStage"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ScriptStage"
+              },
+              {
+                "$ref": "#/$defs/AgentStage"
+              },
+              {
+                "$ref": "#/$defs/RunnerStage"
+              },
+              {
+                "$ref": "#/$defs/ApprovalStage"
+              },
+              {
+                "$ref": "#/$defs/ForEachStage"
+              },
+              {
+                "$ref": "#/$defs/ParallelStage"
+              },
+              {
+                "$ref": "#/$defs/SubWorkflowStage"
+              },
+              {
+                "$ref": "#/$defs/RepeatStage"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Stages",
+          "type": "array"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "repeat",
+          "default": "repeat",
+          "title": "Type",
+          "type": "string"
+        },
+        "until": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Until",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "id",
+        "stages",
+        "until",
+        "max_iterations"
+      ],
+      "title": "RepeatStage",
+      "type": "object"
     },
     "RetryPolicy": {
       "additionalProperties": false,
@@ -667,6 +1125,169 @@
       ],
       "title": "ScriptStage",
       "type": "object"
+    },
+    "SubWorkflowStage": {
+      "additionalProperties": false,
+      "description": "Invoke a named workflow definition with explicit JSON inputs.",
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "inputs": {
+          "patternProperties": {
+            "^[a-z][a-z0-9_-]*$": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "on_error": {
+          "$ref": "#/$defs/OnError",
+          "default": "fail"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryPolicy",
+          "default": {
+            "backoff_seconds": 0.0,
+            "max_attempts": 1
+          }
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "type": {
+          "const": "workflow",
+          "default": "workflow",
+          "title": "Type",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        },
+        "workflow": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "title": "Workflow",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "workflow"
+      ],
+      "title": "SubWorkflowStage",
+      "type": "object"
+    },
+    "WorkflowDefinition": {
+      "additionalProperties": false,
+      "description": "A reusable pipeline embedded in one versioned workflow document.",
+      "properties": {
+        "inputs": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_-]*$",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "stages": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentStage",
+                "approval": "#/$defs/ApprovalStage",
+                "for_each": "#/$defs/ForEachStage",
+                "parallel": "#/$defs/ParallelStage",
+                "repeat": "#/$defs/RepeatStage",
+                "runner": "#/$defs/RunnerStage",
+                "script": "#/$defs/ScriptStage",
+                "workflow": "#/$defs/SubWorkflowStage"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ScriptStage"
+              },
+              {
+                "$ref": "#/$defs/AgentStage"
+              },
+              {
+                "$ref": "#/$defs/RunnerStage"
+              },
+              {
+                "$ref": "#/$defs/ApprovalStage"
+              },
+              {
+                "$ref": "#/$defs/ForEachStage"
+              },
+              {
+                "$ref": "#/$defs/ParallelStage"
+              },
+              {
+                "$ref": "#/$defs/SubWorkflowStage"
+              },
+              {
+                "$ref": "#/$defs/RepeatStage"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Stages",
+          "type": "array"
+        }
+      },
+      "required": [
+        "stages"
+      ],
+      "title": "WorkflowDefinition",
+      "type": "object"
     }
   },
   "$id": "https://clawdence.dev/schemas/workflow.schema.json",
@@ -716,8 +1337,12 @@
           "mapping": {
             "agent": "#/$defs/AgentStage",
             "approval": "#/$defs/ApprovalStage",
+            "for_each": "#/$defs/ForEachStage",
+            "parallel": "#/$defs/ParallelStage",
+            "repeat": "#/$defs/RepeatStage",
             "runner": "#/$defs/RunnerStage",
-            "script": "#/$defs/ScriptStage"
+            "script": "#/$defs/ScriptStage",
+            "workflow": "#/$defs/SubWorkflowStage"
           },
           "propertyName": "type"
         },
@@ -733,12 +1358,37 @@
           },
           {
             "$ref": "#/$defs/ApprovalStage"
+          },
+          {
+            "$ref": "#/$defs/ForEachStage"
+          },
+          {
+            "$ref": "#/$defs/ParallelStage"
+          },
+          {
+            "$ref": "#/$defs/SubWorkflowStage"
+          },
+          {
+            "$ref": "#/$defs/RepeatStage"
           }
         ]
       },
       "minItems": 1,
       "title": "Stages",
       "type": "array"
+    },
+    "sub_workflows": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_-]*$": {
+          "$ref": "#/$defs/WorkflowDefinition"
+        }
+      },
+      "propertyNames": {
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "title": "Sub Workflows",
+      "type": "object"
     },
     "version": {
       "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$",

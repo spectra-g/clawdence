@@ -59,6 +59,13 @@ class StepContext:
     stage: Stage
     attempt: int
     resolver: Resolver
+    #: The concrete node id used for persistence and external idempotency. It
+    #: differs from ``stage.id`` only inside a composition scope.
+    execution_id: str | None = None
+
+    @property
+    def idempotency_stage_id(self) -> str:
+        return self.execution_id if self.execution_id is not None else self.stage.id
 
 
 @dataclass(frozen=True, slots=True)

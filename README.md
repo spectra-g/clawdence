@@ -4,7 +4,8 @@ Workflow-driven orchestration for AI coding agents.
 
 **Status: pre-alpha. The path runs end to end for the first time.** A request submitted at the
 command line is now routed to a workflow and a repository, executed — agents in the control plane,
-repository code in an ephemeral container — and published as a pull request:
+repository code in an ephemeral container — and published as a pull request. Workflows can also
+fan out over runtime-produced items, bound how many branches run together, and join them again:
 
 ```sh
 clawdence submit --text "The billing export drops the tax line on refunds"
@@ -23,8 +24,8 @@ belongs to.
 
 **It is still not ready to use, and two absences are the reason.** There is no network policy on the
 runner, and no authorization on the way in — so it must not be pointed at input from people you do
-not trust. Concurrency, memory, verification contracts, human approval gates and the observability
-surface are all designed and unbuilt. It is public early so the build is inspectable from the start.
+not trust. Memory, verification contracts, human approval gates and the observability surface are
+all designed and unbuilt. It is public early so the build is inspectable from the start.
 
 ## Decisions taken so far
 
@@ -79,6 +80,25 @@ Two things it does deliberately differently from the engines it borrows its shap
   text is never rescanned. A value containing `; rm -rf /` is one argument that contains
   semicolons. Script steps also get a declared environment plus a small allowlist, never the
   control plane's own — which is where the API keys live.
+
+Composition uses those same ordered stages as its building block:
+
+- `for_each` reads a JSON array produced at runtime, runs its nested stages with `item` and `index`
+  values, and enforces `max_parallel`. An optional `serial_key`—normally the item's repository
+  id—prevents equal keys from overlapping without consuming a global slot while they wait. Arrays
+  above 10,000 items are refused before child tasks are allocated.
+- `parallel` runs named static branches behind the same kind of cap. A composition stage is itself
+  the join/barrier, so the following stage cannot begin until every branch has settled.
+- `workflow` calls a reusable definition embedded in the same versioned YAML document. Inputs are
+  explicit, and the complete call graph is checked for cycles while loading.
+- `repeat` exposes the one-based `iteration` and the `previous` iteration's result, evaluates
+  `until` after each pass, and fails when `max_iterations` is exhausted. There is no force-proceed
+  setting that can turn the bound into decoration.
+
+[`examples/composition.yaml`](examples/composition.yaml) is an executable three-item fan-out with
+`max_parallel: 2`, per-repository serialization, and a join. Nested executions are durable rows:
+each has an opaque collision-safe execution id plus its authored id and readable scope. If the
+process dies halfway through fan-out, resuming trusts only completed children and reruns the rest.
 
 `clawdence run` executes a workflow file directly, which is the ad-hoc path and the one to reach for
 when writing a workflow. `clawdence work` is the other one: it takes a submitted request, routes it,
@@ -168,7 +188,8 @@ Three properties worth naming:
 - **Resume re-runs anything that did not succeed.** A stage that finished is trusted; a stage that
   failed, was skipped, or was still running when the process died is not — so a resumed run
   re-evaluates guards against current results rather than inheriting decisions made before the
-  thing that went wrong.
+  thing that went wrong. The rule applies independently to every fan-out item, parallel branch,
+  sub-workflow stage and loop iteration.
 - **A step row is written before the step runs.** That row, with the timeout it was started under,
   is what lets a watchdog find work whose process is gone — the case an executor cannot handle,
   because it is the executor that died.

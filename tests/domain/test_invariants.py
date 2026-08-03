@@ -19,9 +19,12 @@ from clawdence.domain import (
     ApprovalStage,
     Budget,
     ContractKind,
+    ForEachStage,
     IngestSource,
     McpServer,
     ModelSelector,
+    ParallelStage,
+    RepeatStage,
     RepoProfile,
     Run,
     RunnerRequest,
@@ -29,6 +32,7 @@ from clawdence.domain import (
     ScriptStage,
     StepType,
     Submitter,
+    SubWorkflowStage,
     VerificationContract,
     VerificationResult,
     Workflow,
@@ -159,6 +163,10 @@ def test_stage_type_discriminates_the_union() -> None:
         AgentStage,
         RunnerStage,
         ApprovalStage,
+        ForEachStage,
+        ParallelStage,
+        RepeatStage,
+        SubWorkflowStage,
     ]
     assert workflow.stages[1].type is StepType.AGENT
 

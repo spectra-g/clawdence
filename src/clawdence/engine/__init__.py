@@ -16,9 +16,11 @@ the engine have to be understood together::
 syntaxes, parsed in one place — which is what lets the loader walk every
 reference in a file and prove it names an earlier stage before anything runs.
 
-M1 executes stages sequentially. Fan-out, bounded parallelism, sub-workflows and
-loops are S3b; the executor is async so that step is a change to *scheduling*
-rather than a rewrite of everything under it.
+An ordered scope is the basic unit. S3b composes those scopes with runtime-sized
+``for_each`` fan-out, static parallel branches, embedded sub-workflows and
+bounded ``repeat`` loops. Every composition is a barrier: the stage after it
+starts only after every child settles. The executor stays native async so this
+changes scheduling without changing leaf handlers.
 """
 
 from __future__ import annotations

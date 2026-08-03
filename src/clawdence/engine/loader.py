@@ -13,6 +13,9 @@ before the executor sees it:
   **earlier** in the file, or the reserved ``request``;
 * every ``${...}`` placeholder in an argv element, env value, ``cwd``, ``stdin``,
   agent task, runner plan or approval prompt does the same;
+* nested scopes obey the same reference rules, composition variables do not
+  shadow stages, and sub-workflow inputs match their declarations;
+* the complete embedded sub-workflow call graph is acyclic;
 * no stage is called ``request``, and nothing reads a facet of it but ``json``;
 * no placeholder appears in ``command[0]``.
 
@@ -42,8 +45,12 @@ from clawdence.domain.workflow import (
     WORKFLOW_SCHEMA_VERSION,
     AgentStage,
     ApprovalStage,
+    ForEachStage,
+    ParallelStage,
+    RepeatStage,
     RunnerStage,
     ScriptStage,
+    SubWorkflowStage,
 )
 from clawdence.engine import conditions, interpolation, refs
 from clawdence.engine.errors import (
@@ -163,74 +170,291 @@ def _format_validation(exc: ValidationError) -> str:
 
 
 def validate_references(workflow: Workflow, *, origin: str = "<workflow>") -> None:
-    """Prove every reference names an earlier stage. Raises, or returns nothing.
-
-    Separate from ``parse_workflow`` because S3c's ``workflow validate`` runs it
-    over workflows built any way at all, and because a caller constructing a
-    ``Workflow`` in Python deserves the same check a YAML author gets.
-    """
-    # Seeded, not empty: ``request`` is the work item the run is for, and it is
-    # available before the first stage because it is what started the run.
-    declared: set[str] = {refs.REQUEST}
-    for stage in workflow.stages:
-        if stage.id == refs.REQUEST:
+    """Validate data flow and the complete embedded workflow call graph."""
+    _validate_sequence(
+        workflow.stages,
+        available={refs.REQUEST},
+        variables={refs.REQUEST},
+        workflow=workflow,
+        origin=origin,
+        location="root",
+    )
+    for name, definition in workflow.sub_workflows.items():
+        if refs.REQUEST in definition.inputs:
             raise WorkflowLoadError(
-                f"declares a stage called {refs.REQUEST!r}, which is the name of the work "
-                f"item this run is for",
+                f"sub-workflow {name!r} declares reserved input {refs.REQUEST!r}",
+                origin=origin,
+                hint="the work item is already available as '$request.json'",
+            )
+        variables = {refs.REQUEST, *definition.inputs}
+        _validate_sequence(
+            definition.stages,
+            available=set(variables),
+            variables=variables,
+            workflow=workflow,
+            origin=origin,
+            location=f"sub_workflows.{name}",
+        )
+    _validate_call_graph(workflow, origin=origin)
+
+
+def _validate_sequence(
+    stages: tuple[Stage, ...],
+    *,
+    available: set[str],
+    variables: set[str],
+    workflow: Workflow,
+    origin: str,
+    location: str,
+) -> set[str]:
+    """Validate one ordered scope and return everything it declares."""
+    ids = [stage.id for stage in stages]
+    if len(ids) != len(set(ids)):
+        duplicate = next(stage_id for stage_id in ids if ids.count(stage_id) > 1)
+        raise WorkflowLoadError(
+            f"{location} declares duplicate stage id {duplicate!r}", origin=origin
+        )
+
+    declared = set(available)
+    for stage in stages:
+        if stage.id in variables:
+            if stage.id == refs.REQUEST:
+                raise WorkflowLoadError(
+                    f"declares a stage called {refs.REQUEST!r}, which is the name of the work "
+                    "item this run is for",
+                    origin=origin,
+                    stage_id=stage.id,
+                    hint=(
+                        f"every '${{{refs.REQUEST}.json...}}' below it would silently read the "
+                        "stage's output instead of the request; rename the stage"
+                    ),
+                )
+            raise WorkflowLoadError(
+                f"declares a stage called {stage.id!r}, which is a value provided to this scope",
                 origin=origin,
                 stage_id=stage.id,
-                hint=(
-                    f"every '${{{refs.REQUEST}.json...}}' below it would silently read the "
-                    f"stage's output instead of the request; rename the stage"
-                ),
+                hint="rename the stage so references cannot silently change meaning",
             )
+
         for reference, where in _references(stage, origin):
-            if reference.stage_id == stage.id:
+            _check_reference(
+                reference,
+                where=where,
+                stage=stage,
+                declared=declared,
+                variables=variables,
+                all_ids=set(ids),
+                origin=origin,
+            )
+
+        if isinstance(stage, ForEachStage):
+            collisions = {stage.item_var, stage.index_var} & declared
+            if collisions:
                 raise WorkflowLoadError(
-                    f"{where} refers to {reference.stage_id!r}, which is the stage itself",
+                    "fan-out variables shadow values already available here: "
+                    + ", ".join(sorted(collisions)),
                     origin=origin,
                     stage_id=stage.id,
                 )
-            if reference.stage_id == refs.REQUEST and reference.facet is not refs.Facet.JSON:
-                raise WorkflowLoadError(
-                    f"{where} reads {reference.facet.value!r} of {refs.REQUEST!r}, which is "
-                    f"a work item rather than a step and so never ran, succeeded or failed",
+            nested_variables = variables | {stage.item_var, stage.index_var}
+            if stage.serial_key is not None:
+                for reference in _template_references(
+                    stage.serial_key, stage.id, "serial_key", origin
+                ):
+                    _check_reference(
+                        reference,
+                        where=f"serial_key placeholder '${{{reference.text}}}'",
+                        stage=stage,
+                        declared=declared | {stage.item_var, stage.index_var},
+                        variables=nested_variables,
+                        all_ids=set(ids),
+                        origin=origin,
+                    )
+            _validate_sequence(
+                stage.stages,
+                available=declared | {stage.item_var, stage.index_var},
+                variables=nested_variables,
+                workflow=workflow,
+                origin=origin,
+                location=f"{location}.{stage.id}.stages",
+            )
+        elif isinstance(stage, ParallelStage):
+            for branch in stage.branches:
+                _validate_sequence(
+                    branch.stages,
+                    available=set(declared),
+                    variables=set(variables),
+                    workflow=workflow,
                     origin=origin,
-                    stage_id=stage.id,
-                    hint=f"'${{{refs.REQUEST}.json.text}}' is the request itself",
+                    location=f"{location}.{stage.id}.branches.{branch.id}",
                 )
-            if reference.stage_id not in declared:
+        elif isinstance(stage, RepeatStage):
+            collisions = {"iteration", "previous"} & declared
+            if collisions:
                 raise WorkflowLoadError(
-                    f"{where} refers to stage {reference.stage_id!r}, "
-                    + _placement(reference.stage_id, declared, workflow),
+                    "loop variables shadow values already available here: "
+                    + ", ".join(sorted(collisions)),
                     origin=origin,
                     stage_id=stage.id,
-                    hint=(f"stages available here: {', '.join(sorted(declared)) or 'none'}"),
+                )
+            nested_variables = variables | {"iteration", "previous"}
+            body_ids = _validate_sequence(
+                stage.stages,
+                available=declared | {"iteration", "previous"},
+                variables=nested_variables,
+                workflow=workflow,
+                origin=origin,
+                location=f"{location}.{stage.id}.stages",
+            )
+            for reference in _condition_references(stage.until, stage.id, "until", origin):
+                _check_reference(
+                    reference,
+                    where=f"'until' condition {reference.text!r}",
+                    stage=stage,
+                    declared=body_ids,
+                    variables=nested_variables,
+                    all_ids={child.id for child in stage.stages},
+                    origin=origin,
+                    allow_self=True,
+                )
+        elif isinstance(stage, SubWorkflowStage):
+            definition = workflow.sub_workflows.get(stage.workflow)
+            if definition is None:
+                raise WorkflowLoadError(
+                    f"calls sub-workflow {stage.workflow!r}, which is not defined",
+                    origin=origin,
+                    stage_id=stage.id,
+                    hint=(
+                        "available sub-workflows: "
+                        + (", ".join(sorted(workflow.sub_workflows)) or "none")
+                    ),
+                )
+            expected, supplied = set(definition.inputs), set(stage.inputs)
+            if expected != supplied:
+                missing = sorted(expected - supplied)
+                extra = sorted(supplied - expected)
+                details = []
+                if missing:
+                    details.append(f"missing {', '.join(missing)}")
+                if extra:
+                    details.append(f"unknown {', '.join(extra)}")
+                raise WorkflowLoadError(
+                    f"inputs for sub-workflow {stage.workflow!r} do not match: "
+                    + "; ".join(details),
+                    origin=origin,
+                    stage_id=stage.id,
                 )
         declared.add(stage.id)
+    return declared
 
 
-def _placement(stage_id: str, declared: set[str], workflow: Workflow) -> str:
-    later = any(stage.id == stage_id for stage in workflow.stages if stage.id not in declared)
-    if later:
-        return "which is declared later — stages run in order, so it has no result yet"
-    return "which no stage declares"
+def _check_reference(
+    reference: Reference,
+    *,
+    where: str,
+    stage: Stage,
+    declared: set[str],
+    variables: set[str],
+    all_ids: set[str],
+    origin: str,
+    allow_self: bool = False,
+) -> None:
+    if reference.stage_id == stage.id and not allow_self:
+        raise WorkflowLoadError(
+            f"{where} refers to {reference.stage_id!r}, which is the stage itself",
+            origin=origin,
+            stage_id=stage.id,
+        )
+    if reference.stage_id in variables and reference.facet is not refs.Facet.JSON:
+        kind = "work item" if reference.stage_id == refs.REQUEST else "scope variable"
+        if reference.stage_id == refs.REQUEST:
+            raise WorkflowLoadError(
+                f"{where} reads {reference.facet.value!r} of {refs.REQUEST!r}, which is "
+                "a work item rather than a step and so never ran, succeeded or failed",
+                origin=origin,
+                stage_id=stage.id,
+                hint=f"'${{{refs.REQUEST}.json.text}}' is the request itself",
+            )
+        raise WorkflowLoadError(
+            f"{where} reads {reference.facet.value!r} of {reference.stage_id!r}, which is a "
+            f"{kind} rather than a step",
+            origin=origin,
+            stage_id=stage.id,
+            hint=f"use '${{{reference.stage_id}.json}}' or a path beneath it",
+        )
+    if reference.stage_id not in declared:
+        placement = (
+            "which is declared later — stages run in order, so it has no result yet"
+            if reference.stage_id in all_ids
+            else "which no stage declares (and no scope variable provides)"
+        )
+        raise WorkflowLoadError(
+            f"{where} refers to stage {reference.stage_id!r}, {placement}",
+            origin=origin,
+            stage_id=stage.id,
+            hint=f"values available here: {', '.join(sorted(declared)) or 'none'}",
+        )
+
+
+def _validate_call_graph(workflow: Workflow, *, origin: str) -> None:
+    graph: dict[str, set[str]] = {"<root>": _called_workflows(workflow.stages)}
+    graph.update(
+        {
+            name: _called_workflows(definition.stages)
+            for name, definition in workflow.sub_workflows.items()
+        }
+    )
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            cycle = [*visiting[visiting.index(name) :], name]
+            raise WorkflowLoadError(
+                "contains a cyclic sub-workflow call: " + " -> ".join(cycle), origin=origin
+            )
+        if name in visited:
+            return
+        visiting.append(name)
+        for called in graph.get(name, set()):
+            visit(called)
+        visiting.pop()
+        visited.add(name)
+
+    visit("<root>")
+    for name in graph:
+        visit(name)
+
+
+def _called_workflows(stages: tuple[Stage, ...]) -> set[str]:
+    called: set[str] = set()
+    for stage in stages:
+        if isinstance(stage, SubWorkflowStage):
+            called.add(stage.workflow)
+        elif isinstance(stage, ForEachStage | RepeatStage):
+            called.update(_called_workflows(stage.stages))
+        elif isinstance(stage, ParallelStage):
+            for branch in stage.branches:
+                called.update(_called_workflows(branch.stages))
+    return called
 
 
 def _references(stage: Stage, origin: str) -> Iterator[tuple[Reference, str]]:
     """Every reference a stage makes, paired with where it was written."""
     if stage.when is not None:
-        try:
-            node = conditions.parse(stage.when)
-        except ConditionSyntaxError as exc:
-            raise WorkflowLoadError(
-                f"has an invalid 'when' condition: {exc.message}",
-                origin=origin,
-                stage_id=stage.id,
-                hint=_caret(exc.expression, exc.position),
-            ) from None
-        for reference in conditions.references(node):
+        for reference in _condition_references(stage.when, stage.id, "when", origin):
             yield reference, f"'when' condition {reference.text!r}"
+
+    if isinstance(stage, ForEachStage):
+        yield _exact_reference(stage.items, stage.id, "items", origin), "'items' reference"
+
+    if isinstance(stage, SubWorkflowStage):
+        for name, value in stage.inputs.items():
+            if isinstance(value, str) and value.startswith("$"):
+                yield (
+                    _exact_reference(value, stage.id, f"inputs[{name}]", origin),
+                    (f"inputs[{name}] reference"),
+                )
 
     for template, where in _templates(stage):
         try:
@@ -277,6 +501,48 @@ def _templates(stage: Stage) -> Iterator[tuple[str, str]]:
             yield stage.plan, "plan"
     elif isinstance(stage, ApprovalStage):
         yield stage.prompt, "prompt"
+
+
+def _template_references(
+    template: str, stage_id: str, field: str, origin: str
+) -> tuple[Reference, ...]:
+    try:
+        return interpolation.references(template)
+    except InterpolationError as exc:
+        raise WorkflowLoadError(
+            f"has an invalid placeholder in {field}: {exc}", origin=origin, stage_id=stage_id
+        ) from None
+
+
+def _condition_references(
+    expression: str, stage_id: str, field: str, origin: str
+) -> tuple[Reference, ...]:
+    try:
+        node = conditions.parse(expression)
+    except ConditionSyntaxError as exc:
+        raise WorkflowLoadError(
+            f"has an invalid {field!r} condition: {exc.message}",
+            origin=origin,
+            stage_id=stage_id,
+            hint=_caret(exc.expression, exc.position),
+        ) from None
+    return conditions.references(node)
+
+
+def _exact_reference(value: str, stage_id: str, field: str, origin: str) -> Reference:
+    try:
+        reference = refs.parse_reference(value)
+    except ValueError as exc:
+        raise WorkflowLoadError(
+            f"has an invalid {field!r} reference: {exc}", origin=origin, stage_id=stage_id
+        ) from None
+    if not value.startswith("$"):
+        raise WorkflowLoadError(
+            f"{field!r} must be an exact '$stage.json.path' reference",
+            origin=origin,
+            stage_id=stage_id,
+        )
+    return reference
 
 
 def _caret(expression: str, position: int) -> str:

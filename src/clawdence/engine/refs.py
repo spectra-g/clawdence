@@ -192,11 +192,18 @@ class Resolver:
     outside a pipeline has not been given one, and that is the same absence.
     """
 
-    __slots__ = ("_request", "_results")
+    __slots__ = ("_request", "_results", "_variables")
 
-    def __init__(self, results: Mapping[str, StepResult], *, request: JsonValue = None) -> None:
+    def __init__(
+        self,
+        results: Mapping[str, StepResult],
+        *,
+        request: JsonValue = None,
+        variables: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         self._results = results
         self._request = request
+        self._variables = variables if variables is not None else {}
 
     def resolve(self, ref: Reference) -> Resolved:
         """The value a reference names, or ``MISSING``.
@@ -212,6 +219,13 @@ class Resolver:
             # through it — answered rather than raised, because this is a read
             # of something absent and that is what ``MISSING`` is for.
             return _descend(self._request, ref.path) if ref.facet is Facet.JSON else MISSING
+
+        if ref.stage_id in self._variables:
+            return (
+                _descend(self._variables[ref.stage_id], ref.path)
+                if ref.facet is Facet.JSON
+                else MISSING
+            )
 
         result = self._results.get(ref.stage_id)
         if result is None:
