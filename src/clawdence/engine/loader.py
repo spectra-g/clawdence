@@ -26,6 +26,12 @@ guard that silently never fires. That is the failure mode this whole module is
 written against: the workflow that runs, reports success, and quietly did less
 than it was asked to.
 
+Every check carries a **document path** — ``("stages", 3, "command", 1)`` — down
+with it, so ``source`` can turn the failure into a line number. The path is
+threaded rather than reconstructed: the loader already walks the file's shape,
+and a second walk that guessed at paths would drift from the first the moment a
+composition type was added (S3c, after S3b added four of them).
+
 ``yaml.safe_load`` only. The full loader constructs arbitrary Python objects,
 which for a file format this system executes would make a workflow file a
 remote code execution vector by design.
@@ -59,6 +65,12 @@ from clawdence.engine.errors import (
     WorkflowLoadError,
 )
 from clawdence.engine.refs import Reference
+from clawdence.engine.source import DocumentPath, SourceMap
+
+#: Where the versioning policy is written down. Quoted in the error a workflow
+#: from a different release gets, because "migrate the file" without saying what
+#: changed between the versions is an instruction nobody can act on.
+SCHEMA_POLICY_DOC = "docs/workflow-schema.md"
 
 
 def load_workflow(path: Path) -> Workflow:
@@ -73,9 +85,11 @@ def load_workflow(path: Path) -> Workflow:
 def parse_workflow(text: str, *, origin: str = "<workflow>") -> Workflow:
     """Validate a workflow document that is already in hand."""
     document = _parse_yaml(text, origin)
-    _check_schema_version(document, origin)
-    workflow = _build(document, origin)
-    validate_references(workflow, origin=origin)
+    source = SourceMap.from_text(text)
+    _check_schema_version(document, origin, source)
+    _check_root_ids(document, origin, source)
+    workflow = _build(document, origin, source)
+    validate_references(workflow, origin=origin, source=source)
     return workflow
 
 
@@ -83,7 +97,9 @@ def _parse_yaml(text: str, origin: str) -> dict[str, Any]:
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise WorkflowLoadError(_yaml_message(exc), origin=origin, hint=_yaml_hint(exc)) from exc
+        raise WorkflowLoadError(
+            _yaml_message(exc), origin=origin, hint=_yaml_hint(exc), line=_yaml_line(exc)
+        ) from exc
 
     if document is None:
         raise WorkflowLoadError("is empty", origin=origin)
@@ -98,8 +114,13 @@ def _yaml_message(exc: yaml.YAMLError) -> str:
     mark = getattr(exc, "problem_mark", None)
     problem = getattr(exc, "problem", None) or "is not valid YAML"
     if mark is not None:
-        return f"line {mark.line + 1}, column {mark.column + 1}: {problem}"
+        return f"column {mark.column + 1}: {problem}"
     return str(problem)  # pragma: no cover - every parser error we have seen carries a mark
+
+
+def _yaml_line(exc: yaml.YAMLError) -> int | None:
+    mark = getattr(exc, "problem_mark", None)
+    return None if mark is None else int(mark.line) + 1
 
 
 def _yaml_hint(exc: yaml.YAMLError) -> str | None:
@@ -120,7 +141,7 @@ def _yaml_hint(exc: yaml.YAMLError) -> str | None:
     return None
 
 
-def _check_schema_version(document: dict[str, Any], origin: str) -> None:
+def _check_schema_version(document: dict[str, Any], origin: str, source: SourceMap) -> None:
     """Reject a version this build does not understand, with a hint.
 
     Ahead of the model because pydantic's ``ge=1`` would accept a version from a
@@ -130,34 +151,80 @@ def _check_schema_version(document: dict[str, Any], origin: str) -> None:
     declared = document.get("schema_version", WORKFLOW_SCHEMA_VERSION)
     if declared == WORKFLOW_SCHEMA_VERSION:
         return
+    line = source.line(("schema_version",))
     if not isinstance(declared, int):
         raise WorkflowLoadError(
-            f"schema_version must be an integer, not {type(declared).__name__}", origin=origin
+            f"schema_version must be an integer, not {type(declared).__name__}",
+            origin=origin,
+            line=line,
         )
     direction = "newer" if declared > WORKFLOW_SCHEMA_VERSION else "older"
     raise WorkflowLoadError(
         f"declares workflow schema_version {declared}, "
         f"which is {direction} than this build understands ({WORKFLOW_SCHEMA_VERSION})",
         origin=origin,
+        line=line,
         hint=(
-            "upgrade clawdence to run this workflow"
+            f"upgrade clawdence to run this workflow; see {SCHEMA_POLICY_DOC}"
             if declared > WORKFLOW_SCHEMA_VERSION
-            else f"migrate the file to schema_version {WORKFLOW_SCHEMA_VERSION}"
+            else (
+                f"migrate the file to schema_version {WORKFLOW_SCHEMA_VERSION}; "
+                f"{SCHEMA_POLICY_DOC} lists what changed"
+            )
         ),
     )
 
 
-def _build(document: dict[str, Any], origin: str) -> Workflow:
+def _check_root_ids(document: dict[str, Any], origin: str, source: SourceMap) -> None:
+    """Duplicate ids in the top-level scope, reported with both lines.
+
+    The domain model refuses these too, and has to: a ``Workflow`` built in
+    Python has no file behind it. But a model validator's error carries no path,
+    so it resolves to the first line of the document — which for "duplicate
+    stage id" is the least useful line in the file. Nested scopes need no
+    equivalent, because no model validator pre-empts ``_validate_sequence``
+    there and that one has known both lines since it was written.
+    """
+    stages = document.get("stages")
+    if not isinstance(stages, list):
+        return
+    seen: dict[str, int] = {}
+    for index, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            continue
+        stage_id = stage.get("id")
+        if not isinstance(stage_id, str):
+            continue
+        if stage_id in seen:
+            first = source.line(("stages", seen[stage_id]))
+            raise WorkflowLoadError(
+                f"declares duplicate stage id {stage_id!r}",
+                origin=origin,
+                stage_id=stage_id,
+                line=source.line(("stages", index)),
+                hint=(
+                    f"first declared on line {first}; "
+                    "duplicate ids make '$stage.json' references ambiguous"
+                    if first is not None
+                    else "duplicate ids make '$stage.json' references ambiguous"
+                ),
+            )
+        seen[stage_id] = index
+
+
+def _build(document: dict[str, Any], origin: str, source: SourceMap) -> Workflow:
     try:
         return Workflow.model_validate(document)
     except ValidationError as exc:
         raise WorkflowLoadError(
-            "does not match the workflow schema:\n" + _format_validation(exc), origin=origin
+            "does not match the workflow schema:\n" + _format_validation(exc, source),
+            origin=origin,
+            line=_first_error_line(exc, source),
         ) from exc
 
 
-def _format_validation(exc: ValidationError) -> str:
-    """One line per problem, addressed by path.
+def _format_validation(exc: ValidationError, source: SourceMap) -> str:
+    """One line per problem, addressed by path and by line.
 
     pydantic's own rendering repeats the whole input for discriminated unions,
     which for a workflow means the entire file per error.
@@ -165,12 +232,41 @@ def _format_validation(exc: ValidationError) -> str:
     lines: list[str] = []
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"]) or "<root>"
-        lines.append(f"  {location}: {error['msg']}")
+        line = source.line(_document_path(error["loc"]))
+        where = f"line {line}: " if line is not None else ""
+        lines.append(f"  {where}{location}: {error['msg']}")
     return "\n".join(lines)
 
 
-def validate_references(workflow: Workflow, *, origin: str = "<workflow>") -> None:
-    """Validate data flow and the complete embedded workflow call graph."""
+def _first_error_line(exc: ValidationError, source: SourceMap) -> int | None:
+    for error in exc.errors():
+        line = source.line(_document_path(error["loc"]))
+        if line is not None:
+            return line
+    return None  # pragma: no cover - a composed document always answers at the root
+
+
+def _document_path(location: tuple[int | str, ...]) -> DocumentPath:
+    """A pydantic error location as a path into the document.
+
+    A tagged union puts the tag in the middle of the path
+    (``stages.0.script.command``); ``SourceMap`` resolves by longest known
+    prefix, so the tag simply stops the walk one segment early rather than
+    needing to be stripped by name.
+    """
+    return tuple(location)
+
+
+def validate_references(
+    workflow: Workflow, *, origin: str = "<workflow>", source: SourceMap | None = None
+) -> None:
+    """Validate data flow and the complete embedded workflow call graph.
+
+    ``source`` is optional because a ``Workflow`` built in Python has no file
+    behind it — the executor validates one of those on every run — and an
+    absent map simply means errors carry no line.
+    """
+    positions = source if source is not None else SourceMap(lines={})
     _validate_sequence(
         workflow.stages,
         available={refs.REQUEST},
@@ -178,12 +274,15 @@ def validate_references(workflow: Workflow, *, origin: str = "<workflow>") -> No
         workflow=workflow,
         origin=origin,
         location="root",
+        path=("stages",),
+        source=positions,
     )
     for name, definition in workflow.sub_workflows.items():
         if refs.REQUEST in definition.inputs:
             raise WorkflowLoadError(
                 f"sub-workflow {name!r} declares reserved input {refs.REQUEST!r}",
                 origin=origin,
+                line=positions.line(("sub_workflows", name, "inputs")),
                 hint="the work item is already available as '$request.json'",
             )
         variables = {refs.REQUEST, *definition.inputs}
@@ -194,8 +293,10 @@ def validate_references(workflow: Workflow, *, origin: str = "<workflow>") -> No
             workflow=workflow,
             origin=origin,
             location=f"sub_workflows.{name}",
+            path=("sub_workflows", name, "stages"),
+            source=positions,
         )
-    _validate_call_graph(workflow, origin=origin)
+    _validate_call_graph(workflow, origin=origin, source=positions)
 
 
 def _validate_sequence(
@@ -206,17 +307,23 @@ def _validate_sequence(
     workflow: Workflow,
     origin: str,
     location: str,
+    path: DocumentPath,
+    source: SourceMap,
 ) -> set[str]:
     """Validate one ordered scope and return everything it declares."""
     ids = [stage.id for stage in stages]
     if len(ids) != len(set(ids)):
         duplicate = next(stage_id for stage_id in ids if ids.count(stage_id) > 1)
+        second = len(ids) - 1 - ids[::-1].index(duplicate)
         raise WorkflowLoadError(
-            f"{location} declares duplicate stage id {duplicate!r}", origin=origin
+            f"{location} declares duplicate stage id {duplicate!r}",
+            origin=origin,
+            line=source.line((*path, second)),
         )
 
     declared = set(available)
-    for stage in stages:
+    for index, stage in enumerate(stages):
+        here: DocumentPath = (*path, index)
         if stage.id in variables:
             if stage.id == refs.REQUEST:
                 raise WorkflowLoadError(
@@ -224,6 +331,7 @@ def _validate_sequence(
                     "item this run is for",
                     origin=origin,
                     stage_id=stage.id,
+                    line=source.line((*here, "id")),
                     hint=(
                         f"every '${{{refs.REQUEST}.json...}}' below it would silently read the "
                         "stage's output instead of the request; rename the stage"
@@ -233,10 +341,11 @@ def _validate_sequence(
                 f"declares a stage called {stage.id!r}, which is a value provided to this scope",
                 origin=origin,
                 stage_id=stage.id,
+                line=source.line((*here, "id")),
                 hint="rename the stage so references cannot silently change meaning",
             )
 
-        for reference, where in _references(stage, origin):
+        for reference, where, field in _references(stage, origin, here, source):
             _check_reference(
                 reference,
                 where=where,
@@ -245,6 +354,7 @@ def _validate_sequence(
                 variables=variables,
                 all_ids=set(ids),
                 origin=origin,
+                line=source.line((*here, *field)),
             )
 
         if isinstance(stage, ForEachStage):
@@ -255,11 +365,12 @@ def _validate_sequence(
                     + ", ".join(sorted(collisions)),
                     origin=origin,
                     stage_id=stage.id,
+                    line=source.line(here),
                 )
             nested_variables = variables | {stage.item_var, stage.index_var}
             if stage.serial_key is not None:
                 for reference in _template_references(
-                    stage.serial_key, stage.id, "serial_key", origin
+                    stage.serial_key, stage.id, "serial_key", origin, source.line((*here, "id"))
                 ):
                     _check_reference(
                         reference,
@@ -269,6 +380,7 @@ def _validate_sequence(
                         variables=nested_variables,
                         all_ids=set(ids),
                         origin=origin,
+                        line=source.line((*here, "serial_key")),
                     )
             _validate_sequence(
                 stage.stages,
@@ -277,9 +389,11 @@ def _validate_sequence(
                 workflow=workflow,
                 origin=origin,
                 location=f"{location}.{stage.id}.stages",
+                path=(*here, "stages"),
+                source=source,
             )
         elif isinstance(stage, ParallelStage):
-            for branch in stage.branches:
+            for branch_index, branch in enumerate(stage.branches):
                 _validate_sequence(
                     branch.stages,
                     available=set(declared),
@@ -287,6 +401,8 @@ def _validate_sequence(
                     workflow=workflow,
                     origin=origin,
                     location=f"{location}.{stage.id}.branches.{branch.id}",
+                    path=(*here, "branches", branch_index, "stages"),
+                    source=source,
                 )
         elif isinstance(stage, RepeatStage):
             collisions = {"iteration", "previous"} & declared
@@ -296,6 +412,7 @@ def _validate_sequence(
                     + ", ".join(sorted(collisions)),
                     origin=origin,
                     stage_id=stage.id,
+                    line=source.line(here),
                 )
             nested_variables = variables | {"iteration", "previous"}
             body_ids = _validate_sequence(
@@ -305,8 +422,12 @@ def _validate_sequence(
                 workflow=workflow,
                 origin=origin,
                 location=f"{location}.{stage.id}.stages",
+                path=(*here, "stages"),
+                source=source,
             )
-            for reference in _condition_references(stage.until, stage.id, "until", origin):
+            for reference in _condition_references(
+                stage.until, stage.id, "until", origin, source.line((*here, "until"))
+            ):
                 _check_reference(
                     reference,
                     where=f"'until' condition {reference.text!r}",
@@ -315,6 +436,7 @@ def _validate_sequence(
                     variables=nested_variables,
                     all_ids={child.id for child in stage.stages},
                     origin=origin,
+                    line=source.line((*here, "until")),
                     allow_self=True,
                 )
         elif isinstance(stage, SubWorkflowStage):
@@ -324,6 +446,7 @@ def _validate_sequence(
                     f"calls sub-workflow {stage.workflow!r}, which is not defined",
                     origin=origin,
                     stage_id=stage.id,
+                    line=source.line((*here, "workflow")),
                     hint=(
                         "available sub-workflows: "
                         + (", ".join(sorted(workflow.sub_workflows)) or "none")
@@ -343,6 +466,7 @@ def _validate_sequence(
                     + "; ".join(details),
                     origin=origin,
                     stage_id=stage.id,
+                    line=source.line((*here, "inputs")),
                 )
         declared.add(stage.id)
     return declared
@@ -357,6 +481,7 @@ def _check_reference(
     variables: set[str],
     all_ids: set[str],
     origin: str,
+    line: int | None = None,
     allow_self: bool = False,
 ) -> None:
     if reference.stage_id == stage.id and not allow_self:
@@ -364,6 +489,7 @@ def _check_reference(
             f"{where} refers to {reference.stage_id!r}, which is the stage itself",
             origin=origin,
             stage_id=stage.id,
+            line=line,
         )
     if reference.stage_id in variables and reference.facet is not refs.Facet.JSON:
         kind = "work item" if reference.stage_id == refs.REQUEST else "scope variable"
@@ -373,6 +499,7 @@ def _check_reference(
                 "a work item rather than a step and so never ran, succeeded or failed",
                 origin=origin,
                 stage_id=stage.id,
+                line=line,
                 hint=f"'${{{refs.REQUEST}.json.text}}' is the request itself",
             )
         raise WorkflowLoadError(
@@ -380,6 +507,7 @@ def _check_reference(
             f"{kind} rather than a step",
             origin=origin,
             stage_id=stage.id,
+            line=line,
             hint=f"use '${{{reference.stage_id}.json}}' or a path beneath it",
         )
     if reference.stage_id not in declared:
@@ -392,11 +520,12 @@ def _check_reference(
             f"{where} refers to stage {reference.stage_id!r}, {placement}",
             origin=origin,
             stage_id=stage.id,
+            line=line,
             hint=f"values available here: {', '.join(sorted(declared)) or 'none'}",
         )
 
 
-def _validate_call_graph(workflow: Workflow, *, origin: str) -> None:
+def _validate_call_graph(workflow: Workflow, *, origin: str, source: SourceMap) -> None:
     graph: dict[str, set[str]] = {"<root>": _called_workflows(workflow.stages)}
     graph.update(
         {
@@ -411,7 +540,9 @@ def _validate_call_graph(workflow: Workflow, *, origin: str) -> None:
         if name in visiting:
             cycle = [*visiting[visiting.index(name) :], name]
             raise WorkflowLoadError(
-                "contains a cyclic sub-workflow call: " + " -> ".join(cycle), origin=origin
+                "contains a cyclic sub-workflow call: " + " -> ".join(cycle),
+                origin=origin,
+                line=source.line(("sub_workflows", name)),
             )
         if name in visited:
             return
@@ -439,38 +570,62 @@ def _called_workflows(stages: tuple[Stage, ...]) -> set[str]:
     return called
 
 
-def _references(stage: Stage, origin: str) -> Iterator[tuple[Reference, str]]:
-    """Every reference a stage makes, paired with where it was written."""
+def _references(
+    stage: Stage, origin: str, here: DocumentPath, source: SourceMap
+) -> Iterator[tuple[Reference, str, DocumentPath]]:
+    """Every reference a stage makes, with where it was written — twice.
+
+    ``where`` is the phrase a person reads; the path is what turns into a line
+    number. Both, because "the 'when' condition" and ``("when",)`` answer
+    different halves of "which one did you mean".
+    """
     if stage.when is not None:
-        for reference in _condition_references(stage.when, stage.id, "when", origin):
-            yield reference, f"'when' condition {reference.text!r}"
+        for reference in _condition_references(
+            stage.when, stage.id, "when", origin, source.line((*here, "when"))
+        ):
+            yield reference, f"'when' condition {reference.text!r}", ("when",)
 
     if isinstance(stage, ForEachStage):
-        yield _exact_reference(stage.items, stage.id, "items", origin), "'items' reference"
+        yield (
+            _exact_reference(stage.items, stage.id, "items", origin, source.line((*here, "items"))),
+            "'items' reference",
+            ("items",),
+        )
 
     if isinstance(stage, SubWorkflowStage):
         for name, value in stage.inputs.items():
             if isinstance(value, str) and value.startswith("$"):
                 yield (
-                    _exact_reference(value, stage.id, f"inputs[{name}]", origin),
-                    (f"inputs[{name}] reference"),
+                    _exact_reference(
+                        value,
+                        stage.id,
+                        f"inputs[{name}]",
+                        origin,
+                        source.line((*here, "inputs", name)),
+                    ),
+                    f"inputs[{name}] reference",
+                    ("inputs", name),
                 )
 
-    for template, where in _templates(stage):
+    for template, where, field in _templates(stage):
         try:
             found = interpolation.references(template)
         except InterpolationError as exc:
             raise WorkflowLoadError(
-                f"has an invalid placeholder in {where}: {exc}", origin=origin, stage_id=stage.id
+                f"has an invalid placeholder in {where}: {exc}",
+                origin=origin,
+                stage_id=stage.id,
+                line=source.line((*here, *field)),
             ) from None
         for reference in found:
-            yield reference, f"{where} placeholder '${{{reference.text}}}'"
+            yield reference, f"{where} placeholder '${{{reference.text}}}'", field
 
     if isinstance(stage, ScriptStage) and interpolation.contains_placeholder(stage.command[0]):
         raise WorkflowLoadError(
             f"interpolates command[0] ({stage.command[0]!r})",
             origin=origin,
             stage_id=stage.id,
+            line=source.line((*here, "command", 0)),
             hint=(
                 "which executable runs is the workflow author's decision; "
                 "a value from an earlier step must not choose it"
@@ -478,7 +633,7 @@ def _references(stage: Stage, origin: str) -> Iterator[tuple[Reference, str]]:
         )
 
 
-def _templates(stage: Stage) -> Iterator[tuple[str, str]]:
+def _templates(stage: Stage) -> Iterator[tuple[str, str, DocumentPath]]:
     """The fields a value may be interpolated into, and their names.
 
     Deliberately a closed list. Anything reachable by an expansion is a place
@@ -487,35 +642,38 @@ def _templates(stage: Stage) -> Iterator[tuple[str, str]]:
     """
     if isinstance(stage, ScriptStage):
         for index, element in enumerate(stage.command[1:], start=1):
-            yield element, f"command[{index}]"
+            yield element, f"command[{index}]", ("command", index)
         for name, value in stage.env.items():
-            yield value, f"env[{name}]"
+            yield value, f"env[{name}]", ("env", name)
         if stage.cwd is not None:
-            yield stage.cwd, "cwd"
+            yield stage.cwd, "cwd", ("cwd",)
         if stage.stdin is not None:
-            yield stage.stdin, "stdin"
+            yield stage.stdin, "stdin", ("stdin",)
     elif isinstance(stage, AgentStage):
-        yield stage.task, "task"
+        yield stage.task, "task", ("task",)
     elif isinstance(stage, RunnerStage):
         if stage.plan is not None:
-            yield stage.plan, "plan"
+            yield stage.plan, "plan", ("plan",)
     elif isinstance(stage, ApprovalStage):
-        yield stage.prompt, "prompt"
+        yield stage.prompt, "prompt", ("prompt",)
 
 
 def _template_references(
-    template: str, stage_id: str, field: str, origin: str
+    template: str, stage_id: str, field: str, origin: str, line: int | None = None
 ) -> tuple[Reference, ...]:
     try:
         return interpolation.references(template)
     except InterpolationError as exc:
         raise WorkflowLoadError(
-            f"has an invalid placeholder in {field}: {exc}", origin=origin, stage_id=stage_id
+            f"has an invalid placeholder in {field}: {exc}",
+            origin=origin,
+            stage_id=stage_id,
+            line=line,
         ) from None
 
 
 def _condition_references(
-    expression: str, stage_id: str, field: str, origin: str
+    expression: str, stage_id: str, field: str, origin: str, line: int | None = None
 ) -> tuple[Reference, ...]:
     try:
         node = conditions.parse(expression)
@@ -524,23 +682,30 @@ def _condition_references(
             f"has an invalid {field!r} condition: {exc.message}",
             origin=origin,
             stage_id=stage_id,
+            line=line,
             hint=_caret(exc.expression, exc.position),
         ) from None
     return conditions.references(node)
 
 
-def _exact_reference(value: str, stage_id: str, field: str, origin: str) -> Reference:
+def _exact_reference(
+    value: str, stage_id: str, field: str, origin: str, line: int | None = None
+) -> Reference:
     try:
         reference = refs.parse_reference(value)
     except ValueError as exc:
         raise WorkflowLoadError(
-            f"has an invalid {field!r} reference: {exc}", origin=origin, stage_id=stage_id
+            f"has an invalid {field!r} reference: {exc}",
+            origin=origin,
+            stage_id=stage_id,
+            line=line,
         ) from None
     if not value.startswith("$"):
         raise WorkflowLoadError(
             f"{field!r} must be an exact '$stage.json.path' reference",
             origin=origin,
             stage_id=stage_id,
+            line=line,
         )
     return reference
 

@@ -220,6 +220,50 @@ The default is 1 because each one is a real run against a real model. `--dry-run
 on `work` is identical to `triage` — same read-only preview, just spelled the
 way you're already typing.
 
+## 7b. Writing your own workflow
+
+The three shipped workflows are examples, not a menu. When you edit one — or
+write a new one — three commands answer "is this file right" without spending
+anything:
+
+```sh
+clawdence workflow validate my-workflow.yaml   # will it load, and if not, where
+clawdence workflow graph my-workflow.yaml      # what process does it describe
+clawdence workflow test my-workflow.yaml       # walk it end to end, running nothing
+```
+
+`validate` checks the YAML, the schema, and every `$stage.facet` reference in the
+file — including that each one names a stage declared *earlier* than the stage
+reading it, which is the mistake that otherwise turns into a guard that silently
+never fires. Failures name the file, the line and the stage:
+
+```
+my-workflow.yaml:42: stage 'review': 'when' condition '$cod.succeeded' refers to
+stage 'cod', which no stage declares (and no scope variable provides)
+  hint: values available here: assess, code, plan, request
+```
+
+`graph` prints the outline — order, nesting, guards, and which stages each one
+reads. `--format mermaid` gives you a diagram that renders in a pull request.
+
+`test` runs the real engine with every step type stubbed: no model is called, no
+repository is touched, nothing is recorded. Because a stubbed step produces
+nothing for the next stage's guard to read, it *invents* a result for each stage
+from what the rest of the file reads out of it — enough to satisfy the
+comparisons the guards make, so the run takes the happy path rather than skipping
+everything. It prints what it made up, so you can see which values were real
+decisions and which were placeholders.
+
+To walk a different branch, override a stage's invented result:
+
+```sh
+clawdence workflow test examples/sprint.yaml \
+  --request-text "add a health endpoint" \
+  --output 'assessment={"result": {"size": "L"}}'
+```
+
+`schema_version` and what changes bump it: `docs/workflow-schema.md`.
+
 ## 8. What "it worked" looks like
 
 - A branch under `clawdence/` on your remote.
@@ -316,6 +360,9 @@ the repair.
 ## Where to look when you want more than this walkthrough gives
 
 - `README.md` — the fuller tour of every layer, in the order they were built.
+- `docs/workflow-schema.md` — what `schema_version` means, and the compatibility
+  policy: which changes bump it, which do not, and what happens when a file and
+  a build disagree.
 - `docs/security/threat-model.md` — what's built, what's designed, what's
   accepted, and why. Worth reading before you point this at anything you
   didn't write yourself.

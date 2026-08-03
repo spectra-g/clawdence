@@ -42,7 +42,7 @@ def render_text(report: RunReport) -> str:
         "",
     ]
     for result in report.attempts:
-        lines.append(_line(result))
+        lines.append(render_line(result))
         detail = _detail(result)
         if detail:
             lines.append(f"        {detail}")
@@ -54,7 +54,14 @@ def render_text(report: RunReport) -> str:
     return "\n".join(lines)
 
 
-def _line(result: StepResult) -> str:
+def render_line(result: StepResult) -> str:
+    """One stage's line in a trace.
+
+    Public because the dry run prints the same column for the same statuses, and
+    two renderers of these would drift into two vocabularies for one set of
+    facts — which is exactly what a dry run is supposed to rule out about the
+    run it is standing in for.
+    """
     attempt = f" (attempt {result.attempt})" if result.attempt > 1 else ""
     if result.scope:
         declared = result.definition_id if result.definition_id is not None else result.stage_id

@@ -1106,3 +1106,183 @@ def test_running_a_workflow_with_an_agent_step_and_no_key_halts_at_that_step(
     assert "understand" in out
     assert "step-type-not-implemented" in out
     assert "status: halted" in out
+
+
+class TestWorkflowCommands:
+    """S3c's three verbs: check the file, draw it, rehearse it.
+
+    None of them runs anything real, which is what makes them usable on a file
+    somebody just wrote — including one that has never been near a repository,
+    a model or a state database.
+    """
+
+    BROKEN = (
+        "schema_version: 1\n"
+        "name: broken\n"
+        "version: 1.0.0\n"
+        "stages:\n"
+        "  - id: build\n"
+        "    type: script\n"
+        "    command: [make]\n"
+        "  - id: review\n"
+        "    type: script\n"
+        "    when: '$bild.succeeded'\n"
+        "    command: [make, review]\n"
+    )
+
+    def broken(self, tmp_path: Path) -> Path:
+        path = tmp_path / "broken.yaml"
+        path.write_text(self.BROKEN, encoding="utf-8")
+        return path
+
+    def test_validate_accepts_the_shipped_examples(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        files = sorted(str(path) for path in Path("examples").glob("*.yaml"))
+        assert main(["workflow", "validate", *files]) == 0
+        assert capsys.readouterr().out.count("ok  ") == len(files)
+
+    def test_validate_names_the_stage_and_the_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The step's own acceptance criterion, at the surface a user touches."""
+        assert main(["workflow", "validate", str(self.broken(tmp_path))]) == 1
+        err = capsys.readouterr().err
+        assert "broken.yaml:10: stage 'review':" in err
+        assert "'bild'" in err
+        assert "Traceback" not in err
+
+    def test_validate_checks_every_file_before_giving_up(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(
+                [
+                    "workflow",
+                    "validate",
+                    str(self.broken(tmp_path)),
+                    "examples/toy.yaml",
+                ]
+            )
+            == 1
+        )
+        captured = capsys.readouterr()
+        assert "broken.yaml:10" in captured.err
+        assert "toy@1.0.0" in captured.out
+
+    def test_validate_json_is_one_record_per_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(
+                ["workflow", "validate", "--json", "examples/toy.yaml", str(self.broken(tmp_path))]
+            )
+            == 1
+        )
+        records = json.loads(capsys.readouterr().out)
+        assert [record["ok"] for record in records] == [True, False]
+        assert records[0]["name"] == "toy"
+        assert records[1]["line"] == 10
+
+    def test_graph_draws_the_outline(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["workflow", "graph", "examples/sprint.yaml"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("sprint@1.0.0")
+        assert "requirements" in out
+
+    def test_graph_can_emit_mermaid(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert main(["workflow", "graph", "--format", "mermaid", "examples/toy.yaml"]) == 0
+        assert capsys.readouterr().out.startswith("flowchart TD")
+
+    def test_graph_refuses_a_file_that_will_not_load(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["workflow", "graph", str(self.broken(tmp_path))]) == 2
+        assert "broken.yaml:10" in capsys.readouterr().err
+
+    def test_test_rehearses_without_a_key_or_a_repository(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`sprint` is three agent steps and a runner. It costs nothing here."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert main(["workflow", "test", "examples/sprint.yaml"]) == 0
+        out = capsys.readouterr().out
+        assert "no model call, no repository, no state" in out
+        assert "status: done" in out
+
+    def test_test_records_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No `--state` flag exists on this verb, and none is wanted.
+
+        Pointed at an empty home, a rehearsal must leave it empty: a dry run
+        that wrote a run record would put work nobody did into the history.
+        """
+        monkeypatch.setenv("CLAWDENCE_HOME", str(tmp_path))
+        assert main(["workflow", "test", "examples/sprint.yaml"]) == 0
+        assert list(tmp_path.iterdir()) == []
+
+    def test_test_takes_the_request_from_the_command_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(
+                ["workflow", "test", "examples/sprint.yaml", "--request-text", "add a health check"]
+            )
+            == 0
+        )
+        assert "add a health check" in capsys.readouterr().out
+
+    def test_test_reads_a_request_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        request = tmp_path / "request.json"
+        request.write_text(json.dumps({"text": "from a file"}), encoding="utf-8")
+        assert main(["workflow", "test", "examples/sprint.yaml", "--request", str(request)]) == 0
+        assert "from a file" in capsys.readouterr().out
+
+    def test_test_can_steer_a_stage_to_walk_the_other_branch(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(
+                [
+                    "workflow",
+                    "test",
+                    "--json",
+                    "examples/sprint.yaml",
+                    "--output",
+                    'assessment={"result": {"size": "L"}}',
+                ]
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        statuses = {step["stage_id"]: step["status"] for step in payload["run"]["attempts"]}
+        assert statuses["plan"] == "skipped"
+
+    def test_test_rejects_an_override_that_is_not_stage_equals_json(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["workflow", "test", "examples/toy.yaml", "--output", "nonsense"]) == 2
+        assert "--output takes STAGE=JSON" in capsys.readouterr().err
+
+    def test_test_rejects_an_override_that_is_not_json(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["workflow", "test", "examples/toy.yaml", "--output", "classify={"]) == 2
+        assert "--output classify" in capsys.readouterr().err
+
+    def test_test_reports_a_missing_request_file_without_a_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert (
+            main(["workflow", "test", "examples/toy.yaml", "--request", str(tmp_path / "gone")])
+            == 2
+        )
+        captured = capsys.readouterr()
+        assert "--request: cannot read" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_workflow_with_no_verb_prints_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            main(["workflow"])
+        assert "validate" in capsys.readouterr().out

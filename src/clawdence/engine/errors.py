@@ -13,9 +13,10 @@ is caught before the first stage starts.
 **Run-time** (``StepFailure`` and the two evaluation errors) — everything that
 depends on what a step actually produced.
 
-``WorkflowLoadError`` carries ``origin`` and ``stage_id`` so the message names
-the file and the stage rather than leaving the author to grep for a quoted
-fragment.
+``WorkflowLoadError`` carries ``origin``, ``line`` and ``stage_id`` so the
+message names the file, the line and the stage rather than leaving the author to
+grep for a quoted fragment. The line comes from ``source``; it is absent for a
+workflow built in Python, which has no file to point at.
 """
 
 from __future__ import annotations
@@ -38,15 +39,24 @@ class WorkflowLoadError(EngineError):
         origin: str | None = None,
         stage_id: str | None = None,
         hint: str | None = None,
+        line: int | None = None,
     ) -> None:
         self.message = message
         self.origin = origin
         self.stage_id = stage_id
         self.hint = hint
+        self.line = line
         super().__init__(self._render())
 
     def _render(self) -> str:
+        """``file:line: stage 'id': what is wrong``, then the hint.
+
+        ``file:line:`` first because that prefix is what an editor, a terminal
+        and every other compiler-shaped tool already know how to jump to.
+        """
         prefix = self.origin or "<workflow>"
+        if self.line is not None:
+            prefix = f"{prefix}:{self.line}"
         if self.stage_id is not None:
             prefix = f"{prefix}: stage {self.stage_id!r}"
         text = f"{prefix}: {self.message}"

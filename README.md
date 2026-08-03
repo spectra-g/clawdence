@@ -104,6 +104,32 @@ process dies halfway through fan-out, resuming trusts only completed children an
 when writing a workflow. `clawdence work` is the other one: it takes a submitted request, routes it,
 and runs the workflow that routing chose — see [triage](#triage-and-the-path-from-a-request-to-a-pull-request).
 
+### Writing one
+
+Three commands act on a file and nothing else, because users will write and modify workflows and a
+flexibility nobody can exercise is theoretical:
+
+```sh
+uv run clawdence workflow validate examples/*.yaml       # will they load, and if not, where
+uv run clawdence workflow graph examples/sprint.yaml     # the process, as an outline or mermaid
+uv run clawdence workflow test examples/sprint.yaml      # walk it end to end, running nothing
+```
+
+- **`validate`** is the load-time check above, addressed to a person: every failure names the file,
+  the **line** and the stage. The line comes from a second parse that maps values back to their
+  position, keyed by the same document path pydantic reports its own errors with.
+- **`graph`** draws what the file declares — order, nesting, guards, and which stages each one reads.
+  Nothing is resolved and nothing is run, so it is safe against a file you did not write.
+- **`test`** runs the *real* engine with every step type stubbed: no model call, no repository, no
+  state. Because a stub produces nothing for the next guard to read, it first **invents** a result
+  per stage from what the rest of the file reads out of it — values chosen to satisfy the
+  comparisons the guards make, so the rehearsal takes the happy path instead of skipping everything.
+  Every invented value is printed. `--output 'stage={...}'` overrides one to walk another branch.
+
+`schema_version` is checked before anything else and a file from another release is refused rather
+than half-interpreted; [`docs/workflow-schema.md`](docs/workflow-schema.md) states which changes bump
+it and which do not.
+
 `approval` steps parse and validate and then refuse, with an error naming the step that will
 implement them. That refusal is deliberate and it is the same one `runner` steps gave until triage
 existed to say which repository they were for: a stub returning success would make a workflow look

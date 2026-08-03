@@ -52,7 +52,8 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from pydantic import ValidationError
+import yaml
+from pydantic import JsonValue, ValidationError
 
 from clawdence import __version__, triage
 from clawdence.agent import AgentHandler, AnthropicModels, PromptRegistry
@@ -78,10 +79,15 @@ from clawdence.engine import (
     UnimplementedHandler,
     WorkflowLoadError,
     default_registry,
+    dry_run,
     execute,
     load_workflow,
+    render_dry_run,
+    render_dry_run_json,
     render_json,
+    render_mermaid,
     render_text,
+    render_tree,
 )
 from clawdence.ingest import DEFAULT_TYPE, NormaliseError
 from clawdence.ingest import cli as ingest_cli
@@ -615,6 +621,72 @@ def build_parser() -> argparse.ArgumentParser:
         "--id", dest="repo_id", metavar="ID", help="Override the derived repo id."
     )
 
+    workflow_parser = subcommands.add_parser(
+        "workflow",
+        help="Check, draw and rehearse a workflow file. Runs nothing real.",
+    )
+    workflow_actions = workflow_parser.add_subparsers(dest="workflow_command")
+
+    workflow_validate = workflow_actions.add_parser(
+        "validate",
+        help="Check one or more workflow files and say where the problems are.",
+    )
+    workflow_validate.add_argument(
+        "files", type=Path, nargs="+", metavar="WORKFLOW", help="Workflow YAML files."
+    )
+    workflow_validate.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit one record per file instead of a report.",
+    )
+
+    workflow_graph = workflow_actions.add_parser(
+        "graph",
+        help="Draw the process the file declares, without running it.",
+    )
+    workflow_graph.add_argument("file", type=Path, metavar="WORKFLOW")
+    workflow_graph.add_argument(
+        "--format",
+        dest="graph_format",
+        choices=("text", "mermaid"),
+        default="text",
+        help="text is an outline for the terminal; mermaid renders in GitHub.",
+    )
+
+    workflow_test = workflow_actions.add_parser(
+        "test",
+        help="Rehearse a workflow against invented results. No model, no repo, no state.",
+    )
+    workflow_test.add_argument("file", type=Path, metavar="WORKFLOW")
+    workflow_test.add_argument(
+        "--request",
+        type=Path,
+        metavar="PATH",
+        help="JSON or YAML file standing in for the work item, read as ${request.json.…}.",
+    )
+    workflow_test.add_argument(
+        "--request-text",
+        metavar="TEXT",
+        help="Shorthand for a request whose 'text' is this. Overrides --request's text.",
+    )
+    workflow_test.add_argument(
+        "--output",
+        action="append",
+        default=[],
+        metavar="STAGE=JSON",
+        help=(
+            "Override what a stage is pretended to have produced, to walk another "
+            "branch. JSON, or @path to a file. Repeatable."
+        ),
+    )
+    workflow_test.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit the rehearsal, the plan and the invented values as JSON.",
+    )
+
     schema = subcommands.add_parser(
         "schema",
         help="Generate or verify the JSON Schema projected from the domain model.",
@@ -833,6 +905,139 @@ def _run_command(
 
     print(render_json(report) if as_json else render_text(report))
     return 0 if report.succeeded else 1
+
+
+def _workflow_validate(paths: Sequence[Path], *, as_json: bool) -> int:
+    """Check every file named, and exit non-zero if any of them will not load.
+
+    Every file, not up to the first failure: someone editing three workflows
+    wants all three verdicts from one run, and a checker that stops early makes
+    fixing them a serial process.
+    """
+    records: list[dict[str, JsonValue]] = []
+    failed = False
+    for path in paths:
+        try:
+            workflow = load_workflow(path)
+        except WorkflowLoadError as exc:
+            failed = True
+            records.append(
+                {
+                    "file": str(path),
+                    "ok": False,
+                    "error": exc.message,
+                    "line": exc.line,
+                    "stage": exc.stage_id,
+                    "hint": exc.hint,
+                }
+            )
+            if not as_json:
+                print(exc, file=sys.stderr)
+            continue
+        embedded: list[JsonValue] = [*sorted(workflow.sub_workflows)]
+        records.append(
+            {
+                "file": str(path),
+                "ok": True,
+                "name": workflow.name,
+                "version": workflow.version,
+                "schema_version": workflow.schema_version,
+                "stages": len(workflow.stages),
+                "sub_workflows": embedded,
+            }
+        )
+        if not as_json:
+            count = len(workflow.stages)
+            print(
+                f"ok  {path}  {workflow.name}@{workflow.version}  "
+                f"({count} stage{'' if count == 1 else 's'}, schema {workflow.schema_version})"
+            )
+    if as_json:
+        print(json.dumps(records, indent=2, sort_keys=True, ensure_ascii=False))
+    return 1 if failed else 0
+
+
+def _workflow_graph(path: Path, *, graph_format: str) -> int:
+    try:
+        workflow = load_workflow(path)
+    except WorkflowLoadError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    print(render_mermaid(workflow) if graph_format == "mermaid" else render_tree(workflow))
+    return 0
+
+
+def _workflow_test(
+    path: Path,
+    *,
+    request: Path | None,
+    request_text: str | None,
+    overrides: Sequence[str],
+    as_json: bool,
+) -> int:
+    """Rehearse the file. Exit 1 if the rehearsal did not reach the end.
+
+    Exit 1 rather than zero-with-a-warning because this is meant to run in CI
+    over a directory of workflows, and the point of a dry run is to be the thing
+    that fails before a real one does.
+    """
+    try:
+        workflow = load_workflow(path)
+    except WorkflowLoadError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    try:
+        seeded = _dry_run_request(request, request_text)
+        outputs = _dry_run_outputs(overrides)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    report = asyncio.run(dry_run(workflow, request=seeded, outputs=outputs))
+    print(render_dry_run_json(report) if as_json else render_dry_run(report))
+    return 0 if report.succeeded else 1
+
+
+def _dry_run_request(path: Path | None, text: str | None) -> JsonValue | None:
+    """The stand-in work item: a file, a string, both, or neither."""
+    seeded: JsonValue | None = None
+    if path is not None:
+        seeded = _read_json_document(path, "--request")
+    if text is not None:
+        merged = dict(seeded) if isinstance(seeded, dict) else {}
+        merged["text"] = text
+        seeded = merged
+    return seeded
+
+
+def _dry_run_outputs(overrides: Sequence[str]) -> dict[str, JsonValue]:
+    outputs: dict[str, JsonValue] = {}
+    for override in overrides:
+        stage_id, separator, raw = override.partition("=")
+        if not separator or not stage_id:
+            raise ValueError(f"--output takes STAGE=JSON, not {override!r}")
+        if raw.startswith("@"):
+            outputs[stage_id] = _read_json_document(Path(raw[1:]), f"--output {stage_id}")
+            continue
+        try:
+            outputs[stage_id] = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(f"--output {stage_id}: {exc}") from None
+    return outputs
+
+
+def _read_json_document(path: Path, what: str) -> JsonValue:
+    """Read JSON or YAML. ``safe_load`` only — see ``engine.loader`` on why."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{what}: cannot read {path}: {exc.strerror or exc}") from None
+    try:
+        loaded: JsonValue = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{what}: {path} is not valid JSON or YAML: {exc}") from None
+    return loaded
 
 
 def _probe_command(
@@ -1743,6 +1948,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             name=args.name,
             repo_id=args.repo_id,
         )
+
+    if args.command == "workflow":
+        if args.workflow_command == "validate":
+            return _workflow_validate(args.files, as_json=args.as_json)
+        if args.workflow_command == "graph":
+            return _workflow_graph(args.file, graph_format=args.graph_format)
+        if args.workflow_command == "test":
+            return _workflow_test(
+                args.file,
+                request=args.request,
+                request_text=args.request_text,
+                overrides=args.output,
+                as_json=args.as_json,
+            )
+        parser.parse_args(["workflow", "--help"])
+        return 0  # pragma: no cover - --help exits
 
     if args.command == "schema":
         action: str = args.action
