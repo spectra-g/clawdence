@@ -86,6 +86,36 @@ def test_a_contract_without_evidence_says_tests_may_be_null(request_for: Request
     assert "`tests` may be null" in text
 
 
+def test_only_the_tdd_contract_asks_for_the_red_run(request_for: RequestFactory) -> None:
+    """The field that makes ``outside-in-tdd`` checkable, and the reason it is
+    shown to one contract only.
+
+    A field an agent is shown is a field it will try to fill in, so offering
+    ``red_tests`` under ``test-after`` would be inviting it to invent evidence
+    for a contract that never asked for any.
+    """
+    tdd = build_plan(request_for(contract=VerificationContract(kind=ContractKind.OUTSIDE_IN_TDD)))
+    after = build_plan(request_for(contract=VerificationContract(kind=ContractKind.TEST_AFTER)))
+
+    assert '"red_tests"' in tdd
+    assert "before** writing the implementation" in tdd
+    assert "red_tests" not in after
+
+
+def test_the_tdd_contract_says_the_two_runs_are_compared(request_for: RequestFactory) -> None:
+    """Told in terms of what is checked rather than what is wanted.
+
+    The comparison is arithmetic the agent cannot talk its way past, and one
+    that knows the check exists writes the real numbers instead of the ones it
+    thinks will pass — the same reasoning as telling it the runner re-derives
+    the diff with git.
+    """
+    text = build_plan(request_for(contract=VerificationContract(kind=ContractKind.OUTSIDE_IN_TDD)))
+
+    assert "Both are compared" in text
+    assert "fewer tests than `red_tests`" in text
+
+
 def test_the_empty_diff_rule_is_stated(request_for: RequestFactory) -> None:
     """The agent is told what ``EMPTY_DIFF`` means before it produces one."""
     required = build_plan(request_for())

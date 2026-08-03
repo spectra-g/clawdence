@@ -1,0 +1,423 @@
+{
+  "$defs": {
+    "ContractKind": {
+      "description": "The four contracts v2.0 ships.\n\n``OUTSIDE_IN_TDD`` is one option among four rather than the welded-in\ndefault it was in v1 — 175 references to it inside the orchestrator is\nwhat made the process impossible to vary per work item.",
+      "enum": [
+        "outside-in-tdd",
+        "test-after",
+        "build-only",
+        "none"
+      ],
+      "title": "ContractKind",
+      "type": "string"
+    },
+    "FailingAssertion": {
+      "additionalProperties": false,
+      "description": "One failure, extracted from a reporter — not a stack trace dump.",
+      "properties": {
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Frames",
+          "type": "array"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "test_id": {
+          "title": "Test Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test_id",
+        "message"
+      ],
+      "title": "FailingAssertion",
+      "type": "object"
+    },
+    "HaltState": {
+      "description": "Why a run stopped and is waiting for a person.\n\nv1 had twelve ``_halt_story_for_human`` call sites and no enumeration of\nwhat they meant, so the resume vocabulary grew one verb per site. These are\nthe states; ``clawdence.verify.halt`` maps each to the resumptions it\nadmits, and no state admits ``APPROVE``.\n\nThey are distinguished by **what a person would have to change** to make a\nresumption worth anything, which is the only distinction a halt state is\nread to make:\n\n``RETRIES_EXHAUSTED``\n    The contract was not met within ``max_attempts``. Retrying without\n    changing something outside the run gets the same answer at the same\n    price — but a human who *has* changed something (a fixture, a\n    dependency, the plan) has a real reason to retry, so the verb stays.\n``BLOCKED``\n    Something outside the agent's control stopped it. The repair is\n    elsewhere and the attempts are irrelevant, which is why this is not\n    just an exhaustion with a lower count.\n``BUDGET_EXCEEDED``\n    The money ran out. ``RETRY`` is pointless — the same budget is spent\n    again to reach the same cap — so only a ``RESTART`` carrying a new\n    budget, or abandoning the item, means anything here.\n``EVIDENCE_STALE``\n    The tree moved under evidence that had passed: a rebase, a force-push,\n    an advanced base. Nothing is wrong with the work and nothing is wrong\n    with the tests; what is missing is a run of them against the tree that\n    would actually land. This is the state S15b's auto-rebase produces, and\n    the reason evidence carries a tree hash at all.\n``VERIFICATION_ERROR``\n    The contract could not be evaluated — an unparseable report, a reporter\n    the repository declares and does not emit. A failure of our plumbing or\n    the repository's configuration rather than of the work, and kept\n    separate so it is not silently counted as a failing test.",
+      "enum": [
+        "retries-exhausted",
+        "blocked",
+        "budget-exceeded",
+        "evidence-stale",
+        "verification-error"
+      ],
+      "title": "HaltState",
+      "type": "string"
+    },
+    "ResumeVerb": {
+      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings — one verb per call site, because the states were never named in\none place. Four verbs, each distinct, and which of them a given halt admits\nis derived from its ``HaltState`` rather than chosen per call.\n\n``SKIP`` is the one worth defining precisely, because a careless reading\nmakes it the force-proceed this module forbids. It **abandons** the work\nitem: the run ends, nothing merges, and the branch is left for a person.\nIt is not \"proceed to the next stage without the evidence\". Nothing in the\nverb set can produce a merge on unmet evidence, which is the invariant\n``clawdence.verify.halt`` asserts over the whole state table.",
+      "enum": [
+        "restart",
+        "retry",
+        "approve",
+        "skip"
+      ],
+      "title": "ResumeVerb",
+      "type": "string"
+    },
+    "Shortfall": {
+      "description": "Why a contract was not met — matchable, not prose.\n\n``VerificationResult.detail`` is for a person; this is what the retry\npolicy, the halt states and (later) S17's approval context branch on. The\nsame reasoning as ``StepError.kind``: a policy that has to regex an English\nsentence is one that breaks when somebody improves the wording.\n\nThe distinctions that earn their place are the ones handled differently.\n``NO_TEST_EVIDENCE`` and ``TESTS_FAILED`` are both \"the tests do not show\nthis works\" and both worth another attempt — but only the first can be\ncaused by a repository whose reporter is misconfigured, which is a fact\nabout the setup rather than about the code. ``NO_RED_PHASE`` and\n``VACUOUS_RED`` are the two ways outside-in TDD is faked, and they are\nseparate because the second one is a test that exists and asserts nothing,\nwhich is the more interesting failure to show a human.",
+      "enum": [
+        "no-tree",
+        "runner-failed",
+        "empty-diff",
+        "pre-verify-failed",
+        "build-failed",
+        "no-test-evidence",
+        "tests-failed",
+        "partial-suite",
+        "no-red-phase",
+        "vacuous-red",
+        "tests-removed"
+      ],
+      "title": "Shortfall",
+      "type": "string"
+    },
+    "TestEvidence": {
+      "additionalProperties": false,
+      "description": "Structured result of a test run.",
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "failed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Failed",
+          "type": "integer"
+        },
+        "failures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FailingAssertion"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "passed": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Passed",
+          "type": "integer"
+        },
+        "reporter": {
+          "$ref": "#/$defs/TestReporter"
+        },
+        "skipped": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Skipped",
+          "type": "integer"
+        },
+        "total": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reporter"
+      ],
+      "title": "TestEvidence",
+      "type": "object"
+    },
+    "TestReporter": {
+      "description": "Machine-readable test output formats.\n\nDeclared per repo, consumed here. Raw stdout is not an option: a failing\nsuite emits thousands of lines, feeding them back exhausts the agent's\ncontext budget, and head/tail truncation drops the assertion the model\nactually needs — producing retry loops that burn to the cost cap without\never seeing the error.",
+      "enum": [
+        "junit-xml",
+        "jest-json",
+        "pytest-json-report",
+        "go-test-json",
+        "cargo-json",
+        "none"
+      ],
+      "title": "TestReporter",
+      "type": "string"
+    },
+    "VerificationContract": {
+      "additionalProperties": false,
+      "description": "A declaration of what counts as done, and what happens when it isn't.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ContractKind"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "on_exhausted": {
+          "const": "halt_to_human",
+          "default": "halt_to_human",
+          "title": "On Exhausted",
+          "type": "string"
+        },
+        "pre_verify": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pre Verify"
+        },
+        "require_full_test_suite": {
+          "default": false,
+          "title": "Require Full Test Suite",
+          "type": "boolean"
+        },
+        "require_non_empty_diff": {
+          "default": true,
+          "title": "Require Non Empty Diff",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "VerificationContract",
+      "type": "object"
+    },
+    "VerificationResult": {
+      "additionalProperties": false,
+      "description": "Evidence that a contract was met, bound to the tree it was met on.",
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "checked_at": {
+          "format": "date-time",
+          "title": "Checked At",
+          "type": "string"
+        },
+        "contract": {
+          "$ref": "#/$defs/VerificationContract"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "red_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "shortfalls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Shortfall"
+          },
+          "title": "Shortfalls",
+          "type": "array"
+        },
+        "tree_hash": {
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Tree Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "passed",
+        "tree_hash",
+        "attempt",
+        "checked_at"
+      ],
+      "title": "VerificationResult",
+      "type": "object"
+    }
+  },
+  "$id": "https://clawdence.dev/schemas/halt-record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What a halted run records — the thing a person is handed.\n\nEverything needed to understand the halt without re-deriving it, because\nre-deriving it is what S17 must not spend its budget on and what v1 made\nimpossible: the state, the evidence that led to it, and the resumptions it\nadmits.\n\n``admits`` is **denormalised onto the record** rather than looked up from\nthe state. That is a deliberate duplication of\n``clawdence.verify.halt.RESUMPTIONS``: a stored halt is read months later,\nby an operator surface that may be a different version of this code, and a\nrecord that says only ``retries-exhausted`` needs our table to mean\nanything. Written from the table by ``halt_for``, so the two cannot\ndisagree at the moment of writing, and a test asserts the round trip.",
+  "properties": {
+    "admits": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ResumeVerb"
+      },
+      "title": "Admits",
+      "type": "array"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "attempts": {
+      "minimum": 0,
+      "title": "Attempts",
+      "type": "integer"
+    },
+    "contract": {
+      "$ref": "#/$defs/ContractKind"
+    },
+    "last_result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VerificationResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "max_attempts": {
+      "minimum": 1,
+      "title": "Max Attempts",
+      "type": "integer"
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "stage_id": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stage Id"
+    },
+    "state": {
+      "$ref": "#/$defs/HaltState"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "tree_hash": {
+      "anyOf": [
+        {
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tree Hash"
+    },
+    "work_item_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Work Item Id"
+    }
+  },
+  "required": [
+    "state",
+    "run_id",
+    "at",
+    "attempts",
+    "max_attempts",
+    "contract",
+    "summary"
+  ],
+  "title": "HaltRecord",
+  "type": "object"
+}

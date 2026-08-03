@@ -101,18 +101,34 @@ _E2E_RULES: Final[dict[E2EPolicy, str]] = {
     E2EPolicy.SKIP: "End-to-end tests are skipped for this repository.",
 }
 
+#: One test run, as the verdict reader accepts it.
+_TESTS_EXAMPLE: Final = {
+    "reporter": "junit-xml | jest-json | pytest-json-report | go-test-json | cargo-json | none",
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0,
+}
+
 #: Shown to the agent as the shape to write. Generated from the model rather
 #: than typed out, so it cannot drift from what the reader will accept.
 _VERDICT_EXAMPLE: Final = {
     "status": "passed | failed | blocked",
     "summary": "one line about what you did",
-    "tests": {
-        "reporter": "junit-xml | jest-json | pytest-json-report | go-test-json | cargo-json | none",
-        "total": 0,
-        "passed": 0,
-        "failed": 0,
-        "skipped": 0,
-    },
+    "tests": _TESTS_EXAMPLE,
+    "discovery_notes": ["something you learned about this codebase"],
+    "unresolved_stubs": ["something you deliberately left undone"],
+}
+
+#: The same shape with the red phase in it. Shown only under
+#: ``outside-in-tdd``, because a field an agent is shown is a field it will
+#: try to fill in — and a fabricated red run under ``test-after`` would be an
+#: invitation to invent evidence for a contract that never asked for any.
+_TDD_VERDICT_EXAMPLE: Final = {
+    "status": "passed | failed | blocked",
+    "summary": "one line about what you did",
+    "red_tests": _TESTS_EXAMPLE,
+    "tests": _TESTS_EXAMPLE,
     "discovery_notes": ["something you learned about this codebase"],
     "unresolved_stubs": ["something you deliberately left undone"],
 }
@@ -276,12 +292,27 @@ def _steering_section() -> str:
 
 
 def _verdict_section(kind: ContractKind) -> str:
-    shape = json.dumps(_VERDICT_EXAMPLE, indent=2)
-    evidence = (
-        "Fill in `tests` with the real counts from the run you did. "
-        if kind in (ContractKind.OUTSIDE_IN_TDD, ContractKind.TEST_AFTER)
-        else "`tests` may be null for this contract. "
-    )
+    tdd = kind is ContractKind.OUTSIDE_IN_TDD
+    shape = json.dumps(_TDD_VERDICT_EXAMPLE if tdd else _VERDICT_EXAMPLE, indent=2)
+
+    if tdd:
+        # Said in terms of what is checked rather than what is asked for. The
+        # comparison against the green run is arithmetic the agent cannot talk
+        # its way past, and an agent that knows the check exists writes the real
+        # numbers instead of the ones it thinks will pass — which is the same
+        # reasoning as telling it the runner re-derives the diff with git.
+        evidence = (
+            "Fill in `tests` with the real counts from the run you did, and `red_tests` "
+            "with the counts from the run you did **before** writing the implementation — "
+            "the one where the new test failed. Both are compared: a `red_tests` with no "
+            "failures in it, or a `tests` with fewer tests than `red_tests`, fails this "
+            "contract. Report what actually happened; a run that did not go red is worth "
+            "saying so about. "
+        )
+    elif kind is ContractKind.TEST_AFTER:
+        evidence = "Fill in `tests` with the real counts from the run you did. "
+    else:
+        evidence = "`tests` may be null for this contract. "
     return (
         "# When you are finished\n\n"
         f"Write `{VERDICT_PATH}` inside the worktree, as JSON:\n\n"

@@ -403,6 +403,52 @@ Repositories that require signed commits are refused at configuration time, with
 runner commits with `--no-gpg-sign` on purpose, and a signing key here would let the process every
 model's output passes through mark commits as verified.
 
+## Verification
+
+[`src/clawdence/verify/`](src/clawdence/verify/) decides whether a run is *done*. v1 answered that
+in one 405-line function with test-driven development welded into every branch, and referred to a
+TDD verdict in 175 places — so the process could not be varied per work item, and a repository that
+does not work that way could not use the system at all.
+
+Four contracts sit behind a registry: `outside-in-tdd`, `test-after`, `build-only`, `none`.
+`evaluate` never branches on which one it got, so "TDD is optional" is a property of a dict lookup
+rather than a promise.
+
+- **Evidence names a tree, and is evidence for no other.** Story tests pass at commit X, a conflict
+  forces a rebase onto an advanced base, and the merge lands commit Y — which nothing ever ran
+  against, while every dashboard reads green. The fix is not a state transition that fires on a
+  rebase, because that covers the mutations somebody enumerated and misses force-push, amend, an
+  advanced base under an open pull request, and a squash that rewrote the tree. It is string
+  equality against the hash, so *every* mutation invalidates and nothing has to remember to call
+  anything.
+- **`outside-in-tdd` asks for the red run.** "The tests pass" cannot tell TDD from test-after: a
+  suite with no test for the new behaviour is green too. So the contract wants the failing run
+  recorded *before* the change, and compares it to the one after — catching a red phase with
+  nothing failing in it (a test that asserts nothing) and a green run with fewer tests than the red
+  one (deleting the failing test, which leaves both runs looking correct in isolation).
+- **Only the assertion reaches the model.** A failing suite emits thousands of lines; forwarding
+  them exhausts the step's context budget, and truncating by position drops the assertion — which
+  is at the top of a pytest failure and the bottom of a JUnit one, so neither end is safe. The
+  reporter the profile declares is parsed, and what survives is the test, the file, the line, the
+  message and three frames. Vendor frames are dropped *before* that cut: the first three frames of
+  a jest stack are one line of your test and two of jest-circus.
+- **A doctype is refused rather than expanded.** `xml.etree` has no setting that bounds entity
+  expansion, and the expansion happens inside the parse you would be guarding. A test report has no
+  use for a DTD, so the whole defence is a byte scan — which is also why there is no `defusedxml`
+  dependency.
+- **Halting is a state, not a call site.** Five states, one table mapping each to the resumptions it
+  admits, and no state admits `approve` — asserted over the whole enum, so a state added later
+  fails the suite until somebody decides what it admits. v1 held that rule by convention across
+  twelve halt sites and grew one resume verb per site.
+- **Nothing here runs a command.** The re-check that executes a contract's `pre_verify` hook, and
+  re-derives evidence after a rebase without paying for another coding attempt, takes its executor
+  from the isolation tier. The commands are the *repository's*, and a default here would be a hole
+  in the plane split reachable by editing a YAML file.
+
+Which halt states exist is this package's; how a person acts on one — the verbs, who may use them,
+the audit trail — is the human-in-the-loop step's, derived from this table rather than invented per
+call site.
+
 ## The project probe
 
 [`src/clawdence/probe/`](src/clawdence/probe/) reads a repository and proposes the profile the

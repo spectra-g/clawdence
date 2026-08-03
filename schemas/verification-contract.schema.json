@@ -10,17 +10,6 @@
       ],
       "title": "ContractKind",
       "type": "string"
-    },
-    "ResumeVerb": {
-      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
-      "enum": [
-        "restart",
-        "retry",
-        "approve",
-        "skip"
-      ],
-      "title": "ResumeVerb",
-      "type": "string"
     }
   },
   "$id": "https://clawdence.dev/schemas/verification-contract.schema.json",
@@ -28,19 +17,6 @@
   "additionalProperties": false,
   "description": "A declaration of what counts as done, and what happens when it isn't.",
   "properties": {
-    "allowed_resume_verbs": {
-      "default": [
-        "restart",
-        "retry",
-        "approve",
-        "skip"
-      ],
-      "items": {
-        "$ref": "#/$defs/ResumeVerb"
-      },
-      "title": "Allowed Resume Verbs",
-      "type": "array"
-    },
     "kind": {
       "$ref": "#/$defs/ContractKind"
     },

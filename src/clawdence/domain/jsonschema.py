@@ -24,7 +24,7 @@ from clawdence.domain.events import Event
 from clawdence.domain.repo import RepoProfile
 from clawdence.domain.run import Run, StepResult
 from clawdence.domain.runner import RunnerRequest, RunnerResult
-from clawdence.domain.verification import VerificationContract, VerificationResult
+from clawdence.domain.verification import HaltRecord, VerificationContract, VerificationResult
 from clawdence.domain.work_item import WorkItem
 from clawdence.domain.workflow import Workflow
 
@@ -39,6 +39,11 @@ EXPORTED: tuple[type[BaseModel], ...] = (
     Budget,
     CostEntry,
     Event,
+    # Exported because S17's operator surface is a *different reader* of this
+    # record — a halt is stored, then acted on later, possibly by something
+    # that is not this process. A contract that crosses that gap is one the
+    # schema has to state.
+    HaltRecord,
     RepoProfile,
     Run,
     RunnerRequest,

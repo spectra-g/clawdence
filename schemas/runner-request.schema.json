@@ -535,17 +535,6 @@
       "title": "ResourceCaps",
       "type": "object"
     },
-    "ResumeVerb": {
-      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
-      "enum": [
-        "restart",
-        "retry",
-        "approve",
-        "skip"
-      ],
-      "title": "ResumeVerb",
-      "type": "string"
-    },
     "RoutingSignals": {
       "additionalProperties": false,
       "description": "Repo routing signal (S11). Matched against a work item's *raw* text.\n\nA dedicated object rather than two top-level fields so the two stay\nadjacent wherever this profile is read or written — sorted-key JSON\nserialization otherwise scatters them alphabetically among a dozen\nunrelated fields, which is exactly the wrong shape for two values that\nonly mean something together.",
@@ -587,19 +576,6 @@
       "additionalProperties": false,
       "description": "A declaration of what counts as done, and what happens when it isn't.",
       "properties": {
-        "allowed_resume_verbs": {
-          "default": [
-            "restart",
-            "retry",
-            "approve",
-            "skip"
-          ],
-          "items": {
-            "$ref": "#/$defs/ResumeVerb"
-          },
-          "title": "Allowed Resume Verbs",
-          "type": "array"
-        },
         "kind": {
           "$ref": "#/$defs/ContractKind"
         },

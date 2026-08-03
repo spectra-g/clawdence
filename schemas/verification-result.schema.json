@@ -64,15 +64,22 @@
       "title": "FailingAssertion",
       "type": "object"
     },
-    "ResumeVerb": {
-      "description": "What a human may do with a halted run.\n\nv1 accumulated ``restart`` / ``retry`` / ``retry-coding`` /\n``retry-consensus`` / ``approve`` / ``skip`` ad hoc, with overlapping\nmeanings. Four verbs, each distinct.",
+    "Shortfall": {
+      "description": "Why a contract was not met — matchable, not prose.\n\n``VerificationResult.detail`` is for a person; this is what the retry\npolicy, the halt states and (later) S17's approval context branch on. The\nsame reasoning as ``StepError.kind``: a policy that has to regex an English\nsentence is one that breaks when somebody improves the wording.\n\nThe distinctions that earn their place are the ones handled differently.\n``NO_TEST_EVIDENCE`` and ``TESTS_FAILED`` are both \"the tests do not show\nthis works\" and both worth another attempt — but only the first can be\ncaused by a repository whose reporter is misconfigured, which is a fact\nabout the setup rather than about the code. ``NO_RED_PHASE`` and\n``VACUOUS_RED`` are the two ways outside-in TDD is faked, and they are\nseparate because the second one is a test that exists and asserts nothing,\nwhich is the more interesting failure to show a human.",
       "enum": [
-        "restart",
-        "retry",
-        "approve",
-        "skip"
+        "no-tree",
+        "runner-failed",
+        "empty-diff",
+        "pre-verify-failed",
+        "build-failed",
+        "no-test-evidence",
+        "tests-failed",
+        "partial-suite",
+        "no-red-phase",
+        "vacuous-red",
+        "tests-removed"
       ],
-      "title": "ResumeVerb",
+      "title": "Shortfall",
       "type": "string"
     },
     "TestEvidence": {
@@ -151,19 +158,6 @@
       "additionalProperties": false,
       "description": "A declaration of what counts as done, and what happens when it isn't.",
       "properties": {
-        "allowed_resume_verbs": {
-          "default": [
-            "restart",
-            "retry",
-            "approve",
-            "skip"
-          ],
-          "items": {
-            "$ref": "#/$defs/ResumeVerb"
-          },
-          "title": "Allowed Resume Verbs",
-          "type": "array"
-        },
         "kind": {
           "$ref": "#/$defs/ContractKind"
         },
@@ -257,6 +251,25 @@
     "passed": {
       "title": "Passed",
       "type": "boolean"
+    },
+    "red_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TestEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "shortfalls": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Shortfall"
+      },
+      "title": "Shortfalls",
+      "type": "array"
     },
     "tree_hash": {
       "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",

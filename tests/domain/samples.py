@@ -29,6 +29,8 @@ from clawdence.domain import (
     EventKind,
     FailingAssertion,
     ForEachStage,
+    HaltRecord,
+    HaltState,
     IngestSource,
     IsolationTier,
     McpServer,
@@ -50,6 +52,7 @@ from clawdence.domain import (
     RunnerStage,
     RunStatus,
     ScriptStage,
+    Shortfall,
     SourceRef,
     StepError,
     StepResult,
@@ -120,7 +123,22 @@ CONTRACT = VerificationContract(
     pre_verify=("cp", "-n", ".env.example", ".env"),
     require_non_empty_diff=True,
     require_full_test_suite=True,
-    allowed_resume_verbs=(ResumeVerb.RETRY, ResumeVerb.SKIP),
+)
+
+RED_EVIDENCE = TestEvidence(
+    reporter=TestReporter.PYTEST_JSON_REPORT,
+    total=213,
+    passed=212,
+    failed=1,
+    duration_seconds=39.2,
+    failures=(
+        FailingAssertion(
+            test_id="tests/test_billing.py::test_prorates_mid_cycle",
+            file="tests/test_billing.py",
+            line=88,
+            message="AttributeError: 'Billing' object has no attribute 'prorate'",
+        ),
+    ),
 )
 
 VERIFICATION_RESULT = VerificationResult(
@@ -129,8 +147,25 @@ VERIFICATION_RESULT = VerificationResult(
     tree_hash=TREE,
     attempt=2,
     evidence=TEST_EVIDENCE,
+    red_evidence=RED_EVIDENCE,
+    shortfalls=(Shortfall.TESTS_FAILED,),
     checked_at=LATER,
     detail="1 failing assertion in the proration path",
+)
+
+HALT_RECORD = HaltRecord(
+    state=HaltState.RETRIES_EXHAUSTED,
+    run_id="run-01J8Z3",
+    work_item_id="wi-4417",
+    stage_id="code",
+    at=LATER,
+    attempts=3,
+    max_attempts=3,
+    contract=ContractKind.OUTSIDE_IN_TDD,
+    tree_hash=TREE,
+    last_result=VERIFICATION_RESULT,
+    admits=(ResumeVerb.RETRY, ResumeVerb.RESTART, ResumeVerb.SKIP),
+    summary="the outside-in-tdd contract was not met in 3 attempts",
 )
 
 REPO_PROFILE = RepoProfile(
@@ -388,6 +423,7 @@ SAMPLES = {
     "Budget": BUDGET,
     "CostEntry": COST_ENTRY,
     "Event": EVENT,
+    "HaltRecord": HALT_RECORD,
     "RepoProfile": REPO_PROFILE,
     "Run": RUN,
     "RunnerRequest": RUNNER_REQUEST,

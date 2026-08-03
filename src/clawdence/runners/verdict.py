@@ -81,8 +81,22 @@ class RunnerVerdict(DomainModel):
     #: One line for a human. Not parsed, not branched on.
     summary: str | None = Field(default=None, max_length=2000)
 
-    #: Structured test output. Absent when the contract asked for none.
+    #: Structured test output from the run *after* the change. Absent when the
+    #: contract asked for none.
     tests: TestEvidence | None = None
+
+    #: The run *before* the change, for ``outside-in-tdd``. This is the one
+    #: field that makes that contract more than a sterner prompt: a green suite
+    #: proves the code works and says nothing about whether a test was written
+    #: for the new behaviour, because a suite with no test for it is green too.
+    #: The red run is the evidence that one existed and failed.
+    #:
+    #: Still a *claim* — like everything else on this record — and it is checked
+    #: rather than believed: ``verify.contracts`` compares it against the green
+    #: run, so an agent that reports a red phase with nothing failing in it, or
+    #: that deleted tests between the two, is caught by the arithmetic rather
+    #: than by trusting the number.
+    red_tests: TestEvidence | None = None
 
     #: Findings about the codebase, bound for the memory layer (S14). Written by
     #: a process that read repository content, so they are an injection vector
