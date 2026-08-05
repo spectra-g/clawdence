@@ -89,7 +89,7 @@ def test_a_disconnect_during_ls_remote_is_a_typed_transient_failure(
     assert caught.value.kind == "remote-read-failed"
 
 
-def test_an_ssh_identity_rejection_is_a_typed_permanent_failure(
+def test_a_rejected_credential_is_a_typed_permanent_failure(
     vcs: GhVcs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def denied(*args: object, **kwargs: object) -> str:
@@ -100,7 +100,12 @@ def test_an_ssh_identity_rejection_is_a_typed_permanent_failure(
     with pytest.raises(PermanentError) as caught:
         run(vcs.head(REPO_ID, "main"))
     assert caught.value.kind == "remote-read-denied"
-    assert "configured SSH identity" in caught.value.message
+    # The fixture's remote is ``file://`` and its store configures no token, so
+    # the honest answer is that nothing was offered. Naming an SSH identity here
+    # — which is what this message used to do for every remote that had no token
+    # — sends the reader to look at keys that are not in the picture.
+    assert "nothing was offered" in caught.value.message
+    assert "SSH" not in caught.value.message
 
 
 # ------------------------------------------------------------ pull requests

@@ -433,7 +433,7 @@ class GhVcs:
             raw = await self.store.remote_git(profile, cwd, "ls-remote", "--", "origin", ref)
         except (GitError, OSError) as exc:
             raise remote_error(
-                profile, "remote-read", exc, token_name=self.store.token_name
+                profile, "remote-read", exc, credential=self.store.credential_note(profile)
             ) from exc
         for line in raw.splitlines():
             commit, _, found = line.partition("\t")

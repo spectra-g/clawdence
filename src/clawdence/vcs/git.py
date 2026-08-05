@@ -43,6 +43,18 @@ request git makes, and git makes requests to hosts this system did not choose:
 a submodule URL is content the repository controls, and an unscoped credential
 plus an attacker-authored ``.gitmodules`` is a token sent to a host of their
 naming. Submodules are also never fetched here, for the same reason.
+
+**The ssh binary is resolved here, not by a shell nobody configured.** The
+environment above has no ``PATH`` — that is the point of replacing it — so a
+``GIT_SSH_COMMAND`` of ``"ssh -o BatchMode=yes"`` is handed to a shell that
+falls back to a *compiled-in* default search path, and which ``ssh`` that finds
+is a property of how the shell was built. It is not academic: on macOS the
+fallback prefers ``/usr/local/bin`` over ``/usr/bin``, so a Homebrew OpenSSH
+shadows Apple's, and only Apple's implements ``UseKeychain`` — the same key, the
+same config, authenticates under one and fails ``Permission denied (publickey)``
+under the other. So the command names an absolute path, taken from the *caller's*
+``PATH`` so it is the same ``ssh`` the operator gets by typing it, and
+``ssh_path`` pins it outright for a deployment that needs a specific one.
 """
 
 from __future__ import annotations
@@ -52,6 +64,8 @@ import base64
 import contextlib
 import os
 import re
+import shlex
+import shutil
 import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -138,7 +152,28 @@ _SCP_REMOTE: Final = re.compile(r"^(?:[^/@:]+@)?[^/:]+:.+$")
 # contract, not an optional convenience: a control-plane operation either has a
 # non-interactive credential already available or it fails before expensive work
 # begins.
-_SSH_COMMAND: Final = "ssh -o BatchMode=yes"
+_SSH_OPTIONS: Final = "-o BatchMode=yes"
+
+
+def ssh_command(ssh_path: str | None = None, environ: Mapping[str, str] | None = None) -> str:
+    """The ``GIT_SSH_COMMAND`` for an authenticated remote operation.
+
+    Public because "which ssh binary does the control plane actually run" is a
+    question an operator has to be able to answer from the outside — see the
+    module docstring for the two implementations that disagree about
+    ``UseKeychain``.
+
+    Resolution order is the pin, then the caller's ``PATH``, then ``os.defpath``
+    — a fallback rather than a look at *this* process's environment, because a
+    caller that supplied an explicit ``environ`` has said what the lookup may
+    see. Bare ``ssh`` is returned only when no lookup finds one: the child may
+    still see a binary this process cannot, and refusing here would break a
+    working deployment over a lookup that is an improvement, not a requirement.
+    """
+    if ssh_path is None:
+        source = os.environ if environ is None else environ
+        ssh_path = shutil.which("ssh", path=source.get("PATH") or os.defpath)
+    return f"{shlex.quote(ssh_path)} {_SSH_OPTIONS}" if ssh_path else f"ssh {_SSH_OPTIONS}"
 
 
 class GitError(RuntimeError):
@@ -257,12 +292,14 @@ def authenticated(
     *,
     remote_url: str,
     environ: Mapping[str, str] | None = None,
+    ssh_path: str | None = None,
 ) -> Iterator[Mapping[str, str]]:
     """An environment that can push to ``remote_url``, for as long as the block.
 
-    An SSH remote gets batch-only OpenSSH and, when present, the caller's agent
-    socket. Other tokenless remotes get ``BASE_ENV`` unchanged. A token reaches
-    git through a file this writes and removes, never through argv or a URL.
+    An SSH remote gets batch-only OpenSSH — named by an absolute path, see
+    ``ssh_command`` — and, when present, the caller's agent socket. Other
+    tokenless remotes get ``BASE_ENV`` unchanged. A token reaches git through a
+    file this writes and removes, never through argv or a URL.
 
     The file is deleted on the way out even if the body raised. That matters more
     than it looks: the directory is under the system temp root, and a crash that
@@ -271,7 +308,7 @@ def authenticated(
     """
     if is_ssh_remote(remote_url):
         source = os.environ if environ is None else environ
-        env = {**BASE_ENV, "GIT_SSH_COMMAND": _SSH_COMMAND}
+        env = {**BASE_ENV, "GIT_SSH_COMMAND": ssh_command(ssh_path, source)}
         socket = source.get("SSH_AUTH_SOCK")
         if socket:
             # The socket is the credential channel, not a credential value. It

@@ -9,11 +9,16 @@ import pytest
 
 from clawdence.domain import CheckoutPolicy, RepoProfile
 from clawdence.ports.errors import PermanentError, TransientError
+from clawdence.ports.secrets import StaticSecrets
 from clawdence.vcs import LockTimeout, RepoStore, mirror_name
 from clawdence.vcs.git import GitError, git
 from tests.harness.forge import Forge
 from tests.ports.factories import run
 from tests.vcs.conftest import ProfileFactory
+
+#: The variable a deployment would name in ``forge_token_env``. A name, which is
+#: the whole point of the mechanism these tests are about.
+TOKEN_NAME = "GITHUB_TOKEN"  # noqa: S105 - the name of one, not one
 
 
 def config(mirror: Path, key: str) -> str | None:
@@ -187,3 +192,59 @@ def test_a_rejected_push_is_permanent(store: RepoStore, profile: RepoProfile) ->
     with pytest.raises(PermanentError) as caught:
         run(store.push(profile, mirror, "refs/heads/nothing:refs/heads/x"))
     assert caught.value.kind == "push-rejected"
+
+
+# ------------------------------------------------ what the refusal names
+
+
+def test_an_ssh_remote_is_never_blamed_on_the_token_variable(
+    store: RepoStore, profile_for: ProfileFactory
+) -> None:
+    """``authenticated`` branches on the URL *before* it looks at a token, so an
+    ssh remote never reads ``forge_token_env``. A refusal that named the variable
+    anyway sent the reader off to set a token nothing would have read — and left
+    the actual cause, a passphrase-protected key that is not in the agent,
+    unmentioned, which is the one thing ``BatchMode`` guarantees cannot be
+    prompted for."""
+    profile = profile_for(remote_url="git@github.com:acme/widget.git")
+    named = RepoStore(root=store.root, secrets=StaticSecrets({TOKEN_NAME: "ghp-x"}))
+    note = named.credential_note(profile)
+
+    assert "SSH identity" in note
+    assert "ssh-add -l" in note
+    assert TOKEN_NAME not in note
+
+
+def test_an_https_remote_names_the_variable_that_was_read(
+    store: RepoStore, profile_for: ProfileFactory
+) -> None:
+    profile = profile_for(remote_url="https://github.com/acme/widget.git")
+    resolved = RepoStore(
+        root=store.root,
+        secrets=StaticSecrets({TOKEN_NAME: "ghp-x"}),
+        token_name=TOKEN_NAME,
+    )
+    assert resolved.credential_note(profile) == f"{TOKEN_NAME} is what was offered"
+
+
+def test_a_configured_but_unresolvable_token_says_so_rather_than_claiming_it(
+    store: RepoStore, profile_for: ProfileFactory
+) -> None:
+    """A secret *name* is not a secret. Reporting the name as "what was offered"
+    when the provider had no value for it describes a request that never carried
+    a credential at all, which is a different fix."""
+    profile = profile_for(remote_url="https://github.com/acme/widget.git")
+    missing = RepoStore(root=store.root, secrets=StaticSecrets(), token_name=TOKEN_NAME)
+    note = missing.credential_note(profile)
+
+    assert note.startswith("nothing was offered")
+    assert TOKEN_NAME in note
+
+
+def test_no_configured_token_is_its_own_answer(
+    store: RepoStore, profile_for: ProfileFactory
+) -> None:
+    profile = profile_for(remote_url="https://github.com/acme/widget.git")
+    assert store.credential_note(profile) == (
+        "nothing was offered: this deployment configures no forge_token_env"
+    )

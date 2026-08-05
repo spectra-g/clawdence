@@ -42,9 +42,10 @@ def test_ssh_is_batch_only_and_inherits_only_the_agent_socket() -> None:
         TOKEN,
         remote_url="git@github.com:acme/widget.git",
         environ=caller,
+        ssh_path="/usr/bin/ssh",
     ) as env:
         assert env["SSH_AUTH_SOCK"] == caller["SSH_AUTH_SOCK"]
-        assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+        assert env["GIT_SSH_COMMAND"] == "/usr/bin/ssh -o BatchMode=yes"
         assert "GITHUB_TOKEN" not in env
         assert "AWS_SECRET_ACCESS_KEY" not in env
         assert env["GIT_CONFIG_GLOBAL"] == os.devnull
@@ -56,6 +57,44 @@ def test_ssh_without_a_loaded_agent_still_cannot_prompt() -> None:
     ) as env:
         assert "SSH_AUTH_SOCK" not in env
         assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+
+
+# ------------------------------------------------------- which ssh, exactly
+
+
+def test_the_ssh_binary_is_named_absolutely(tmp_path: Path) -> None:
+    """The environment handed to git has no ``PATH``, so a bare ``ssh`` is
+    resolved by a shell's compiled-in default — which on macOS prefers a Homebrew
+    OpenSSH over Apple's, and only Apple's implements ``UseKeychain``. Same key,
+    same config, two different answers."""
+    chosen = tmp_path / "bin" / "ssh"
+    chosen.parent.mkdir()
+    chosen.touch(mode=0o755)
+
+    with g.authenticated(
+        None,
+        remote_url="git@github.com:acme/widget.git",
+        environ={"PATH": str(chosen.parent)},
+    ) as env:
+        assert env["GIT_SSH_COMMAND"] == f"{chosen} -o BatchMode=yes"
+
+
+def test_a_pinned_ssh_wins_over_the_callers_path(tmp_path: Path) -> None:
+    """The escape hatch for a host whose ``PATH`` finds the wrong one."""
+    assert g.ssh_command("/usr/bin/ssh", {"PATH": str(tmp_path)}) == "/usr/bin/ssh -o BatchMode=yes"
+
+
+def test_a_path_with_a_space_survives_the_shell_git_runs_it_through() -> None:
+    """``GIT_SSH_COMMAND`` is a command line, not an argv, so an unquoted
+    ``/Applications/My Tools/ssh`` is two arguments and neither is a program."""
+    assert g.ssh_command("/opt/my tools/ssh") == "'/opt/my tools/ssh' -o BatchMode=yes"
+
+
+def test_an_unfindable_ssh_leaves_gits_own_behaviour_alone(tmp_path: Path) -> None:
+    """Nothing on the search path is not this function's failure to report: the
+    child may still see one, and refusing here would break a working deployment
+    over a lookup that was only ever advisory."""
+    assert g.ssh_command(None, {"PATH": str(tmp_path)}) == "ssh -o BatchMode=yes"
 
 
 def test_the_token_reaches_git_through_a_file_and_not_the_environment() -> None:

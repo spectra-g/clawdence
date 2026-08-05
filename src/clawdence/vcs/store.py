@@ -61,7 +61,7 @@ from clawdence.domain import RepoProfile
 from clawdence.ports.errors import PermanentError, TransientError
 from clawdence.ports.secrets import NullSecrets, Secret, SecretProvider
 from clawdence.vcs import refs
-from clawdence.vcs.git import GitError, authenticated, git
+from clawdence.vcs.git import GitError, authenticated, git, is_ssh_remote
 
 #: Environment variable naming the forge token, when the caller does not say.
 #: A *name*, resolved through the ``SecretProvider``, never a value.
@@ -124,6 +124,11 @@ class RepoStore:
 
     #: Pins the git executable. Defaults to a ``PATH`` lookup.
     git_path: str | None = None
+
+    #: Pins the ssh executable for remotes that use it. Defaults to the first on
+    #: the caller's ``PATH`` — see ``git.ssh_command``, which explains why this is
+    #: resolved at all rather than left to the shell git would otherwise use.
+    ssh_path: str | None = None
 
     #: The one caller environment value an SSH transport may inherit is
     #: ``SSH_AUTH_SOCK``. Injected for tests and deployments that do not use the
@@ -195,7 +200,9 @@ class RepoStore:
         try:
             await self.remote_git(profile, path, *argv)
         except (GitError, OSError) as exc:
-            raise remote_error(profile, "fetch", exc, token_name=self.token_name) from exc
+            raise remote_error(
+                profile, "fetch", exc, credential=self.credential_note(profile)
+            ) from exc
 
     async def resolve(self, profile: RepoProfile, ref: str) -> str:
         """A ref on the remote, as a full commit id.
@@ -227,7 +234,7 @@ class RepoStore:
                 profile,
                 "push",
                 exc,
-                token_name=self.token_name,
+                credential=self.credential_note(profile),
                 permanent_markers=(
                     "non-fast-forward",
                     "fetch first",
@@ -248,12 +255,48 @@ class RepoStore:
         any repository over ssh need no token, and demanding one would refuse a
         configuration that works."""
         with authenticated(
-            self._token(), remote_url=profile.remote_url, environ=self.environ
+            self._token(),
+            remote_url=profile.remote_url,
+            environ=self.environ,
+            ssh_path=self.ssh_path,
         ) as env:
             return await git(cwd, *args, path=self.git_path, env=env)
 
     def _token(self) -> Secret | None:
         return None if self.token_name is None else self.secrets.find(self.token_name)
+
+    def credential_note(self, profile: RepoProfile) -> str:
+        """What was actually offered to the forge for this repository, in words.
+
+        A rejection message that names the wrong credential sends the reader to
+        the wrong place, and the wrong place here costs an afternoon: an ssh
+        remote never consults ``forge_token_env``, so a message naming that
+        variable is an invitation to go and set a token that will not be read.
+        The three answers below are the three the transport can actually give,
+        and which one applies is decided by the same ``is_ssh_remote`` the
+        environment was built from rather than by re-guessing here.
+
+        The ssh answer says what to check, because the failure it explains has a
+        cause the message would otherwise hide: ``BatchMode`` cannot prompt, so a
+        passphrase-protected key that is not already in the agent produces the
+        forge's ``Permission denied (publickey)`` even though the key itself is
+        authorised.
+        """
+        if is_ssh_remote(profile.remote_url):
+            return (
+                "an ssh remote authenticates with the configured SSH identity and never with "
+                "a token, so forge_token_env is not involved; BatchMode is on, so a "
+                "passphrase-protected key has to be in the agent already — check `ssh-add -l`"
+            )
+        if self.token_name is None:
+            return "nothing was offered: this deployment configures no forge_token_env"
+        token = self._token()
+        if token is None:
+            return (
+                f"nothing was offered: forge_token_env names {self.token_name}, and the control "
+                f"plane's secret provider has no value for it"
+            )
+        return f"{self.token_name} is what was offered"
 
     # --------------------------------------------------------------- the lock
 
@@ -316,7 +359,7 @@ def remote_error(
     operation: str,
     exc: BaseException,
     *,
-    token_name: str | None,
+    credential: str,
     permanent_markers: tuple[str, ...] = (),
 ) -> PermanentError | TransientError:
     """Translate transport details at the adapter boundary.
@@ -325,14 +368,18 @@ def remote_error(
     unchanged. Disconnects, DNS failures and timeouts can. Keeping that decision
     here means callers receive ``PortError`` consistently and never have to
     interpret Git's prose or accidentally let ``GitError`` escape as a traceback.
+
+    ``credential`` is ``RepoStore.credential_note``'s sentence — passed in rather
+    than derived here, because what was offered is the store's own knowledge (a
+    secret name is not a resolved secret) and a second guess at it is how the
+    message came to name a token no ssh remote had ever asked for.
     """
     text = str(exc)
     lowered = text.lower()
     if any(marker in lowered for marker in _AUTH_DENIED):
         return PermanentError(
             f"{operation}-denied",
-            f"the forge refused the credential for {profile.id}; "
-            f"{token_name or 'the configured SSH identity'} is what was offered",
+            f"the forge refused the credential for {profile.id}; {credential}",
         )
     if any(marker in lowered for marker in permanent_markers):
         return PermanentError(

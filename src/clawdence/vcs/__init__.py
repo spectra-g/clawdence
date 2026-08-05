@@ -63,6 +63,7 @@ from clawdence.vcs.git import (
     GitIdentity,
     authenticated,
     origin_of,
+    ssh_command,
     with_identity,
 )
 from clawdence.vcs.hygiene import (
@@ -152,5 +153,6 @@ __all__ = [
     "render_body",
     "repo_slug",
     "slugify",
+    "ssh_command",
     "with_identity",
 ]
